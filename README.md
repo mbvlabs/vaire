@@ -6,7 +6,7 @@ One CLI that turns a fresh VPS into a hardened PostgreSQL 18 server, and then st
 
 From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubuntu 26.04 server, locks it down, installs PostgreSQL 18 with PgBouncer and nginx, issues its TLS certificate, and connects you to it over WireGuard. Each database you create gets its own tuned PostgreSQL cluster with a size and resource limits, the way a managed provider gives each database its own instance. Every later operation goes through the same binary, over SSH, inside WireGuard. There is no server control daemon, web UI or open control API port; an operator-side shared tunnel daemon keeps concurrent CLI commands on one WireGuard connection per workspace.
 
-> **Extensions status (2026-11-16):** implemented on `master`, with relevant packages passing uncached tests. Historical final reviews blocked; later fixes have regression coverage but fresh whole-change acceptance, full final checks and extension live qualification remain to be established. See the [finishing checklist](specs/extensions-finish.md), [roadmap](docs/MASTER.md#7-roadmap-and-status), [manual evidence](docs/MANUAL-TESTING.md) and [draft beta notes](docs/RELEASE-v1.0.0-beta.1.md). Phases 0–5 have historical live qualification evidence; publication, deployment and qualification are separate milestones. Multi-node remains future work. Alpha formats are not frozen; a later alpha may require a rebuild and restore.
+> **Beta:** Use a fresh server. Multi-node management and in-place extension removal are not supported.
 
 ## What works today
 
@@ -19,30 +19,55 @@ From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubun
 | Protection | `vaire protect init\|status` (two-factor code), `vaire db protect\|unprotect` |
 | SQL | `vaire sql` (multiple statements and ordered results, JSON-friendly), `vaire psql`, `vaire console` (usql) |
 | Tuning | `vaire tune show\|explain\|apply` |
-| Backups | `vaire backup setup\|now\|list\|verify`, `vaire dump`, `vaire dump list\|get` |
-| Restores | `vaire restore <db>` (`--time`, `--latest`, `--set`, `--dump`), `vaire restore status\|promote\|undo\|abort\|cleanup\|drill` |
+| Backups | `vaire backup setup\|now\|list\|verify` (physical backups and WAL) |
+| Restores | `vaire restore <db>` (`--time`, `--latest`, `--set`), `vaire restore status\|promote\|undo\|abort\|cleanup\|drill` |
 | Disaster recovery | `vaire server backup now\|list\|verify\|export` (the master bundle), `vaire server init --restore`, `vaire db recover <db>\|--all` |
 | Jobs | `vaire job list\|follow` |
 | Health | `vaire status [--watch]`, `vaire doctor [--only security]`, `vaire top`, `vaire queries` |
 | Evidence | `vaire activity list\|show\|health`, `vaire diagnostics collect\|inspect` (local metadata-only history and portable incident files) |
 | Metrics | `vaire metrics show\|rotate`: an authenticated `https://db1.<domain>/metrics/...` for Prometheus or Grafana Alloy, with a `targets.json` for service discovery |
-| Extensions | `vaire ext list\|add\|remove` (built-in and explicit custom definitions; APT or preinstalled) |
+| Extensions | `vaire ext list\|add` (built-in and explicit custom definitions; APT or preinstalled) |
 | Maintenance | `vaire maint vacuum\|analyze\|reindex\|repack\|report\|kill` (including one-table `--exact`), nightly and weekly maintenance timers |
 | Operations | `vaire logs`, `vaire secrets export`, `vaire upgrade` |
 | Agents | `vaire commands --json`, `vaire guide agents`, `vaire skill install` |
 
-Unimplemented later-phase commands are already in the tree and return `not implemented yet`; the extension and maintenance commands above are implemented locally but not yet finally reviewed, published or live-qualified.
+`vaire activity list|show|health` and `vaire diagnostics collect|inspect` provide local, metadata-only operation history and portable incident evidence. No logging database, external collector or raw-log export is required.
 
-**New in this checkout, awaiting live qualification:** `vaire activity list|show|health` and `vaire diagnostics collect|inspect` provide local, metadata-only operation history and portable incident evidence. No logging database, external collector or raw-log export is required. See [activity and diagnostics](docs/ACTIVITY.md).
+**External copy:** `vaire db copy` imports a trusted external PostgreSQL snapshot into a new database. For unattended use, pass the source connection URL via `--source-url-stdin` and confirm the new database name with `--confirm`. The destination server must be able to reach the source. Source roles and settings are not imported; no existing database is overwritten.
 
-**External copy in this checkout, awaiting live qualification:** `vaire db copy` imports a trusted external PostgreSQL snapshot into a new ordinary vaire database. It prompts for masked connection details and sizing; unattended input uses `--source-url-stdin`, never a password-bearing argument, and requires `--confirm` with the new name. Export runs on the destination node, so that server must reach the source. Default TLS verifies identity; custom source CA content can be supplied with `--source-ca-file`. No existing target is overwritten or resumed, source roles/settings are not imported, and a failed target is retained. Save the one-time credentials even after detach or uncertain startup; job history cannot recover them. See [copy behavior](docs/IMPLEMENTATION.md#external-postgresql-database-copy), [review status](docs/REVIEW-external-database-copy.md) and [qualification cases](docs/RUN-external-database-copy.md).
+## Install
+
+Official installers verify signed releases with cosign. Choose one channel:
+
+```sh
+# Edge: rolling master builds and tagged alpha/beta releases
+curl -fsSL https://vaire.mbvlabs.com/edge/install.sh | bash
+
+# Release candidates only — available once the first RC is published
+curl -fsSL https://vaire.mbvlabs.com/rc/install.sh | bash
+
+# Final releases only — available once the first final release is published
+curl -fsSL https://vaire.mbvlabs.com/install.sh | bash
+
+# Final releases on the 1.x line only
+curl -fsSL https://vaire.mbvlabs.com/1.x/install.sh | bash
+```
+
+To install `beta.1` even after the rolling edge channel advances, use its
+versioned installer:
+
+```sh
+curl -fsSL https://vaire.mbvlabs.com/releases/1.0.0-beta.1/install.sh | bash
+```
+
+The corresponding upgrade channels are `edge`, `rc`, `stable`, and `stable-1.x`.
+Use `vaire upgrade --channel edge --version 1.0.0-beta.1 --skip-nodes` to install
+that exact version of the CLI without upgrading any nodes. An upgrade without
+`--version` follows the selected channel.
 
 ## Quick start
 
 ```sh
-# On your laptop: install the CLI (signed release, verified with cosign)
-curl -fsSL https://vaire.mbvlabs.com/edge/install.sh | bash
-
 # Bootstrap a fresh server (provider root key or password for first contact)
 vaire server init --host root@203.0.113.10
 
@@ -57,6 +82,9 @@ vaire console app --write        # run DDL as the database owner
 ```
 
 On another machine, `vaire login` and paste the transfer bundle from the handoff.
+Fresh setups generate a `machine-<id>` registration. Importing the same bundle
+on another computer shares that registration and its keys; it does not enroll a
+new machine.
 
 ### Workspaces and nodes
 
@@ -279,19 +307,17 @@ Protecting a database is refused until `vaire protect init` has run. A code work
 │   └─ vaire-backup-*@<db> timers ───────────┼──────────▶│   full · diff · incr sets, WAL       │
 │        Sun full, Mon–Sat diff, staggered │           │   (aes-256-cbc, zstd)                │
 │        Wed verify, monthly drill         │           │                                      │
-│   └─ scheduled per-database dumps ───────┼──────────▶│ <prefix>/dumps/<db>/  (age-encrypted)│
 └──────────────────────────────────────────┘           └──────────────────────────────────────┘
 ```
 
 - **A stanza per database.** Each database's cluster has its own WAL stream, so backups, point-in-time recovery, retention and verification are all per database, in one repository with one cipher. Everything names a database: `backup list --db`, `backup now --db`, `restore <db>`, `db fork <db>`.
 - **Restore window.** A database can be rewound to any second between just after its oldest backup and its last archived WAL, which is at most about a minute old. The backup sets only make restores faster; the WAL fills the gaps between them. `retention_full` is the window in weeks (default 4, and a database can have its own with `clusters.<db>.backup.retention_full`). Retention is time-based, so extra full backups never shorten it.
-- **`vaire backup setup`** probes the bucket from your machine, generates the repository cipher (the age key for dumps already exists from `server init`), switches every database's WAL archiving on with a reload (no restart), and takes a first full backup of each. The bucket keys, cipher and age identity form the **recovery kit**, which goes into the secrets handoff: run `vaire secrets export` afterwards. Backups are optional during `server init`; until a bucket exists, `server init` and every `apply` warn `no_offsite_backup`.
-- **Staggered.** Each database's timers run at their own offset inside the maintenance window, and only one full, diff, verify, drill or dump runs at a time on a server.
+- **`vaire backup setup`** probes the bucket from your machine, generates the repository cipher, switches every database's WAL archiving on with a reload (no restart), and takes a first full backup of each. Refresh your secrets handoff afterwards with `vaire secrets export`. Backups are optional during `server init`; until a bucket exists, `server init` and every `apply` warn `no_offsite_backup`.
+- **Staggered.** Each database's timers run at their own offset inside the maintenance window.
 - **Dropped databases stay restorable for their window.** `db drop` keeps the stanza; `vaire backup list` shows it until a daily timer deletes it once the window has passed.
 - **Restoring one database doesn't touch the others.** A restore builds a new cluster from the database's stanza beside the live one, you check it, and only `promote` swaps it in. It needs free space for one copy of the database.
 - **`vaire db follow <db> [--name <new>] [--size <size>]`** makes a read-only physical standby of one database on the same server, copied from the source's stanza (or with `pg_basebackup` when it has none) and streaming through a replication slot capped by `max_slot_wal_keep_size`. Clients read it at the node's host with the follower's name in the path (`db1.<domain>:6432/<new>`) as the source's `_ro` or `_app` role; writes fail. `vaire db unfollow <new> --confirm <new>/unfollow` promotes it into an independent database with its own roles (new passwords, printed once), its own stanza and a first full backup, for a migration rehearsal; the source is not touched. A follower and an unfollowed copy do not inherit the source's protection: protect the copy with `vaire db protect` if it needs it.
 - **`vaire db fork <db> [--name <new>] [--at <time>]`** makes a separate database: a physical copy of the source (from its stanza at a point in time, or from the live cluster), renamed, with its own roles and new passwords, the source's size and settings (`90-overrides.conf` included), its own stanza and a first full backup. It works without backups when there's no `--at`.
-- **Long-retention dumps.** A database that must be kept longer than the window gets scheduled `pg_dump` archives (`clusters.<db>.backup.dump_schedule` and `dump_retention`), encrypted with age and streamed to the bucket. `vaire dump get` decrypts one, `vaire restore <db> --dump <id>` loads it, and `vaire db drop` takes a final dump first.
 - **Long work runs as detachable jobs.** Backups, verify, restores, drills and forks run as systemd units on the node. Ctrl-C detaches, and `vaire job list` / `vaire job follow <id>` re-attach.
 - **Checked, not assumed.** `vaire backup verify` checks every file of a database's stanza against its checksum, weekly by default. The monthly `vaire restore drill` restores each database into a throwaway cluster, runs `pg_amcheck` on it and compares it with the live one; each database's drill falls on its own day of the month. Both results show in `vaire backup list`.
 
@@ -299,7 +325,7 @@ Protecting a database is refused until `vaire protect init` has run. A code work
 
 The example rewinds `app` to just before a bad `DELETE` at 14:03 UTC. Every confirm token is `<db>/restore`, except cleanup's, which is `<db>/cleanup`.
 
-1. **Pick the target.** All times are UTC. `vaire backup list --db app` shows the restore window: any second between its start and the last archived WAL can be restored. Use `--time` for a point in time (RFC 3339, or relative like `-15m`), `--latest` for the newest WAL, `--set <label>` for one backup set, or `--dump <id>` (from `vaire dump list`) for a point older than the window.
+1. **Pick the target.** All times are UTC. `vaire backup list --db app` shows the restore window. Use `--time` for a point in time (RFC 3339, or relative like `-15m`), `--latest` for the newest WAL, or `--set <label>` for one backup set.
 
    ```sh
    vaire backup list --db app
@@ -338,11 +364,9 @@ The example rewinds `app` to just before a bad `DELETE` at 14:03 UTC. Every conf
 
 `vaire restore app --time … --promote --confirm app/restore` does steps 2 and 4 in one go, skipping the check. Use it only when you're sure of the target. When only some rows are needed, `vaire db fork app --name app_restored --at <time>` gives you a separate database at that point instead, without touching the live one.
 
-A restore from a dump (`--dump <id>`) builds the copy from the dump instead, with the database's roles and passwords. On promote the database gets a new stanza, because its data has a new system identity; the old stanza stays in `backup list` as dropped for the rest of its window.
-
 ## Extensions and maintenance
 
-`vaire ext` manages PostgreSQL extensions per database. The built-in catalogue is a convenience, not an allowlist: a custom `[extensions.<name>]` definition can select any compatible PostgreSQL 18 extension from an explicit APT package in an already configured trusted repository, or from files the operator preinstalled. vaire does not add extension-specific repositories or keys, build from source, upgrade packages automatically or uninstall them on removal. Native extensions are trusted server code, not a sandbox.
+`vaire ext` lists and adds PostgreSQL extensions per database. A custom `[extensions.<name>]` definition can name a compatible PostgreSQL 18 extension from a trusted APT repository or from preinstalled files. Native extensions are trusted server code, not sandboxed. Removing a selected extension or deleting a database declaration through configuration editing is refused. To delete the database itself, use `vaire db drop`.
 
 ```sh
 vaire ext list [--db app]
@@ -352,12 +376,11 @@ vaire ext add pg_stat_kcache --db app \
   --package postgresql-18-pg-stat-kcache --preload pg_stat_kcache \
   --setting pg_stat_kcache.track=all --copy-safety safe --standby-safe \
   --confirm app/restart
-vaire ext remove vector --db app --confirm app
 ```
 
-The package install is server-wide and held; a preload change restarts only the named database's cluster, with its exact `--confirm <db>/restart` token. A source with followers requires every affected cluster's token, configures followers first and runs SQL only on the primary; a direct change on a follower is refused. A protected database may take an addition without weakening its access policy, but its removal is refused. A custom extension whose copy/standby safety is unknown still works on a standalone primary; copies, followers and historical restores refuse it until the operator declares `safe` or `disabled` with suppressing settings.
+The package install is server-wide and held; a preload change requires the exact `--confirm <db>/restart` token. A source with followers requires every affected cluster's token, configures followers first and runs SQL only on the primary; a direct change on a follower is refused. A protected database may take an addition without weakening its access policy. A custom extension whose copy/standby safety is unknown still works on a standalone primary; copies, followers and historical restores refuse it until the operator declares `safe` or `disabled` with suppressing settings.
 
-Backups retain the resolved extension requirements they observed, bound to the immutable stanza. Restore points older than that coverage need an explicit `recovery_extensions` declaration: absent means unknown, `[]` asserts none, and a populated list names the complete requirement. Descriptor details and examples are in [extension definitions](docs/EXTENSION-DEFINITIONS.md).
+Backups retain the resolved extension requirements they observed, bound to the immutable stanza. Restore points older than that coverage need an explicit `recovery_extensions` declaration: absent means unknown, `[]` asserts none, and a populated list names the complete requirement.
 
 For bloat, `vaire maint repack` rewrites one eligible table online with `pg_repack`, and opt-in `auto_repack` does so for estimated candidates at or above 64 MiB. Repack refuses protected databases and unsupported storage, never kills another backend, and reports a table whose rewrite completion cannot be attributed as `unknown`, not as repacked. `vaire maint report bloat --db app --table events --exact` measures one table with the full `pgstattuple` scan under the report's read lock and timeouts; it is not an instantaneous or reclaimable-space guarantee, and default reports remain estimates.
 
@@ -408,8 +431,8 @@ No ACME client (certbot and the like) is installed: vaire issues certificates it
 | `golang.zx2c4.com/wireguard` (wireguard-go + netstack) | The userspace WireGuard tunnel |
 | `golang.org/x/crypto/acme` | Issuing and renewing certificates on the node |
 | `jackc/pgx` | SQL over the tunnel (`vaire sql`, `db`, `tune`) |
-| `filippo.io/age` | The encrypted transfer bundle and long-retention dumps |
-| `minio/minio-go` | Bucket probe on `backup setup`, and streaming dumps to and from the bucket |
+| `filippo.io/age` | Encrypted transfer and master bundles |
+| `minio/minio-go` | S3-compatible bucket access |
 | `sigstore/sigstore-go` | Verifying signed releases on upgrade |
 | `pelletier/go-toml` | `cluster.toml` |
 | `itchyny/gojq` | `--jq` output filtering |
@@ -424,16 +447,8 @@ Operational commands support non-interactive structured JSON (`--output json`), 
 ```sh
 just build   # bin/vaire
 go test ./... # unit and regression tests; no local server harness
-just lint    # golangci-lint, metadata and step checks, shellcheck, actionlint
+just lint    # go fix checks and golangci-lint
 ```
-
-## Docs
-
-- [docs/MASTER.md](docs/MASTER.md): goal, decisions, architecture, roadmap and current status.
-- [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md): the detailed spec for each phase.
-- [docs/RFC-cluster-per-database.md](docs/RFC-cluster-per-database.md): why each database is its own cluster, and how that shapes every phase.
-- [docs/MANUAL-TESTING.md](docs/MANUAL-TESTING.md): live evidence, historical failures and remaining coverage limits.
-- [docs/README.md](docs/README.md): document index, including release preparation and archived work records.
 
 ## License
 
