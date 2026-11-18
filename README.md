@@ -37,7 +37,31 @@ From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubun
 
 ## Install
 
-Official installers verify signed releases with cosign. Choose one channel:
+Official installers verify signed releases with cosign. Use a **versioned URL**
+to install one exact release, or a **channel URL** to install whatever that
+channel points to today.
+
+### Install an exact version
+
+Use `https://vaire.mbvlabs.com/releases/<version>/install.sh`, replacing
+`<version>` with a published version **without** the leading `v`. For example,
+this always installs `1.0.0-beta.1`, even after `edge` moves on:
+
+```sh
+curl -fsSL https://vaire.mbvlabs.com/releases/1.0.0-beta.1/install.sh | bash
+```
+
+Already have vaire? To install that exact CLI version without upgrading any nodes:
+
+```sh
+vaire upgrade --channel edge --version 1.0.0-beta.1 --skip-nodes
+```
+
+**This pins one install, not future upgrades.** To keep choosing an exact
+version, use the versioned URL or pass `--version` each time. Without
+`--version`, `vaire upgrade` follows the selected channel.
+
+### Install from a channel
 
 ```sh
 # Edge: rolling master builds and tagged alpha/beta releases
@@ -53,17 +77,8 @@ curl -fsSL https://vaire.mbvlabs.com/install.sh | bash
 curl -fsSL https://vaire.mbvlabs.com/1.x/install.sh | bash
 ```
 
-To install `beta.1` even after the rolling edge channel advances, use its
-versioned installer:
-
-```sh
-curl -fsSL https://vaire.mbvlabs.com/releases/1.0.0-beta.1/install.sh | bash
-```
-
-The corresponding upgrade channels are `edge`, `rc`, `stable`, and `stable-1.x`.
-Use `vaire upgrade --channel edge --version 1.0.0-beta.1 --skip-nodes` to install
-that exact version of the CLI without upgrading any nodes. An upgrade without
-`--version` follows the selected channel.
+The corresponding `vaire upgrade --channel` values are `edge`, `rc`, `stable`,
+and `stable-1.x`.
 
 ## Quick start
 
