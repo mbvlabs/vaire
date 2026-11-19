@@ -72,7 +72,7 @@ func TestPgbouncerApplyRefusesRestoreAbortWithRestoreRecord(t *testing.T) {
 
 	t.Cleanup(func() { writePoolerFile = oldWrite })
 
-	_, err := (pgbouncer{}).Apply(context.Background(), cfg, engine.Runtime{Shell: engine.Shell{DryRun: true}}, nil)
+	_, err := (pgbouncer{}).applyGuarded(context.Background(), cfg, engine.Runtime{Shell: engine.Shell{DryRun: true}}, nil)
 	if err == nil || refusalReason(err) != "routing_eligibility" || !strings.Contains(err.Error(), "still has a restore record") {
 		t.Fatalf("pgbouncer apply accepted a restore-abort continuation with a restore record: %v", err)
 	}

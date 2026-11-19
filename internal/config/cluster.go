@@ -144,7 +144,8 @@ type Postgres struct {
 // Network is [network].
 type Network struct {
 	// ClientAllowlist grants public access to both poolers, not database privileges.
-	ClientAllowlist []string `toml:"client_allowlist"`
+	ClientAllowlist []string       `toml:"client_allowlist"`
+	RoleAllowlist   *RoleAllowlist `toml:"role_allowlist,omitempty"`
 }
 
 // MasterBackup is [master_backup] (RFC 6.5): the retention of the master's
@@ -621,6 +622,8 @@ func (c Cluster) validateExposure(add func(string, ...any)) {
 			add("network.client_allowlist entry %q %v", cidr, err)
 		}
 	}
+
+	c.Network.validateRoleAllowlist(add)
 
 	for _, cidr := range c.Metrics.Allowlist {
 		if err := CheckAllowlistEntry(cidr); err != nil {

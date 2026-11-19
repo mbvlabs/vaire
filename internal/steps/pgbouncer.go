@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/masterbackup"
 	"github.com/mbvlabs/vaire/internal/render"
 	"github.com/mbvlabs/vaire/internal/secrets"
+	"github.com/mbvlabs/vaire/internal/state"
 )
 
 const pgbouncerID = "pgbouncer-v1"
@@ -237,16 +239,56 @@ func pgbouncerFiles(cfg config.Cluster, rt engine.Runtime) ([]pgbouncerFile, err
 		return nil, err
 	}
 
-	return pgbouncerFilesFrom(cfg, rt, recs), nil
+	operators, err := poolerOperators(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return pgbouncerFilesFrom(cfg, rt, recs, operators), nil
+}
+
+var loadPoolerOperators = func() (config.Operators, error) {
+	return config.LoadOperators(config.OperatorsPath)
+}
+
+func poolerOperators(cfg config.Cluster) ([]string, error) {
+	ops, err := loadPoolerOperators()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(ops.Operators) == 0 {
+		return nil, nil
+	}
+
+	subnet, err := netip.ParsePrefix(cfg.Transport.Subnet)
+	if err != nil || !subnet.Addr().Is4() {
+		return nil, fmt.Errorf("invalid IPv4 WireGuard subnet for operator peers")
+	}
+
+	addresses := make([]string, 0, len(ops.Operators))
+	for _, op := range ops.Operators {
+		addr, err := netip.ParseAddr(op.WGAddress)
+		if err != nil || !addr.Is4() || !subnet.Contains(addr) {
+			return nil, fmt.Errorf("operator %q has an invalid IPv4 WireGuard address", op.Name)
+		}
+
+		addresses = append(addresses, addr.String())
+	}
+
+	return addresses, nil
 }
 
 // pgbouncerFilesFrom renders both poolers from one records snapshot.
-func pgbouncerFilesFrom(cfg config.Cluster, rt engine.Runtime, recs backup.Records) []pgbouncerFile {
+func pgbouncerFilesFrom(cfg config.Cluster, rt engine.Runtime, recs backup.Records, operators []string) []pgbouncerFile {
+	transactionDBs := poolerDatabases(cfg, recs, false)
+	sessionDBs := poolerDatabases(cfg, recs, true)
+
 	return []pgbouncerFile{
-		{poolerFilePaths.ini, pgbouncerIni(cfg, rt, poolerDatabases(cfg, recs, false)), pgFileOwner, pgFileGroup, 0o640},
-		{poolerFilePaths.hba, string(render.PgbouncerHBA()), pgFileOwner, pgFileGroup, 0o640},
-		{poolerFilePaths.sessionIni, string(render.SessionIni(cfg, poolerDatabases(cfg, recs, true), SessionSocketDir)), pgFileOwner, pgFileGroup, 0o640},
-		{poolerFilePaths.sessionHBA, string(render.SessionHBA()), pgFileOwner, pgFileGroup, 0o640},
+		{poolerFilePaths.ini, pgbouncerIni(cfg, rt, transactionDBs), pgFileOwner, pgFileGroup, 0o640},
+		{poolerFilePaths.hba, string(render.PgbouncerHBA(cfg, transactionDBs, operators)), pgFileOwner, pgFileGroup, 0o640},
+		{poolerFilePaths.sessionIni, string(render.SessionIni(cfg, sessionDBs, SessionSocketDir)), pgFileOwner, pgFileGroup, 0o640},
+		{poolerFilePaths.sessionHBA, string(render.SessionHBA(cfg, sessionDBs, operators)), pgFileOwner, pgFileGroup, 0o640},
 		{poolerFilePaths.sessionUnit, string(render.SessionUnit()), "", "", 0o644},
 	}
 }
@@ -327,6 +369,20 @@ func (pgbouncer) Check(ctx context.Context, cfg config.Cluster, rt engine.Runtim
 }
 
 func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
+	var result engine.ApplyResult
+
+	err := poolerExposure(cfg, func() error {
+		var err error
+
+		result, err = s.applyGuarded(ctx, cfg, rt, report)
+
+		return err
+	})
+
+	return result, err
+}
+
+func (s pgbouncer) applyGuarded(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
 	files, err := pgbouncerFiles(cfg, rt)
 	if err != nil {
 		return engine.ApplyResult{}, err
@@ -353,6 +409,8 @@ func (s pgbouncer) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }
+
+var poolerExposure = (state.FileStore{}).WithExposure
 
 // writePoolerFiles writes both poolers' rendered configuration. None of them
 // contains a secret.
@@ -558,6 +616,12 @@ func routingFenceRegistrationGap(db string, f backup.ActivationFence) string {
 // overwritten or a service is reloaded, so a retry never re-exposes an alias it
 // cannot prove is safe.
 func ApplyPoolerFence(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) error {
+	return poolerExposure(cfg, func() error {
+		return applyPoolerFenceGuarded(ctx, cfg, rt, report)
+	})
+}
+
+func applyPoolerFenceGuarded(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) error {
 	recs, err := poolerRecords()
 	if err != nil {
 		return err
@@ -567,7 +631,12 @@ func ApplyPoolerFence(ctx context.Context, cfg config.Cluster, rt engine.Runtime
 		return err
 	}
 
-	files := pgbouncerFilesFrom(cfg.RoutingView(recs.IsAwaiting, ""), rt, recs)
+	operators, err := poolerOperators(cfg)
+	if err != nil {
+		return err
+	}
+
+	files := pgbouncerFilesFrom(cfg.RoutingView(recs.IsAwaiting, ""), rt, recs, operators)
 	if err := writePoolerFiles(files); err != nil {
 		return err
 	}
@@ -583,6 +652,12 @@ func ApplyPoolerFence(ctx context.Context, cfg config.Cluster, rt engine.Runtime
 // ready-but-unpromoted restore and every unsettled unfollow stays withheld.
 // The records snapshot is read-only; a failure changes no durable transition.
 func PublishFollowerRoutes(ctx context.Context, cfg config.Cluster, rt engine.Runtime, target string, report engine.Reporter) error {
+	return poolerExposure(cfg, func() error {
+		return publishFollowerRoutesGuarded(ctx, cfg, rt, target, report)
+	})
+}
+
+func publishFollowerRoutesGuarded(ctx context.Context, cfg config.Cluster, rt engine.Runtime, target string, report engine.Reporter) error {
 	recs, err := poolerRecords()
 	if err != nil {
 		return err
@@ -618,7 +693,12 @@ func PublishFollowerRoutes(ctx context.Context, cfg config.Cluster, rt engine.Ru
 		return err
 	}
 
-	files := pgbouncerFilesFrom(view, rt, recs)
+	operators, err := poolerOperators(cfg)
+	if err != nil {
+		return err
+	}
+
+	files := pgbouncerFilesFrom(view, rt, recs, operators)
 	if err := writePoolerFiles(files); err != nil {
 		return err
 	}

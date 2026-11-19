@@ -404,7 +404,7 @@ func TestPoolerRenderWithholdsActivationAliasUntilRouting(t *testing.T) {
 		"app": {OperationID: "op", Kind: "restore-promote", Phase: "promoted"},
 	}}
 
-	files := pgbouncerFilesFrom(cfg, engine.Runtime{}, recs)
+	files := pgbouncerFilesFrom(cfg, engine.Runtime{}, recs, nil)
 	for _, f := range files {
 		if f.path == poolerFilePaths.ini || f.path == poolerFilePaths.sessionIni {
 			if strings.Contains(f.content, "app = host=") {
@@ -414,7 +414,7 @@ func TestPoolerRenderWithholdsActivationAliasUntilRouting(t *testing.T) {
 	}
 
 	recs.Activation["app"] = backup.ActivationFence{OperationID: "op", Kind: "restore-promote", Phase: "routing"}
-	files = pgbouncerFilesFrom(cfg, engine.Runtime{}, recs)
+	files = pgbouncerFilesFrom(cfg, engine.Runtime{}, recs, nil)
 	seen := 0
 
 	for _, f := range files {
@@ -440,7 +440,7 @@ func TestPoolerRenderWithdrawsRestoreInspectionAlias(t *testing.T) {
 		},
 	}
 
-	files := pgbouncerFilesFrom(cfg, engine.Runtime{}, recs)
+	files := pgbouncerFilesFrom(cfg, engine.Runtime{}, recs, nil)
 	for _, f := range files {
 		if strings.Contains(f.content, "app__restoring") {
 			t.Fatalf("%s kept the restore-inspection alias during promotion: %s", f.path, f.content)
@@ -529,7 +529,7 @@ func TestPoolerRoutingEligibilityIsProvenBeforeRender(t *testing.T) {
 
 	t.Cleanup(func() { writePoolerFile = oldWrite })
 
-	if err := ApplyPoolerFence(context.Background(), cfg, engine.Runtime{}, nil); err == nil {
+	if err := applyPoolerFenceGuarded(context.Background(), cfg, engine.Runtime{}, nil); err == nil {
 		t.Fatal("ApplyPoolerFence accepted a stale routing checkpoint")
 	}
 

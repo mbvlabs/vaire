@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Step 10 (tls-v1). PHASE=install: refuse a Caddy box, install nginx with the
-# stream module, give postgres and pgbouncer the ssl-cert group, and place a
+# Step 10 (tls-v1). PHASE=install: refuse a Caddy box, install nginx,
+# give postgres and pgbouncer the ssl-cert group, and place a
 # placeholder certificate so PostgreSQL, PgBouncer and nginx can start.
 # PHASE=start (after vaire wrote nginx.conf and vaire-certs.service): validate and
 # (re)start nginx and start issuance in the background. TLS never blocks on
@@ -23,13 +23,13 @@ if [ "${PHASE}" = "install" ]; then
   fi
 
   DEBIAN_FRONTEND=noninteractive apt-get -o dpkg::lock::timeout=300 install -y --no-install-recommends \
-    nginx libnginx-mod-stream ssl-cert
+    nginx ssl-cert
   version="$(dpkg-query -W -f='${Version}' nginx)"
   if ! dpkg --compare-versions "${version}" ge "${NGINX_MIN_VERSION}"; then
     printf 'nginx %s is older than %s\n' "${version}" "${NGINX_MIN_VERSION}" >&2
     exit 1
   fi
-  apt-mark hold nginx libnginx-mod-stream >/dev/null
+  apt-mark hold nginx >/dev/null
   # vaire's nginx.conf defines every server; the distribution's default site
   # would also listen on 80.
   rm -f /etc/nginx/sites-enabled/default

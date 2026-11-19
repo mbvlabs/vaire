@@ -1223,7 +1223,6 @@ func (r *initRun) finish(res initResult, message string, next []string, title st
 	rows := [][2]string{
 		{"Node", fmt.Sprintf("%s  %s  (WireGuard %s)", n.Name, n.PublicAddress, n.WGAddress)},
 		{"PgBouncer", r.cfg.MasterHostname() + ":6432"},
-		{"Direct TLS", r.cfg.MasterHostname() + ":443  (sslnegotiation=direct)"},
 		{"TLS", r.tlsSummary()},
 		{"Secrets", "in your password manager (transfer bundle: vaire login on another machine)"},
 		{"Databases", "none yet: create one with vaire db create <name>, or point your agent to the CLI (vaire guide agents)"},

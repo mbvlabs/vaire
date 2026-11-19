@@ -166,15 +166,11 @@ func TestMetricsFilesKeepSecretsOut(t *testing.T) {
 	}
 }
 
-func TestNginxConfProxyProtocol(t *testing.T) {
+func TestNginxConfMetricsHTTPS(t *testing.T) {
 	conf := string(render.NginxConf(metricsCluster("app"), "db1.example.com", ACMEWebroot))
 	for _, want := range []string{
-		"proxy_protocol on;",
-		"listen 127.0.0.1:6433 ssl proxy_protocol;",
-		"listen 127.0.0.1:6434 ssl proxy_protocol;",
-		"listen 127.0.0.1:6435 proxy_protocol;",
-		"listen 127.0.0.1:8443 ssl proxy_protocol default_server;",
-		"real_ip_header proxy_protocol;",
+		"listen 443 ssl default_server;",
+		"listen [::]:443 ssl default_server;",
 		"include /etc/nginx/vaire-metrics*.conf;",
 		"limit_req_zone $binary_remote_addr zone=vaire_metrics",
 	} {

@@ -124,7 +124,7 @@ the VPS has working public IPv6. Set both to **DNS only** (gray cloud), not
 **Proxied** (orange cloud).
 
 Use one hostname per VPS, not one per database. PostgreSQL clients connect
-directly to the VPS, including when they use PostgreSQL over port 443.
+directly to the VPS.
 Vaire obtains and renews the certificate itself using ACME HTTP-01 on port 80;
 you don't need a Cloudflare DNS API token or a Cloudflare Origin Certificate.
 
@@ -197,8 +197,7 @@ Every database is its own PostgreSQL cluster: `vaire db create app` makes the cl
 ```
  db1.<domain>
 ┌──────────────────────────────────────────────────────────────────────┐
-│ :443 nginx (ALPN postgresql) ─┐                                      │
-│ :6432 transaction pooler ◀────┘   routes by database name            │
+│ :6432 transaction pooler          routes by database name            │
 │ :5432 session pooler              routes by database name            │
 │        │                                                             │
 │        ├─ app      → postgresql@18-app      large   socket .s.PGSQL.5433
@@ -221,7 +220,6 @@ Every server (node) has one hostname, `<node>.<domain>`; the first one is `db1.<
 
 ```
 postgres://app_app:…@db1.example.com:6432/app?sslmode=verify-full&sslrootcert=system       app, transaction pooler
-postgres://app_app:…@db1.example.com:443/app?…&sslnegotiation=direct                         app, direct TLS on 443 (PG17+ clients)
 postgres://app_migrate:…@db1.example.com:5432/app?sslmode=verify-full&sslrootcert=system   migrations and tools, session pooler
 ```
 
@@ -250,8 +248,8 @@ After bootstrap the server has exactly these public ports open, enforced by ufw 
       ┌─────────┬─────────┼──────────┬─────────────────────────┐
       │         │         │          │                         │
   51820/udp   80/tcp   443/tcp   6432/tcp, 5432/tcp       22/tcp
-  WireGuard   ACME     nginx     only from client_allowlist CLOSED
-      │       HTTP-01  stream                              (wg0 only)
+  WireGuard   ACME     HTTPS     only from approved IPs    CLOSED
+      │       HTTP-01  metrics                             (wg0 only)
       ▼         ▼         ▼          ▼
  ┌───────────────────────────────────────────────────────────────┐
  │ wg0 10.42.0.1 ── sshd :22, transaction pooler :6432,          │
@@ -263,35 +261,15 @@ After bootstrap the server has exactly these public ports open, enforced by ufw 
 - **SSH only over WireGuard.** Port 22 is allowed only `in on wg0`. Root login and password authentication are off, and only the admin user may log in, with the operator's key.
 - **Commit-confirm lockdown.** Before vaire closes public SSH, it snapshots sshd and firewall state and arms a server-side timer. If vaire doesn't confirm a working SSH-over-WireGuard session within two minutes, the server reverts on its own. A broken tunnel can't lock you out.
 - **Break-glass** is the provider console plus `vaire node unlock-ssh`, which re-opens public SSH with a password for the admin user for a fixed window. The steps are in the secrets handoff.
-- **Public database access is off by default.** Adding a client egress CIDR to `network.client_allowlist` grants network access to both poolers: `_app` on `6432` (or direct TLS on `443`) and `_migrate` on `5432`. Each still requires its own database credentials and TLS. An empty allowlist admits no public database clients. WireGuard peers can reach both poolers regardless. No PostgreSQL cluster has a TCP listener.
+- **Public database access is off by default.** Choose one shared allowlist or separate lists for `_app`, `_ro`, and `_migrate`. Clients still need their own database credentials and TLS. Registered WireGuard peers can reach both poolers. No PostgreSQL cluster has a TCP listener.
 - **fail2ban** watches sshd. unattended-upgrades installs security updates only, with PostgreSQL, PgBouncer and nginx held for controlled updates.
 
 ### TLS and nginx
 
-Vaire uses nginx's stream module to share port 443 between HTTPS metrics and
-direct-TLS PostgreSQL. nginx reads the client's ALPN before terminating TLS:
-PostgreSQL goes to the transaction pooler, and HTTPS goes to the metrics server.
-nginx also serves ACME HTTP-01 challenges on port 80; Vaire itself manages
-certificate issuance and renewal.
-
-```
- client (sslmode=verify-full)                          VPS
-                                ┌──────────────────────────────────────────────────┐
- ── :6432 ─────────────────────▶│ transaction pooler (TLS) ─┐                      │
- ── :5432 ─────────────────────▶│ session pooler (TLS)  ────┼─ unix socket ─▶ the  │
-                                │                           │  database's cluster  │
- ── :443  ─────────────────────▶│ nginx stream, ssl_preread │  (by database name)  │
-   (sslnegotiation=direct,      │   ALPN "postgresql" + allowed source             │
-    PG17+ clients)              │      → terminate TLS → transaction pooler        │
-                                │   same ALPN, other source → handshake rejected   │
-                                │   SSLRequest (no direct) → "no TLS" (N)          │
-                                │   anything else → HTTPS: /metrics, else 404      │
-                                │                                                  │
- ── :80   ─────────────────────▶│ nginx: /.well-known/acme-challenge/ only         │
-                                └──────────────────────────────────────────────────┘
-```
-
-- **443 needs `sslnegotiation=direct`.** nginx routes 443 by peeking at the TLS ClientHello, so it can't answer the PostgreSQL SSLRequest that clients send by default. Without `sslnegotiation=direct`, nginx answers "no TLS here" and closes: libpq (with `sslmode=require` or stricter) says `server does not support SSL, but SSL was required`, pgx says `server refused TLS connection`. Add `sslnegotiation=direct` (PostgreSQL 17+ libpq, pgx 5.7+), or use port 6432, which speaks the normal negotiation. A direct-TLS client from an address that isn't allowed gets its handshake rejected: libpq says `SSL error: tlsv1 unrecognized name`, pgx `remote error: tls: unrecognized name`.
+PgBouncer terminates PostgreSQL TLS on `6432` and `5432`. Port `443` is
+HTTPS only. nginx serves metrics there and ACME HTTP-01 challenges on `80`;
+Vaire manages certificate issuance and renewal. Use `sslmode=verify-full`
+for database clients with a trusted server certificate.
 - **vaire is its own ACME client.** An hourly `vaire-certs` timer issues and renews the certificate for the node's hostname (`db1.<domain>`) over HTTP-01, installs it for both PgBouncers, nginx and every cluster, and reloads them. Until the first certificate arrives, a placeholder certificate lets everything start.
 - The DNS record must point straight at the server (DNS only, not proxied).
 - A `self-signed` mode exists for servers without a domain. Connections are encrypted but not verified, and vaire warns about that.
@@ -323,8 +301,8 @@ handoff. No local collector is needed for direct scraping.
     ▲
     │ member, SET role = <db>_owner on login
  <db>_migrate   DDL: migrations              → :5432 (session pooler; the transaction pooler refuses it)
- <db>_app       SELECT/INSERT/UPDATE/DELETE  → :6432 or :443 (transaction pooler), statement_timeout
- <db>_ro        SELECT, read-only by default → :6432 or :443 (transaction pooler), reporting and read-only clients
+ <db>_app       SELECT/INSERT/UPDATE/DELETE  → :6432 (transaction pooler), statement_timeout
+ <db>_ro        SELECT, read-only by default → :6432 (transaction pooler), reporting and read-only clients
 
  in every cluster:
  vaire_admin        CREATEDB/CREATEROLE, not superuser (operator)
@@ -334,7 +312,7 @@ handoff. No local collector is needed for direct scraping.
 
 **Use `app` for runtime and keep `migrate` out of the running application's configuration.** The `app` role can read and write rows in granted tables but cannot alter or drop those tables. The `migrate` role acts as the database owner: it can change the schema and write data for backfills. It is not a DDL-only login, and there is no migration window to open.
 
-The transaction pooler rejects `migrate` on both 6432 and 443. Run migrations through the session pooler on 5432 so session state, such as advisory locks and temporary tables, stays on one server connection. Use WireGuard or `vaire tunnel --db app --target postgres` to reach it without exposing the port publicly.
+The transaction pooler rejects `migrate` on 6432. Run migrations through the session pooler on 5432 so session state, such as advisory locks and temporary tables, stays on one server connection. Use WireGuard or `vaire tunnel --db app --target postgres` to reach it without exposing the port publicly.
 
 Default privileges grant access to new tables created by the owner in `public`: `app` can read and write, and `ro` can read. For other schemas, configure grants and default privileges explicitly.
 
@@ -372,9 +350,21 @@ vaire config set network.client_allowlist '["203.0.113.7/32"]' --apply
 ```
 
 Include any existing entries you want to keep, and the deploy host's outbound
-IPv6 `/128` if it uses IPv6. One approval covers both poolers. Use `_migrate`
-only in the deploy job and `_app` in the running service; neither needs
-WireGuard from an approved address.
+IPv6 `/128` if it uses IPv6. One approval covers both poolers in shared mode.
+To use per-role mode instead, use `vaire config edit` and leave the shared
+list empty:
+
+```toml
+[network.role_allowlist]
+app = ["203.0.113.7/32"]
+ro = ["198.51.100.8/32"]
+migrate = []
+```
+
+An omitted or empty role list denies public access for that role; it does not
+inherit from the shared list. Here `_migrate` is available over WireGuard but
+not from either public IP. Use `_migrate` only in the deploy job and `_app`
+in the running service.
 
 Dry runs and narrowing do not need a factor. An approved edit can be applied
 later. A fresh restore does not inherit approvals: database access starts
@@ -537,7 +527,7 @@ Installed from the distribution's apt repositories unless noted. Steps install o
 | `postgresql-common` | PostgreSQL packages | Adds the PGDG apt repository (`apt.postgresql.org`) and `pg_createcluster`, which makes each database's cluster |
 | `postgresql-18`, `postgresql-client-18`, `postgresql-contrib` | PostgreSQL packages (PGDG) | PostgreSQL 18; the major version is held with `apt-mark hold` |
 | `pgbouncer` | PostgreSQL packages (PGDG) | Two poolers: transaction mode on 6432 (Debian's `pgbouncer.service`) and session mode on 5432 (`vaire-pgbouncer-session.service`) |
-| `nginx`, `libnginx-mod-stream`, `ssl-cert` | TLS step | ACME HTTP-01 on 80 and ALPN routing on 443; held with `apt-mark hold` |
+| `nginx`, `ssl-cert` | TLS step | ACME HTTP-01 on 80 and HTTPS on 443; nginx is held with `apt-mark hold` |
 | `pgbackrest` (≥ 2.59.3) | PostgreSQL packages (PGDG) | Database backups, WAL archiving and restores; held with `apt-mark hold`. 2.59.3 is the floor because earlier releases have an encryption bug |
 | `vaire` | `server init` | The matching node binary at `/usr/local/bin/vaire`, installed during trusted bootstrap |
 | `node_exporter` 1.12.1, `postgres_exporter` 0.20.1, `pgbouncer_exporter` 0.12.1 | metrics step (upstream release binaries, sha256 pinned in vaire) | Metrics on loopback, served through nginx's authenticated `/metrics`; the same versions on Debian and Ubuntu |

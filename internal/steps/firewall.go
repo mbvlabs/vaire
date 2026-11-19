@@ -48,22 +48,17 @@ func configuredRules(cfg config.Cluster) []string {
 		"allow 443/tcp",
 		RuleWGSSH,
 	}
-	// WireGuard peers and allowlisted public clients can reach both poolers.
-	// 5432 is the session pooler, and no
-	// cluster has a TCP port to open: they listen on sockets only (RFC 8.2).
+	// Reserve the WireGuard subnet for wg0 even when a public CIDR covers
+	// it. PgBouncer trusts registered peer addresses as private sources.
+	private, _ := netip.ParsePrefix(cfg.Transport.Subnet)
+
 	for _, port := range []int{PgbouncerPort, SessionPoolerPort} {
 		rules = appendRule(rules, fmt.Sprintf("allow in on wg0 to any port %d proto tcp", port))
 
-		for _, cidr := range cfg.Network.ClientAllowlist {
+		for _, cidr := range cfg.Network.PoolerClients(port == SessionPoolerPort) {
 			if p, err := netip.ParsePrefix(cidr); err == nil {
-				if p.Bits() == 0 {
-					// UFW's show added collapses either family's /0 to a
-					// family-neutral rule. Two /1s retain the family.
-					for _, half := range splitDefaultRoute(p) {
-						rules = appendRule(rules, allowFromRule(half, port))
-					}
-				} else {
-					rules = appendRule(rules, allowFromRule(p, port))
+				for _, public := range publicPrefixes(p.Masked(), private) {
+					rules = appendRule(rules, allowFromRule(public, port))
 				}
 			}
 		}
@@ -83,12 +78,24 @@ func allowFromRule(p netip.Prefix, port int) string {
 	return fmt.Sprintf("allow from %s to any port %d proto tcp", p, port)
 }
 
-func splitDefaultRoute(p netip.Prefix) [2]netip.Prefix {
-	if p.Addr().Is4() {
-		return [2]netip.Prefix{netip.MustParsePrefix("0.0.0.0/1"), netip.MustParsePrefix("128.0.0.0/1")}
+func publicPrefixes(p, private netip.Prefix) []netip.Prefix {
+	if p.Overlaps(private) && private.Bits() <= p.Bits() {
+		return nil
 	}
 
-	return [2]netip.Prefix{netip.MustParsePrefix("::/1"), netip.MustParsePrefix("8000::/1")}
+	// Split either /0 even without a private overlap: UFW prints a /0
+	// allow as a family-neutral rule, which would widen it.
+	if p.Bits() != 0 && !p.Overlaps(private) {
+		return []netip.Prefix{p}
+	}
+
+	addr := p.Addr().AsSlice()
+	bit := p.Bits()
+	addr[bit/8] |= 1 << (7 - bit%8)
+	right, _ := netip.AddrFromSlice(addr)
+
+	return append(publicPrefixes(netip.PrefixFrom(p.Addr(), bit+1), private),
+		publicPrefixes(netip.PrefixFrom(right, bit+1), private)...)
 }
 
 // appendRule appends rule unless rules has it: ufw keeps one copy of a rule.

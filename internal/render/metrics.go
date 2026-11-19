@@ -66,9 +66,8 @@ type MetricsLocation struct {
 // MetricsConf renders /etc/nginx/vaire-metrics.conf from the locations, with
 // the basic-auth file and the optional allowlist (CIDRs, masked). A set
 // allowlist also admits loopback, so doctor's probe through 443 gets the 401
-// it checks for: the address comes from the PROXY header the 443 hop writes
-// from the real peer, so only the node itself can be 127.0.0.1, and it can
-// reach the exporters directly anyway.
+// it checks for. nginx uses the connection's peer address, so only the node
+// itself can be 127.0.0.1, and it can reach the exporters directly anyway.
 func MetricsConf(locations []MetricsLocation, htpasswd string, allowlist []string) []byte {
 	var allow []string
 	if len(allowlist) > 0 {

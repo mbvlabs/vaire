@@ -61,6 +61,7 @@ func TestDefaultRoutesPreserveAddressFamily(t *testing.T) {
 	} {
 		t.Run(tc.cidr, func(t *testing.T) {
 			cfg := config.DefaultCluster()
+			cfg.Transport.Subnet = ""
 			cfg.Network.ClientAllowlist = []string{tc.cidr, tc.cidr}
 			rules := configuredRules(cfg)
 
@@ -84,6 +85,27 @@ func TestDefaultRoutesPreserveAddressFamily(t *testing.T) {
 				t.Errorf("drift: %s", drift)
 			}
 		})
+	}
+}
+
+func TestPublicPoolerRulesExcludeWireGuardSubnet(t *testing.T) {
+	cfg := config.DefaultCluster()
+	cfg.Network.RoleAllowlist = &config.RoleAllowlist{App: []string{"10.42.0.0/15"}, Migrate: []string{"192.0.2.7/32"}}
+	rules := configuredRules(cfg)
+
+	for _, rule := range []string{
+		"allow from 10.43.0.0/16 to any port 6432 proto tcp",
+		"allow from 10.43.0.0/16 to any port 5432 proto tcp",
+		"allow from 192.0.2.7 to any port 5432 proto tcp",
+	} {
+		if !slices.Contains(rules, rule) {
+			t.Errorf("missing %q in %v", rule, rules)
+		}
+	}
+
+	if slices.Contains(rules, "allow from 192.0.2.7 to any port 6432 proto tcp") ||
+		slices.Contains(rules, "allow from 10.42.0.0/15 to any port 5432 proto tcp") {
+		t.Fatalf("overbroad pooler rules: %v", rules)
 	}
 }
 

@@ -353,8 +353,15 @@ func openAllowlists(cfg config.Cluster) []string {
 		list []string
 	}{
 		{"network.client_allowlist", cfg.Network.ClientAllowlist},
+		{"network.role_allowlist.app", cfg.Network.ClientsForRole(config.AllowlistApp)},
+		{"network.role_allowlist.migrate", cfg.Network.ClientsForRole(config.AllowlistMigrate)},
+		{"network.role_allowlist.ro", cfg.Network.ClientsForRole(config.AllowlistRO)},
 		{"metrics.allowlist", cfg.Metrics.Allowlist},
 	} {
+		if cfg.Network.RoleAllowlist == nil && strings.HasPrefix(l.name, "network.role_allowlist.") {
+			continue
+		}
+
 		for _, cidr := range l.list {
 			if open, err := openToAll(cidr); err == nil && open {
 				out = append(out, l.name+" "+cidr)
@@ -429,8 +436,7 @@ type httpStatusError int
 func (e httpStatusError) Error() string { return "HTTP " + http.StatusText(int(e)) }
 
 // endpointStatus asks nginx for /metrics/node without a credential, through
-// 443 on loopback as a scraper would (8443 wants the PROXY protocol header
-// from the 443 hop). 401 is the healthy answer.
+// 443 on loopback as a scraper would. 401 is the healthy answer.
 func endpointStatus(ctx context.Context, hostname, prefix string) (int, string) {
 	if prefix == "" {
 		prefix = "/metrics"

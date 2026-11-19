@@ -11,13 +11,28 @@ import (
 func ExposureIncreases(old, next Cluster) []string {
 	var surfaces []string
 
-	if prefixesWiden(old.Network.ClientAllowlist, next.Network.ClientAllowlist) {
+	if next.Network.RoleAllowlist == nil && old.Network.RoleAllowlist == nil &&
+		prefixesWiden(old.Network.ClientAllowlist, next.Network.ClientAllowlist) {
 		surfaces = append(surfaces, "session_pooler", "transaction_pooler")
+	}
+
+	if next.Network.RoleAllowlist != nil || old.Network.RoleAllowlist != nil {
+		for _, role := range []string{AllowlistApp, AllowlistMigrate, AllowlistRO} {
+			if prefixesWiden(old.Network.ClientsForRole(role), next.Network.ClientsForRole(role)) {
+				surfaces = append(surfaces, "database_role_"+role)
+			}
+		}
+
+		// Shared mode also admits non-application logins through its
+		// public network gate; per-role mode does not.
+		if next.Network.RoleAllowlist == nil && len(next.Network.ClientAllowlist) > 0 {
+			surfaces = append(surfaces, "database_other_roles")
+		}
 	}
 
 	if next.Transport.Subnet != "" && prefixesWiden(
 		subnetPrefixes(old.Transport.Subnet), []string{next.Transport.Subnet}) {
-		surfaces = append(surfaces, "transaction_tls_subnet")
+		surfaces = append(surfaces, "wireguard_subnet")
 	}
 
 	if prefixesWiden(metricsClients(old), metricsClients(next)) {

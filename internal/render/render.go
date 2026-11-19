@@ -8,6 +8,7 @@ import (
 	"embed"
 	"maps"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -219,7 +220,7 @@ func PgbouncerIni(cfg config.Cluster, host hostinfo.Info, dbs []PoolerDatabase) 
 		"Mode":              "transaction",
 		"ClientConnections": cfg.Postgres.ClientConnections,
 		"DefaultPoolSize":   clamp(2*host.VCPU, 10, 50),
-		"ClientTLS":         "prefer",
+		"ClientTLS":         "require",
 	})
 }
 
@@ -254,9 +255,10 @@ func SessionIni(cfg config.Cluster, dbs []PoolerDatabase, socketDir string) []by
 	})
 }
 
-// SessionHBA renders /etc/pgbouncer/session_hba.conf: TLS for every TCP
-// client; there is no loopback hop to exempt.
-func SessionHBA() []byte { return execute("session_hba.conf.tmpl", nil) }
+// SessionHBA renders the session pooler's client authentication policy.
+func SessionHBA(cfg config.Cluster, dbs []PoolerDatabase, operators []string) []byte {
+	return poolerHBA(cfg, dbs, operators, true)
+}
 
 // SessionUnit renders the session pooler's systemd unit,
 // vaire-pgbouncer-session.service. It runs PGDG's pgbouncer binary as postgres
@@ -308,27 +310,76 @@ func PgbouncerUserlist(verifiers map[string]string) []byte {
 }
 
 // NginxConf renders /etc/nginx/nginx.conf (§15.2): ACME challenges on 80,
-// and on 443 HTTPS plus direct-TLS PostgreSQL routed to PgBouncer by ALPN.
-func NginxConf(cfg config.Cluster, hostname, acmeWebroot string) []byte {
-	var allow []string
-
-	for _, cidr := range cfg.Network.ClientAllowlist {
-		if p, err := netip.ParsePrefix(cidr); err == nil {
-			allow = append(allow, p.Masked().String())
-		}
-	}
-
+// and HTTPS metrics on 443.
+func NginxConf(_ config.Cluster, hostname, acmeWebroot string) []byte {
 	return execute("nginx.conf.tmpl", map[string]any{
 		"Hostname":    hostname,
-		"WGSubnet":    cfg.Transport.Subnet,
-		"Allowlist":   allow,
 		"ACMEWebroot": acmeWebroot,
 	})
 }
 
-// PgbouncerHBA renders /etc/pgbouncer/pgbouncer_hba.conf: TLS everywhere
-// except the loopback hop from nginx.
-func PgbouncerHBA() []byte { return execute("pgbouncer_hba.conf.tmpl", nil) }
+// PgbouncerHBA renders the transaction pooler's client authentication policy.
+func PgbouncerHBA(cfg config.Cluster, dbs []PoolerDatabase, operators []string) []byte {
+	return poolerHBA(cfg, dbs, operators, false)
+}
+
+type poolerHBARule struct{ User, CIDR string }
+
+func poolerHBA(cfg config.Cluster, dbs []PoolerDatabase, operators []string, session bool) []byte {
+	var rules []poolerHBARule
+
+	for _, operator := range operators {
+		if addr, err := netip.ParseAddr(operator); err == nil && addr.Is4() {
+			rules = append(rules, poolerHBARule{"all", addr.String() + "/32"})
+		}
+	}
+
+	if cfg.Network.RoleAllowlist == nil {
+		rules = appendPoolerCIDRs(rules, "all", cfg.Network.ClientAllowlist)
+	} else {
+		rules = appendRoleCIDRs(rules, cfg.Network, dbs, session)
+	}
+
+	return execute("pgbouncer_hba.conf.tmpl", rules)
+}
+
+func appendPoolerCIDRs(rules []poolerHBARule, user string, clients []string) []poolerHBARule {
+	for _, cidr := range clients {
+		if prefix, err := netip.ParsePrefix(cidr); err == nil {
+			rules = append(rules, poolerHBARule{user, prefix.Masked().String()})
+		}
+	}
+
+	return rules
+}
+
+func appendRoleCIDRs(rules []poolerHBARule, network config.Network, dbs []PoolerDatabase, session bool) []poolerHBARule {
+	names := map[string]bool{}
+
+	for _, db := range dbs {
+		name := db.Name
+		if db.DBName != "" {
+			name = db.DBName
+		}
+
+		if config.CheckDatabaseName(name) == nil {
+			names[name] = true
+		}
+	}
+
+	roles := []string{config.AllowlistApp, config.AllowlistRO}
+	if session {
+		roles = append(roles, config.AllowlistMigrate)
+	}
+
+	for _, name := range slices.Sorted(maps.Keys(names)) {
+		for _, role := range roles {
+			rules = appendPoolerCIDRs(rules, name+"_"+role, network.ClientsForRole(role))
+		}
+	}
+
+	return rules
+}
 
 // PGServiceDropin renders a cluster's postgresql@18-<cluster>.service
 // drop-in: its cgroup limits (RFC 7.2). MemoryHigh is the cluster's memory

@@ -1553,7 +1553,7 @@ func CopyAnalyzeSQL(database string) string {
 
 // RoleDirectOnly marks login roles that must connect to PostgreSQL directly:
 // PgBouncer's auth query returns nothing for its members, so they are refused
-// on 6432 and 443. Each <db>_migrate is a member, because migrations need
+// on 6432. Each <db>_migrate is a member, because migrations need
 // session features that transaction pooling breaks.
 const RoleDirectOnly = "vaire_direct_only"
 

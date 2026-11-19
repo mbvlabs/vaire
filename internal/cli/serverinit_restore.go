@@ -380,6 +380,10 @@ func (r *initRun) restoreConfig() error {
 	// Approvals belong to the old node, not the backup. Retain the private
 	// WireGuard topology and require new approval for public endpoints.
 	cfg.Network.ClientAllowlist = nil
+	if cfg.Network.RoleAllowlist != nil {
+		cfg.Network.RoleAllowlist = &config.RoleAllowlist{}
+	}
+
 	cfg.Metrics.Enabled = false
 
 	r.cfg = cfg

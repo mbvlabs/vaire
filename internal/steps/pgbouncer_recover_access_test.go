@@ -66,7 +66,7 @@ func TestFirstRecoveryPoolersRenderEveryAliasWithheld(t *testing.T) {
 	}
 	view := cfg.RoutingView(recs.IsAwaiting, "app")
 
-	files := pgbouncerFilesFrom(view, engine.Runtime{Host: hostinfo.Info{VCPU: 2}}, recs)
+	files := pgbouncerFilesFrom(view, engine.Runtime{Host: hostinfo.Info{VCPU: 2}}, recs, nil)
 	if len(files) != 5 {
 		t.Fatalf("pooler files = %d, want both poolers' complete set", len(files))
 	}
@@ -185,7 +185,7 @@ func assertPublishedFollowerRoutes(t *testing.T, written map[string]string) {
 func TestPublishFollowerRoutesPublishesOnlyTheRecoveringTarget(t *testing.T) {
 	cfg, written := publishFollowerTestFixture(t)
 
-	if err := PublishFollowerRoutes(context.Background(), cfg, engine.Runtime{Host: followerHost}, "app_follower", nil); err != nil {
+	if err := publishFollowerRoutesGuarded(context.Background(), cfg, engine.Runtime{Host: followerHost}, "app_follower", nil); err != nil {
 		t.Fatalf("the follower route publish failed: %v", err)
 	}
 
@@ -210,7 +210,7 @@ func TestPublishFollowerRoutesSecondPoolerReloadFailure(t *testing.T) {
 		return errors.New("vaire-pgbouncer-session.service: Job for vaire-pgbouncer-session.service failed")
 	}
 
-	err := PublishFollowerRoutes(context.Background(), cfg, engine.Runtime{Host: followerHost}, "app_follower", nil)
+	err := publishFollowerRoutesGuarded(context.Background(), cfg, engine.Runtime{Host: followerHost}, "app_follower", nil)
 	if err == nil || !strings.Contains(err.Error(), "vaire-pgbouncer-session") {
 		t.Fatalf("the second pooler's reload failure was not returned: %v", err)
 	}
@@ -291,7 +291,7 @@ func runPublishRefusalCase(t *testing.T, test publishRefusalCase) {
 		return nil
 	}
 
-	err := PublishFollowerRoutes(context.Background(), cfg, engine.Runtime{Host: followerHost}, "app_follower", nil)
+	err := publishFollowerRoutesGuarded(context.Background(), cfg, engine.Runtime{Host: followerHost}, "app_follower", nil)
 	if err == nil || refusalReason(err) != test.wantReason {
 		t.Fatalf("refusal = %v, want reason %s", err, test.wantReason)
 	}

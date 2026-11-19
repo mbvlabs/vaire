@@ -281,7 +281,7 @@ func TestUnfollowFenceKeepsOtherUnfinishedAliasesExcluded(t *testing.T) {
 		// The dry shell refuses the reload after the files are written; the
 		// rendered content is this boundary's concern, as in the fail-closed
 		// test above.
-		_ = ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
+		_ = applyPoolerFenceGuarded(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
 	}
 	assertAlias := func(db string, want bool) {
 		t.Helper()
@@ -374,7 +374,7 @@ func TestPgbouncerRenderingFailsClosedOnUnreadUnfollowState(t *testing.T) {
 
 	assertUnreadableRecordsRefused(t, cfg, rt)
 	// No file was touched by any failing path: the previous safe files stay.
-	if err := ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil); err == nil || refusalReason(err) != "unfollow_state_unknown" {
+	if err := applyPoolerFenceGuarded(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil); err == nil || refusalReason(err) != "unfollow_state_unknown" {
 		t.Fatalf("the direct fence accepted unreadable unfollow records: %v", err)
 	}
 
@@ -447,7 +447,7 @@ func assertPoolerFenceWithholdsAlias(t *testing.T, cfg config.Cluster) {
 	}
 	// The shell is dry, so the call stops after the writes; the rendered files
 	// are what this boundary protects.
-	_ = ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
+	_ = applyPoolerFenceGuarded(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
 	writePoolerFile = oldWrite
 
 	for _, path := range []string{poolerFilePaths.ini, poolerFilePaths.sessionIni} {
@@ -475,11 +475,11 @@ func assertUnreadableRecordsRefused(t *testing.T, cfg config.Cluster, rt engine.
 			return err
 		},
 		"apply": func() error {
-			_, err := (pgbouncer{}).Apply(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
+			_, err := (pgbouncer{}).applyGuarded(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
 			return err
 		},
 		"direct fence": func() error {
-			return ApplyPoolerFence(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
+			return applyPoolerFenceGuarded(context.Background(), cfg, engine.Runtime{Host: followerHost, Shell: engine.Shell{DryRun: true}}, nil)
 		},
 	} {
 		err := call()

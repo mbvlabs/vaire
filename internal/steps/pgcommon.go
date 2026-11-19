@@ -78,7 +78,7 @@ const (
 	SystemdSystemDir = "/etc/systemd/system"
 	// PgbouncerService is the PgBouncer systemd unit.
 	PgbouncerService = "pgbouncer"
-	// PgbouncerPort is the transaction pooler's port, behind nginx on 443.
+	// PgbouncerPort is the transaction pooler's port.
 	PgbouncerPort = 6432
 	// SessionPoolerService is the session pooler's systemd unit.
 	SessionPoolerService = "vaire-pgbouncer-session"

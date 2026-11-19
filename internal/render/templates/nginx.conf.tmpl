@@ -9,85 +9,6 @@ events {
     worker_connections 1024;
 }
 
-# Port 443 carries HTTPS and PostgreSQL clients that negotiate TLS directly
-# (PG17+ sslnegotiation=direct, ALPN "postgresql"). ssl_preread routes by ALPN
-# without terminating TLS on 443 itself.
-stream {
-    # Who may reach PgBouncer through 443: WireGuard peers always, the client
-    # allowlist, the same as port 6432.
-    geo $vaire_pg_allowed {
-        default 0;
-        {{ .WGSubnet }} 1;
-{{- range .Allowlist }}
-        {{ . }} 1;
-{{- end }}
-    }
-
-    # $ssl_preread_protocol is empty when the first bytes aren't a TLS
-    # ClientHello, which is what a PostgreSQL SSLRequest (sslnegotiation=postgres,
-    # the libpq default) looks like.
-    map "$vaire_pg_allowed:$ssl_preread_protocol:$ssl_preread_alpn_protocols" $vaire_upstream {
-        "~^1:[^:]+:(.*,)?postgresql(,.*)?$" vaire_pgbouncer_tls;
-        "~^0:[^:]+:(.*,)?postgresql(,.*)?$" vaire_denied;
-        "~^[01]::" vaire_not_tls;
-        default vaire_https;
-    }
-
-    upstream vaire_https {
-        server 127.0.0.1:8443;
-    }
-    upstream vaire_pgbouncer_tls {
-        server 127.0.0.1:6433;
-    }
-    upstream vaire_denied {
-        server 127.0.0.1:6434;
-    }
-    upstream vaire_not_tls {
-        server 127.0.0.1:6435;
-    }
-
-    # Every upstream is one of nginx's own servers below, so each gets the
-    # PROXY protocol header with the client's address: the metrics allowlist,
-    # limit_req and fail2ban see the real client instead of 127.0.0.1.
-    server {
-        listen 443;
-        listen [::]:443;
-        ssl_preread on;
-        proxy_protocol on;
-        proxy_pass $vaire_upstream;
-    }
-
-    # Terminates the direct TLS connection and hands the plain PostgreSQL
-    # protocol to PgBouncer on loopback (pgbouncer_hba allows hostnossl only
-    # from 127.0.0.1).
-    server {
-        listen 127.0.0.1:6433 ssl proxy_protocol;
-        ssl_certificate /etc/vaire/tls/server.crt;
-        ssl_certificate_key /etc/vaire/tls/server.key;
-        ssl_protocols TLSv1.2 TLSv1.3;
-        ssl_alpn postgresql;
-        proxy_pass 127.0.0.1:6432;
-    }
-
-    # PostgreSQL clients outside the allowlist: reject the TLS handshake with a
-    # fatal "unrecognized_name" alert, so the client reports a TLS error with a
-    # reason instead of a bare EOF. No certificate is needed to reject.
-    server {
-        listen 127.0.0.1:6434 ssl proxy_protocol;
-        ssl_reject_handshake on;
-        return "";
-    }
-
-    # Plain-TCP clients, in practice a PostgreSQL SSLRequest without
-    # sslnegotiation=direct: answer "N" (TLS not offered) and close, so libpq
-    # says "server does not support SSL, but SSL was required" and pgx says
-    # "server refused TLS connection" rather than parsing an HTTP 400.
-    server {
-        listen 127.0.0.1:6435 proxy_protocol;
-        return "N";
-    }
-}
-
 http {
     server_tokens off;
     access_log off;
@@ -109,17 +30,16 @@ http {
         }
     }
 
-    # HTTPS on 443 after ssl_preread: the authenticated /metrics endpoint
+    # HTTPS on 443: the authenticated /metrics endpoint
     # (metrics-v1 writes vaire-metrics.conf; the glob lets nginx start without
     # it) and 404 for everything else.
     server {
-        listen 127.0.0.1:8443 ssl proxy_protocol default_server;
+        listen 443 ssl default_server;
+        listen [::]:443 ssl default_server;
         server_name {{ .Hostname }};
         ssl_certificate /etc/vaire/tls/server.crt;
         ssl_certificate_key /etc/vaire/tls/server.key;
         ssl_protocols TLSv1.2 TLSv1.3;
-        set_real_ip_from 127.0.0.1;
-        real_ip_header proxy_protocol;
         include /etc/nginx/vaire-metrics*.conf;
         location / {
             return 404;

@@ -7,22 +7,20 @@ import (
 	"github.com/mbvlabs/vaire/internal/config"
 )
 
-func TestNginxDirectTLSUsesDatabaseAllowlist(t *testing.T) {
+func TestNginxHTTPSOnly(t *testing.T) {
 	cfg := config.DefaultCluster()
-
-	const entry = "203.0.113.7/32 1;"
-
-	render := func() string {
-		return string(NginxConf(cfg, "db1.example.test", "/var/www/acme"))
-	}
-
-	if strings.Contains(render(), entry) {
-		t.Fatal("default nginx policy admitted the public client")
-	}
-
 	cfg.Network.ClientAllowlist = []string{"203.0.113.7/32"}
 
-	if !strings.Contains(render(), entry) {
-		t.Fatal("nginx direct-TLS policy omitted the allowlisted client")
+	conf := string(NginxConf(cfg, "db1.example.test", "/var/www/acme"))
+	for _, want := range []string{"listen 443 ssl default_server;", "listen [::]:443 ssl default_server;", "listen 80 default_server;", "root /var/www/acme;", "server_name db1.example.test;"} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("nginx config lacks %q", want)
+		}
+	}
+
+	for _, unwanted := range []string{"stream {", "ssl_preread", "proxy_protocol", "real_ip_header", "6432", "6433", "6434", "6435", "8443", "203.0.113.7"} {
+		if strings.Contains(conf, unwanted) {
+			t.Errorf("nginx config contains %q", unwanted)
+		}
 	}
 }

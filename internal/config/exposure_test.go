@@ -27,6 +27,55 @@ func TestClientAllowlistConfig(t *testing.T) {
 	}
 }
 
+func TestRoleAllowlistModes(t *testing.T) {
+	cfg, err := ParseCluster([]byte("[network.role_allowlist]\napp = [\"192.0.2.7/32\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Equal(cfg.Network.ClientsForRole(AllowlistApp), []string{"192.0.2.7/32"}) ||
+		len(cfg.Network.ClientsForRole(AllowlistMigrate)) != 0 {
+		t.Fatal("app rule leaked to another role")
+	}
+
+	raw, err := cfg.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	roundTrip, err := ParseCluster(raw)
+	if err != nil || roundTrip.Network.RoleAllowlist == nil {
+		t.Fatalf("round trip lost per-role mode: %v", err)
+	}
+
+	cfg.Network.ClientAllowlist = []string{"192.0.2.7/32"}
+	if err := cfg.ValidateFor(ScopeHost); err == nil || !strings.Contains(err.Error(), "client_allowlist must be empty") {
+		t.Fatalf("mixed mode was not rejected: %v", err)
+	}
+}
+
+func TestRoleAllowlistWideningWithUnchangedCIDRUnion(t *testing.T) {
+	old := DefaultCluster()
+	old.Network.RoleAllowlist = &RoleAllowlist{App: []string{"192.0.2.7/32"}}
+	next := old
+	next.Network.RoleAllowlist = &RoleAllowlist{Migrate: []string{"192.0.2.7/32"}}
+
+	if got := ExposureIncreases(old, next); !slices.Equal(got, []string{"database_role_migrate"}) {
+		t.Fatalf("role widening = %v", got)
+	}
+
+	shared := old
+
+	shared.Network = Network{ClientAllowlist: []string{"192.0.2.7/32"}}
+	if got := ExposureIncreases(shared, old); len(got) != 0 {
+		t.Fatalf("switch to narrower role policy widens %v", got)
+	}
+
+	if got := ExposureIncreases(old, shared); !slices.Contains(got, "database_role_migrate") {
+		t.Fatalf("switch to shared policy did not flag migration access: %v", got)
+	}
+}
+
 func TestExposureIncreases(t *testing.T) {
 	for _, tc := range []struct {
 		name string
