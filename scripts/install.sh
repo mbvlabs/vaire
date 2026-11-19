@@ -71,17 +71,19 @@ got="$(sha256_hex "${work_dir}/cosign")"
 [ "${got}" = "${cosign_sha256}" ] || fail "cosign checksum verification failed"
 
 version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$'
+edge_version_pattern='^edge-[0-9a-f]{12}$'
 
 manifest_root="${channel_root}"
 if [ -n "${pinned_version}" ]; then
-  [[ "${pinned_version}" =~ ${version_pattern} ]] || fail "pinned version is invalid"
+  [[ "${pinned_version}" =~ ${version_pattern} || "${pinned_version}" =~ ${edge_version_pattern} ]] ||
+    fail "pinned version is invalid"
   manifest_root="${origin}/releases/${pinned_version}"
 fi
 curl -fsSL --proto '=https' --tlsv1.2 \
   "${manifest_root}/manifest.json" -o "${work_dir}/manifest.json"
 
 manifest_version="$(json_string version "${work_dir}/manifest.json")"
-if [[ "${manifest_version}" =~ ^edge-[0-9a-f]{12}$ ]]; then
+if [[ "${manifest_version}" =~ ${edge_version_pattern} ]]; then
   identity='https://github.com/mbvlabs/vaire/.github/workflows/publish-edge.yml@refs/heads/master'
 else
   [[ "${manifest_version}" =~ ${version_pattern} ]] || fail "release manifest version is invalid"

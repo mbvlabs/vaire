@@ -246,6 +246,7 @@ make_installer rc rc https://vaire.example/rc "${work}/rc.sh"
 make_installer stable stable https://vaire.example "${work}/stable.sh"
 make_installer stable stable-1.x https://vaire.example/1.x "${work}/line.sh"
 make_installer stable stable https://vaire.example/releases/1.2.0 "${work}/pinned.sh" 1.2.0
+make_installer edge edge https://vaire.example/releases/edge-abc "${work}/invalid-edge-pin.sh" edge-abc
 
 # A hash is signed by the edge workflow; alpha, beta, rc and final versions by
 # the exact stable tag identity even when they arrive through another pointer.
@@ -255,10 +256,24 @@ grep -Fxq 'https://github.com/mbvlabs/vaire/.github/workflows/publish-edge.yml@r
   "${work}/identities"
 grep -Fxq 'https://vaire.example/edge/manifest.json' "${work}/urls"
 
+# Execute the actual generated exact installer, not just a channel installer
+# or a check of its substituted variables.
+build edge-abcdef012345 edge
+pinned_edge=dist/release-edge/releases/edge-abcdef012345/install.sh
+run_install "${pinned_edge}"
+grep -Fxq 'https://vaire.example/releases/edge-abcdef012345/manifest.json' "${work}/urls"
+if grep -Fxq 'https://vaire.example/edge/manifest.json' "${work}/urls"; then
+  echo 'pinned edge installer consulted rolling edge' >&2
+  exit 1
+fi
+grep -Fxq "${TEST_EXPECTED_IDENTITY}" "${work}/identities"
+expect_install_fail 'malformed edge pin' "${work}/invalid-edge-pin.sh" 'pinned version is invalid'
+
 make_fixture 1.0.0-alpha.1 edge
 run_install "${work}/edge.sh"
 grep -Fxq 'https://github.com/mbvlabs/vaire/.github/workflows/publish-stable.yml@refs/tags/v1.0.0-alpha.1' \
   "${work}/identities"
+expect_install_fail 'edge pin with another manifest' "${pinned_edge}" 'release manifest version is invalid'
 
 make_fixture 1.0.0-beta.2 edge
 run_install "${work}/edge.sh"
