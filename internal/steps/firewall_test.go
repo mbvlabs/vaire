@@ -1,6 +1,9 @@
 package steps
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -32,7 +35,7 @@ ufw allow from 2001:db8::1 to any port 5432 proto tcp`
 func TestConfiguredRulesMatchUFWShowAdded(t *testing.T) {
 	cfg := config.DefaultCluster()
 	cfg.Network.ExposePgbouncer = true
-	cfg.Network.ExposePostgres = true
+	cfg.Network.ExposeSessionPooler = true
 	cfg.Network.ClientAllowlist = []string{"203.0.113.7/32", "203.0.113.7/32", "198.51.100.9/24", "2001:db8::1/128"}
 	want := configuredRules(cfg)
 
@@ -48,10 +51,112 @@ func TestConfiguredRulesMatchUFWShowAdded(t *testing.T) {
 	if n := countOf(want, "allow from 203.0.113.7 to any port 6432 proto tcp"); n != 1 {
 		t.Errorf("203.0.113.7 rendered %d times", n)
 	}
-	// A source of any address is ufw's short form.
-	cfg.Network.ClientAllowlist = []string{"0.0.0.0/0", "::/0"}
-	if open := configuredRules(cfg); countOf(open, "allow 6432/tcp") != 1 || countOf(open, "allow 5432/tcp") != 1 {
-		t.Errorf("a /0 allowlist renders %v", open)
+}
+
+func TestDefaultRoutesPreserveAddressFamily(t *testing.T) {
+	for _, tc := range []struct {
+		cidr   string
+		halves []string
+	}{
+		{"0.0.0.0/0", []string{"0.0.0.0/1", "128.0.0.0/1"}},
+		{"::/0", []string{"::/1", "8000::/1"}},
+	} {
+		t.Run(tc.cidr, func(t *testing.T) {
+			cfg := config.DefaultCluster()
+			cfg.Network.ExposePgbouncer = true
+			cfg.Network.ClientAllowlist = []string{tc.cidr, tc.cidr}
+			rules := configuredRules(cfg)
+
+			for _, half := range tc.halves {
+				rule := "allow from " + half + " to any port 6432 proto tcp"
+				if countOf(rules, rule) != 1 {
+					t.Errorf("expected one %q in %v", rule, rules)
+				}
+			}
+
+			if slices.Contains(rules, "allow 6432/tcp") || len(rules) != 8 {
+				t.Errorf("unexpected rules: %v", rules)
+			}
+
+			var show strings.Builder
+			for _, rule := range rules {
+				show.WriteString("ufw " + rule + "\n")
+			}
+
+			if drift := firewallDrift(rules, parseShowAdded(show.String()), publicSSHAbsent); drift != "" {
+				t.Errorf("drift: %s", drift)
+			}
+		})
+	}
+}
+
+func TestFirewallScriptStaleRuleRemoval(t *testing.T) { //nolint:gocognit // Each case checks the script result and the recorded UFW calls.
+	for _, tc := range []struct {
+		name       string
+		have       string
+		failDelete bool
+		failShow   bool
+		wantError  bool
+	}{
+		{name: "already converged", have: "allow 80/tcp"},
+		{name: "remove stale", have: "allow 9999/tcp"},
+		{name: "failed removal", have: "allow 9999/tcp", failDelete: true, wantError: true},
+		{name: "failed read", failShow: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			log := filepath.Join(dir, "calls")
+
+			stub := `#!/bin/bash
+printf '%s\n' "$*" >> "$CALLS"
+if [ "$*" = "show added" ]; then
+  [ "$FAIL_SHOW" != "true" ] || exit 1
+  printf 'ufw %s\n' "$HAVE"
+elif [ "$1" = "delete" ] && [ "$FAIL_DELETE" = "true" ]; then
+  exit 1
+fi
+`
+			if err := os.WriteFile(filepath.Join(dir, "ufw"), []byte(stub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := exec.Command("/bin/bash", "-s")
+			cmd.Stdin = strings.NewReader(Script("firewall"))
+
+			cmd.Env = []string{
+				"PATH=" + dir + ":/usr/bin:/bin", "UFW_RULES=allow 80/tcp", "CALLS=" + log,
+				"HAVE=" + tc.have,
+			}
+			if tc.failDelete {
+				cmd.Env = append(cmd.Env, "FAIL_DELETE=true")
+			}
+
+			if tc.failShow {
+				cmd.Env = append(cmd.Env, "FAIL_SHOW=true")
+			}
+
+			out, err := cmd.CombinedOutput()
+			if (err != nil) != tc.wantError {
+				t.Fatalf("error %v, output %s", err, out)
+			}
+
+			calls, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.have == "allow 80/tcp" && strings.Contains(string(calls), "delete ") {
+				t.Errorf("deleted a wanted rule: %s", calls)
+			}
+
+			if tc.have == "allow 9999/tcp" && !strings.Contains(string(calls), "delete allow 9999/tcp\n") {
+				t.Errorf("did not delete stale rule: %s", calls)
+			}
+
+			if tc.wantError && strings.Contains(string(calls), "--force enable") {
+				t.Errorf("enabled firewall after failure: %s", calls)
+			}
+		})
 	}
 }
 

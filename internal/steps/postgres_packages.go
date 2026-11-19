@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mbvlabs/vaire/internal/catalog"
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
@@ -121,11 +122,20 @@ func (postgresPackages) Check(ctx context.Context, cfg config.Cluster, _ engine.
 }
 
 func (s postgresPackages) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
+	reqs, err := ExtensionPrerequisites(cfg)
+	if err != nil {
+		return engine.ApplyResult{}, err
+	}
+
+	if err := CheckExtensionPackageAuthority(reqs, rt.TrustedHostAdmin); err != nil {
+		return engine.ApplyResult{}, err
+	}
+
 	if err := writeFile(CreateClusterConfPath, string(render.CreateClusterConf()), 0o644); err != nil {
 		return engine.ApplyResult{}, err
 	}
 
-	err := installPostgresPackages(ctx, cfg, s.ID(), rt, report)
+	err = installPostgresPackages(ctx, cfg, s.ID(), rt, report)
 
 	var scriptErr *engine.ScriptError
 	if errors.As(err, &scriptErr) && scriptErr.Status == pgbackrestTooOld {
@@ -138,6 +148,29 @@ func (s postgresPackages) Apply(ctx context.Context, cfg config.Cluster, rt engi
 	}
 
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
+}
+
+// CheckExtensionPackageAuthority distinguishes catalogue package mappings from
+// custom APT requirements, including retained historical requirements.
+func CheckExtensionPackageAuthority(reqs []ExtensionPrerequisite, trusted bool) error {
+	if trusted {
+		return nil
+	}
+
+	for _, req := range reqs {
+		if req.Source != catalog.SourceAPT || req.Package == "" {
+			continue
+		}
+
+		builtin, ok := catalog.Lookup(req.Name)
+		if !ok || builtin.Source != catalog.SourceAPT || builtin.Package != req.Package {
+			return output.NewError(output.CodePrecondition, "custom extension package work requires a trusted root session",
+				output.ExitPrecondition, "Have a trusted host administrator manage the custom package.").
+				WithDetails(map[string]any{"reason": "trusted_host_admin_required", "extension": req.Name})
+		}
+	}
+
+	return nil
 }
 
 // postgresPackagesEnv is the package step's script environment. The base
@@ -159,6 +192,15 @@ func postgresPackagesEnv(extensionPackages []string) map[string]string {
 // leave packages installed, and the error says so rather than claiming
 // nothing changed.
 func installPostgresPackages(ctx context.Context, cfg config.Cluster, stepID string, rt engine.Runtime, report engine.Reporter) error {
+	reqs, err := ExtensionPrerequisites(cfg)
+	if err != nil {
+		return err
+	}
+
+	if err := CheckExtensionPackageAuthority(reqs, rt.TrustedHostAdmin); err != nil {
+		return err
+	}
+
 	extensionPackages, err := ExtensionPackages(cfg)
 	if err != nil {
 		return err
@@ -173,7 +215,7 @@ func installPostgresPackages(ctx context.Context, cfg config.Cluster, stepID str
 		return fmt.Errorf("installing PostgreSQL and extension packages: %w; installed packages are not removed", err)
 	}
 
-	reqs, err := ExtensionPrerequisites(cfg)
+	reqs, err = ExtensionPrerequisites(cfg)
 	if err != nil {
 		return fmt.Errorf("resolving extension prerequisites after package installation: %w; installed packages are not removed", err)
 	}

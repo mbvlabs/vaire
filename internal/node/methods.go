@@ -548,12 +548,13 @@ func runtimeFor(env *Env, dryRun bool) engine.Runtime {
 	host, _ := detectHost(env.Cluster.Server.DataRoot)
 
 	return engine.Runtime{
-		DryRun:       dryRun,
-		Shell:        engine.Shell{DryRun: dryRun, Secrets: secrets.Default, Log: env.Log},
-		Secrets:      secrets.Default,
-		SecretValues: env.Req.Secrets,
-		Log:          env.Log,
-		Host:         host,
+		DryRun:           dryRun,
+		Shell:            engine.Shell{DryRun: dryRun, Secrets: secrets.Default, Log: env.Log},
+		Secrets:          secrets.Default,
+		SecretValues:     env.Req.Secrets,
+		Log:              env.Log,
+		Host:             host,
+		TrustedHostAdmin: env.TrustedHostAdmin,
 	}
 }
 

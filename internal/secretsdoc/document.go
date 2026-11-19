@@ -48,10 +48,12 @@ type Document struct {
 
 // ConnectionNotes explains the URLs vaire db create and vaire db credentials
 // --rotate show (§10.1).
-const ConnectionNotes = "The app URL goes through the transaction pooler (PgBouncer) on port 6432; use it for application traffic. " +
+const ConnectionNotes = "Use the app credential for application runtime; it can read and write data but cannot change the application schema. " +
+	"The app URL goes through the transaction pooler (PgBouncer) on port 6432. " +
+	"The migrate credential acts as the database owner and can change schema and data. Keep it out of application runtime configuration. " +
 	"The migrate URL goes through the session pooler on port 5432, which keeps one PostgreSQL connection per client for session features that migrations need (advisory locks, session SET, temporary tables). " +
 	"The transaction pooler refuses the migrate role on 6432 and 443 on purpose; there it fails as an authentication error. " +
-	"Port 5432 is reachable only over WireGuard (vaire tunnel --target postgres) or when network.expose_postgres = true, and requires TLS. " +
+	"Port 5432 requires TLS. It is reachable over WireGuard (vaire tunnel --target postgres), or from addresses in network.client_allowlist when network.expose_session_pooler is enabled. " +
 	"Both poolers route by the database name in the URL's path. " +
 	"The app_direct_tls URL is the same transaction pooler through port 443; it does not bypass PgBouncer. It is for networks that only allow 443, " +
 	"and the client must negotiate TLS directly (sslnegotiation=direct, PostgreSQL 17+ libpq or pgx 5.7+); other clients get \"server refused TLS\" and should use 6432. " +
@@ -97,7 +99,7 @@ type Role = workspaces.Role
 // DatabaseURLs builds the connection strings for one database (§10.1). The app
 // role uses the transaction pooler on 6432, and also on 443 with direct TLS
 // through nginx; the migrate role uses the session pooler on 5432, reachable
-// only over WireGuard or when expose_postgres is set. Both route by the
+// over WireGuard or from allowlisted addresses when expose_session_pooler is set. Both route by the
 // database name (RFC 8.1).
 func DatabaseURLs(host, tlsMode, db string, roles map[string]workspaces.Role) map[string]string {
 	query := "sslmode=verify-full&sslrootcert=system"

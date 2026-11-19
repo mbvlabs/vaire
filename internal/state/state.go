@@ -62,16 +62,26 @@ func (s FileStore) Load() (config.Cluster, []byte, error) {
 
 // Save validates raw with the full scope and writes it atomically.
 func (s FileStore) Save(raw []byte) error {
+	return s.save(raw, config.ScopeFull, nil)
+}
+
+func (s FileStore) save(raw []byte, scope config.Scope, auth *exposureAuthorization) error {
 	cfg, err := config.ParseCluster(raw)
 	if err != nil {
 		return configError(err)
 	}
 
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.ValidateFor(scope); err != nil {
 		return config.ValidationError(err)
 	}
 
-	if err := engine.WriteFileAtomic(s.path(), raw, config.FileMode); err != nil {
+	if err := engine.WithFileLock(s.path()+".exposure.lock", func() error {
+		if err := s.saveExposure(cfg, auth); err != nil {
+			return err
+		}
+
+		return engine.WriteFileAtomic(s.path(), raw, config.FileMode)
+	}); err != nil {
 		return err
 	}
 
@@ -93,9 +103,14 @@ func (s FileStore) Revision() (string, error) {
 		return "", err
 	}
 
+	return RevisionOf(raw), nil
+}
+
+// RevisionOf is the config revision for raw TOML bytes.
+func RevisionOf(raw []byte) string {
 	sum := sha256.Sum256(raw)
 
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:])
 }
 
 func configError(err error) error {

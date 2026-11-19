@@ -50,7 +50,7 @@ func TestPrepareExtensionStartTargetIsolation(t *testing.T) {
 		return nil
 	}
 
-	if err := PrepareExtensionStart(context.Background(), cfg, cfg.Clusters[0], nil, engine.Runtime{}, nil); err != nil {
+	if err := PrepareExtensionStart(context.Background(), cfg, cfg.Clusters[0], nil, engine.Runtime{TrustedHostAdmin: true}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -207,7 +207,7 @@ func TestConfigInstallsAutoExplainOverrideBeforeFirstWrite(t *testing.T) {
 		return errors.New("stop after first write")
 	}
 
-	_, err := (postgresConfig{}).Instance("autoexplaincfg").Apply(context.Background(), cfg, engine.Runtime{}, nil)
+	_, err := (postgresConfig{}).Instance("autoexplaincfg").Apply(context.Background(), cfg, engine.Runtime{TrustedHostAdmin: true}, nil)
 	if err == nil || !strings.Contains(err.Error(), "stop after first write") {
 		t.Fatalf("config write sentinel = %v", err)
 	}
@@ -261,7 +261,7 @@ func TestRestarterInstallsAutoExplainOverrideBeforePause(t *testing.T) {
 	restarterWaitReady = func(context.Context, int) error { return nil }
 	restarterPendingCheck = func(context.Context, pg.Local) ([]string, error) { return nil, nil }
 
-	if _, err := RestarterFor(cfg, engine.Runtime{}, nil).Restart(context.Background(), "app"); err != nil {
+	if _, err := RestarterFor(cfg, engine.Runtime{TrustedHostAdmin: true}, nil).Restart(context.Background(), "app"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -494,7 +494,7 @@ func TestConfigInstallsBeforeFirstWrite(t *testing.T) {
 		return errors.New("stop after first write")
 	}
 
-	_, err := (postgresConfig{}).Instance("app").Apply(context.Background(), cfg, engine.Runtime{}, nil)
+	_, err := (postgresConfig{}).Instance("app").Apply(context.Background(), cfg, engine.Runtime{TrustedHostAdmin: true}, nil)
 	if err == nil || !strings.Contains(err.Error(), "stop after first write") {
 		t.Fatalf("config write sentinel = %v", err)
 	}
@@ -611,7 +611,7 @@ func TestRestarterInstallsBeforePause(t *testing.T) {
 	restarterWaitReady = func(context.Context, int) error { return nil }
 	restarterPendingCheck = func(context.Context, pg.Local) ([]string, error) { return nil, nil }
 
-	if _, err := RestarterFor(cfg, engine.Runtime{}, nil).Restart(context.Background(), "app"); err != nil {
+	if _, err := RestarterFor(cfg, engine.Runtime{TrustedHostAdmin: true}, nil).Restart(context.Background(), "app"); err != nil {
 		t.Fatal(err)
 	}
 

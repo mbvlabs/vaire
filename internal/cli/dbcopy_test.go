@@ -1190,6 +1190,10 @@ func TestExecuteDBCopyHumanSuccessHandsOffCredentials(t *testing.T) {
 		t.Fatalf("human output has no one-time note:\n%s", text)
 	}
 
+	if !strings.Contains(text, "migrate credential acts as the database owner") {
+		t.Fatal("human output does not explain the migration credential's privileges")
+	}
+
 	if strings.Contains(text, "source-password") {
 		t.Fatal("human output leaked the source password")
 	}

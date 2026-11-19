@@ -20,6 +20,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/state"
 	"github.com/mbvlabs/vaire/internal/steps"
 	"golang.org/x/crypto/ssh"
 )
@@ -298,6 +299,10 @@ func placeFile(f masterbackup.File) error {
 
 	if err := placeDir("/", filepath.Dir(f.Path)); err != nil {
 		return err
+	}
+
+	if f.Path == masterbackup.ClusterPath {
+		return (state.FileStore{}).SaveHost(f.Data)
 	}
 
 	return engine.WriteFileAtomicOwned(f.Path, f.Data, mode, owner, group)

@@ -2,11 +2,16 @@
 
 # Vairë (`vaire`)
 
-One CLI that turns a fresh VPS into a hardened PostgreSQL 18 server, and then stays the only way in.
+Run PostgreSQL 18 on your own VPS with one CLI for setup, operations, and recovery.
 
-From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubuntu 26.04 server, locks it down, installs PostgreSQL 18 with PgBouncer and nginx, issues its TLS certificate, and connects you to it over WireGuard. Each database you create gets its own tuned PostgreSQL cluster with a size and resource limits, the way a managed provider gives each database its own instance. Every later operation goes through the same binary, over SSH, inside WireGuard. There is no server control daemon, web UI or open control API port; an operator-side shared tunnel daemon keeps concurrent CLI commands on one WireGuard connection per workspace.
+`vaire` provisions a fresh Debian 13 or Ubuntu 26.04 server. Each database gets its own PostgreSQL cluster, resource limits, and, when backups are configured, a separate backup and restore history. Operators manage the server over SSH inside WireGuard; applications connect with standard PostgreSQL clients through PgBouncer. There is no server control daemon or public management API.
 
-> **Beta:** Use a fresh server. Multi-node management and in-place extension removal are not supported.
+> **Beta:** Use a fresh server dedicated to Vaire. The current stack uses PgBouncer and Vaire-managed nginx; it does not migrate existing Caddy installs. Multi-node management and in-place extension removal are not supported.
+
+**Upgrade policy:** Alpha and beta builds are not a compatibility baseline.
+`1.0.0-beta.2` is planned as a fresh install, not an in-place upgrade from
+`1.0.0-beta.1`. Supported in-place upgrade paths start with the release
+candidates and will be listed in the release notes.
 
 ## What works today
 
@@ -15,7 +20,7 @@ From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubun
 | Setup | `vaire server init` (remote over SSH, or `--local` on the server), `--resume` |
 | Access | `vaire login`, `vaire workspace list\|show\|use\|remove\|set-address`, `vaire ssh`, `vaire tunnel` |
 | Desired state | `vaire plan`, `vaire apply`, `vaire config show\|get\|set\|edit\|validate` |
-| Databases | `vaire db list\|create\|resize\|drop\|credentials\|fork\|follow\|unfollow\|protect\|unprotect` |
+| Databases | `vaire db list\|create\|resize\|drop\|credentials\|copy\|fork\|follow\|unfollow\|protect\|unprotect` |
 | Protection | `vaire protect init\|status` (two-factor code), `vaire db protect\|unprotect` |
 | SQL | `vaire sql` (multiple statements and ordered results, JSON-friendly), `vaire psql`, `vaire console` (usql) |
 | Tuning | `vaire tune show\|explain\|apply` |
@@ -31,13 +36,10 @@ From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubun
 | Operations | `vaire logs`, `vaire secrets export`, `vaire upgrade` |
 | Agents | `vaire commands --json`, `vaire guide agents`, `vaire skill install` |
 
-`vaire activity list|show|health` and `vaire diagnostics collect|inspect` provide local, metadata-only operation history and portable incident evidence. No logging database, external collector or raw-log export is required.
-
-**External copy:** `vaire db copy` imports a trusted external PostgreSQL snapshot into a new database. For unattended use, pass the source connection URL via `--source-url-stdin` and confirm the new database name with `--confirm`. The destination server must be able to reach the source. Source roles and settings are not imported; no existing database is overwritten.
-
 ## Install
 
-Official installers verify signed releases with cosign. Use a **versioned URL**
+Official installers are available for Linux and macOS on AMD64 and ARM64.
+They verify signed releases with cosign. Use a **versioned URL**
 to install one exact release, or a **channel URL** to install whatever that
 channel points to today.
 
@@ -82,14 +84,21 @@ and `stable-1.x`.
 
 ## Quick start
 
+Start with a fresh VPS, initial root SSH access, and a DNS name you control.
+If you use Cloudflare, see [Cloudflare setup](#cloudflare-setup) for DNS and
+optional R2 backups.
+
 ```sh
 # Bootstrap a fresh server (provider root key or password for first contact)
 vaire server init --host root@203.0.113.10
+```
 
-# vaire asks a few questions, shows the DNS record to create (db1.<your domain>),
-# hardens the box, closes public SSH, installs PostgreSQL, and ends with the
-# secrets handoff.
+During setup, Vaire shows the DNS records to create, locks down SSH, and issues
+the node certificate in the background. Save the secrets handoff before closing
+the terminal. Configure offsite backups during setup or later with
+`vaire backup setup`.
 
+```sh
 vaire db create app --size small   # a cluster of its own; prints the URLs and passwords once
 vaire sql --db app "select now()"
 vaire console app                # interactive usql session
@@ -101,7 +110,44 @@ Fresh setups generate a `machine-<id>` registration. Importing the same bundle
 on another computer shares that registration and its keys; it does not enroll a
 new machine.
 
-### Workspaces and nodes
+## Cloudflare setup
+
+Cloudflare is optional. **DNS** points clients to the VPS; **R2** stores offsite
+backups. You can use either without the other.
+
+### DNS for the VPS
+
+In **Cloudflare → your domain → DNS → Records**, add the records shown by
+`vaire server init`. For `db1.example.com`, create an **A** record for `db1`
+pointing to the VPS's public IPv4 address. Add an **AAAA** record only if
+the VPS has working public IPv6. Set both to **DNS only** (gray cloud), not
+**Proxied** (orange cloud).
+
+Use one hostname per VPS, not one per database. PostgreSQL clients connect
+directly to the VPS, including when they use PostgreSQL over port 443.
+Vaire obtains and renews the certificate itself using ACME HTTP-01 on port 80;
+you don't need a Cloudflare DNS API token or a Cloudflare Origin Certificate.
+
+### Private R2 bucket for backups
+
+1. In **Cloudflare → R2 Object Storage**, create a private bucket, such as
+   `vaire-backups`. Leave public access off. If you publish your own Vaire
+   builds, keep their downloads in a separate bucket.
+2. Create R2 S3 credentials with **Object Read & Write** access scoped to that
+   bucket. Save the access key ID and secret access key in your password manager.
+3. Choose **Cloudflare R2** during `vaire server init` or run `vaire backup setup`.
+   Enter the bucket's S3 API endpoint (`https://<account_id>.r2.cloudflarestorage.com`
+   for a standard bucket), region `auto`, bucket name, and credentials.
+   The R2 preset uses path-style access. Give each independent installation its
+   own prefix if they share a bucket.
+4. Save the recovery handoff securely and check `vaire backup list --db app`
+   and `vaire server backup list`. The former shows physical backups and the
+   archived WAL restore window; the latter shows the server-state bundles.
+
+Use the S3 API endpoint from the R2 dashboard, not an `r2.dev` URL or a public
+custom domain.
+
+## Workspaces and nodes
 
 A **workspace** groups an installation's nodes, database placement and operator
 access. Its name is independent of any node name: `prod` is a workspace, while
@@ -140,7 +186,7 @@ workspace. Local access lives under `~/.config/vaire/workspaces/<name>/`, with
                                                        └─────────────────────────────────────────┘
 ```
 
-- **One binary, two roles.** On your machine `vaire` is the operator CLI. On the server the same binary runs as `vaire node …`, called over SSH for each command and by systemd timers. Operator and node versions are kept in lockstep: a mismatch is refused unless you pass `--auto-upgrade-nodes`, which pushes the matching signed build.
+- **One binary, two roles.** On your machine `vaire` is the operator CLI. On the server the same binary runs as `vaire node …`, called over SSH for each command and by systemd timers. An existing node must run the matching build; only a trusted host administrator may replace its binary.
 - **Desired state in, convergence out.** The server and its databases are described by one TOML file on the server. `vaire plan` shows what would change and `vaire apply` converges, and it's always safe to run again. Steps have versioned IDs (`tls-v1`, and `postgres-config-v1@app` for one database's cluster), and a journal records what ran, so an upgrade only re-runs the steps that changed.
 - **vaire owns the config it writes.** Managed files are rendered from templates and checked for drift. `ALTER SYSTEM` is disabled so nothing changes behind vaire's back.
 
@@ -179,7 +225,9 @@ postgres://app_app:…@db1.example.com:443/app?…&sslnegotiation=direct        
 postgres://app_migrate:…@db1.example.com:5432/app?sslmode=verify-full&sslrootcert=system   migrations and tools, session pooler
 ```
 
-Creating, forking, restoring, resizing or dropping a database never touches DNS or the certificate. Multi-node arrives in Phase 10, and moving a database to another server will change its URL's host.
+Creating, forking, restoring, resizing or dropping a database does not require any DNS or certificate changes.
+
+For an external PostgreSQL source, `vaire db copy` imports a snapshot into a new database without overwriting an existing one or importing source roles and settings. The VPS must be able to reach the source. For unattended use, pass the source URL via `--source-url-stdin` and confirm the destination name with `--confirm`.
 
 ### Limits, said plainly
 
@@ -187,7 +235,7 @@ Creating, forking, restoring, resizing or dropping a database never touches DNS 
 - **I/O weights depend on the disk scheduler.** They only work with BFQ or the kernel's `io.cost` model; on a typical virtio disk they do nothing, and `vaire tune show` says "not enforced".
 - **Disk space and the page cache are shared.** A database that fills the disk affects its neighbours.
 - **Density costs.** Each cluster carries its own processes (about 19 MiB idle) and buffers; a 1 GiB VPS isn't a sensible home for several databases.
-- **One server is a single point of failure** until HA (Phase 11).
+- **One server is a single point of failure.** Followers run on the same VPS for read-only workloads and migration rehearsals. They do not provide failover.
 - **Recovering a lost server.** The server backs its own state up after every change: an age-encrypted master bundle in the bucket under `<prefix>/master/` (`vaire server backup list`). When the server is lost, power the old VPS off or destroy it, create a new one, and run `vaire server init --restore --host root@<new-ip>` from your machine: the new server takes over the old one's WireGuard key, SSH host keys and certificate, so your workspace keeps working; then `vaire db recover --all` brings each database back from its stanza. Move the `db1.<domain>` record to the new IP, or use a provider IP that moves between servers (a Hetzner Primary IP, a floating IP) so nothing changes in DNS; a short TTL on that record shortens the wait for clients. Without a bucket, keep copies with `vaire server backup export`; the server comes back from one with `--bundle-file`, but the databases' data doesn't: configure a bucket for production.
 
 ## Security design
@@ -204,7 +252,7 @@ After bootstrap the server has exactly these public ports open, enforced by ufw 
   51820/udp   80/tcp   443/tcp   6432/tcp, 5432/tcp       22/tcp
   WireGuard   ACME     nginx     only from client_allowlist CLOSED
       │       HTTP-01  stream    (expose_pgbouncer /       (wg0 only)
-      │         │         │       expose_postgres)
+      │         │         │       expose_session_pooler)
       ▼         ▼         ▼          ▼
  ┌───────────────────────────────────────────────────────────────┐
  │ wg0 10.42.0.1 ── sshd :22, transaction pooler :6432,          │
@@ -216,10 +264,16 @@ After bootstrap the server has exactly these public ports open, enforced by ufw 
 - **SSH only over WireGuard.** Port 22 is allowed only `in on wg0`. Root login and password authentication are off, and only the admin user may log in, with the operator's key.
 - **Commit-confirm lockdown.** Before vaire closes public SSH, it snapshots sshd and firewall state and arms a server-side timer. If vaire doesn't confirm a working SSH-over-WireGuard session within two minutes, the server reverts on its own. A broken tunnel can't lock you out.
 - **Break-glass** is the provider console plus `vaire node unlock-ssh`, which re-opens public SSH with a password for the admin user for a fixed window. The steps are in the secrets handoff.
-- **Database ports are closed to the public by default.** WireGuard peers can always reach 6432 and 5432. `client_allowlist` with `expose_pgbouncer` / `expose_postgres` opens them to specific CIDRs. Both are PgBouncers; no PostgreSQL cluster has a TCP listener.
+- **Public database access is off by default.** Add client egress CIDRs to `network.client_allowlist` for direct application connections. `network.expose_pgbouncer` controls transaction-pooler access on 6432 and PostgreSQL over 443; `network.expose_session_pooler` separately controls session-pooler access on 5432. An empty allowlist admits no public database clients. WireGuard peers can reach both poolers regardless. No PostgreSQL cluster has a TCP listener.
 - **fail2ban** watches sshd. unattended-upgrades installs security updates only, with PostgreSQL, PgBouncer and nginx held for controlled updates.
 
 ### TLS and nginx
+
+Vaire uses nginx's stream module to share port 443 between HTTPS metrics and
+direct-TLS PostgreSQL. nginx reads the client's ALPN before terminating TLS:
+PostgreSQL goes to the transaction pooler, and HTTPS goes to the metrics server.
+nginx also serves ACME HTTP-01 challenges on port 80; Vaire itself manages
+certificate issuance and renewal.
 
 ```
  client (sslmode=verify-full)                          VPS
@@ -243,6 +297,20 @@ After bootstrap the server has exactly these public ports open, enforced by ufw 
 - The DNS record must point straight at the server (DNS only, not proxied).
 - A `self-signed` mode exists for servers without a domain. Connections are encrypted but not verified, and vaire warns about that.
 
+### Monitoring
+
+Metrics are off on fresh nodes until approved. Set `metrics.allowlist` first
+if you want source restrictions, then run `vaire config set metrics.enabled true --apply`.
+An empty metrics allowlist accepts any source with valid Basic Auth credentials.
+
+Run `vaire metrics show` for the authenticated HTTPS endpoints, including
+`/metrics/node`, `/metrics/postgres/<db>`, `/metrics/pgbouncer`, and
+`/metrics/pgbouncer-session`. Prometheus can discover them through
+`/metrics/targets.json`. For Grafana Cloud's **Metrics Endpoint** integration,
+create a scrape job for each metrics URL you want to monitor, not for
+`targets.json`. Use Basic Auth with the metrics credentials from the secrets
+handoff. No local collector is needed for direct scraping.
+
 ### PostgreSQL hardening
 
 - Every cluster listens on its Unix socket only (`listen_addresses = ''`), and its `pg_hba.conf` allows nothing else. The poolers terminate TLS and require it on TCP, with `scram-sha-256`. The `postgres` superuser is local-socket only.
@@ -265,7 +333,11 @@ After bootstrap the server has exactly these public ports open, enforced by ufw 
  vaire_monitor      pg_monitor
 ```
 
-Run migrations as `migrate` and the application as `app`. The transaction pooler refuses the `migrate` role: in transaction mode, advisory locks, session `SET` and temporary tables can land on a different connection, so migrations go through the session pooler on 5432, where a client keeps its server connection for the whole session. From outside WireGuard, use `vaire tunnel --db app --target postgres` or set `expose_postgres = true`. A compromised app can change data but can't drop or change the schema. Default privileges give `app` and `ro` access to every new table without extra grants. The service passwords (`vaire_admin`, `vaire_monitor`, `pgbouncer_auth`) are the same in every cluster, so adding a database never makes your secrets handoff stale.
+**Use `app` for runtime and keep `migrate` out of the running application's configuration.** The `app` role can read and write rows in granted tables but cannot alter or drop those tables. The `migrate` role acts as the database owner: it can change the schema and write data for backfills. It is not a DDL-only login, and there is no migration window to open.
+
+The transaction pooler rejects `migrate` on both 6432 and 443. Run migrations through the session pooler on 5432 so session state, such as advisory locks and temporary tables, stays on one server connection. Use WireGuard or `vaire tunnel --db app --target postgres` to reach it without exposing the port publicly.
+
+Default privileges grant access to new tables created by the owner in `public`: `app` can read and write, and `ro` can read. For other schemas, configure grants and default privileges explicitly.
 
 ### Secrets
 
@@ -277,7 +349,27 @@ Run migrations as `migrate` and the application as `app`. The transaction pooler
 - You type `stored` to confirm you've saved it, and vaire offers to clear the screen. Nothing is written to disk unless you ask with `--secrets-out`.
 - `vaire login` on any machine takes the bundle and passphrase and sets up a **workspace**: credentials under `~/.config/vaire/workspaces/<name>/`, files 0600.
 - Later full-document reveals (`vaire secrets export` and replacement handoffs) require a master password or a node-verified authenticator code at a real terminal. With neither configured, set one using `vaire secrets password set` or `vaire protect init`. This is a command gate, not encryption of workspace files at rest.
-- Releases are signed with cosign. `vaire upgrade` and node upgrades verify the signature and the sha256 before swapping binaries.
+- Releases are signed with cosign. Use `vaire upgrade --skip-nodes` for the CLI. Node binary replacement is a separate, trusted host-administrator operation; operator RPC cannot install or downgrade it.
+
+### Approving public access
+
+Use a fresh host with a dedicated Vaire operator account. Do not give that
+account general sudo, membership in privileged groups, or access to provider
+credentials. The approval guard does not constrain a host administrator.
+Do not use `beta.2` to retrofit this boundary onto a `beta.1` node.
+
+From the provider console as root, run `vaire node exposure-enroll password`
+or `vaire node exposure-enroll totp`. The password is verified on the node
+and is separate from the local secrets-export master password and the SSH
+recovery password. Exposure TOTP is separate from database protection.
+After first enrollment, adding or replacing a factor requires an existing one.
+
+Use interactive `vaire config set` or `vaire config edit` to review and approve
+a change that widens public database access or HTTPS metrics. Enabling the
+session pooler switch requires approval even with an empty database allowlist.
+Dry runs and narrowing do not need a factor. An approved edit can be applied
+later. A fresh restore does not inherit approvals: database access starts
+private and metrics are off. Re-enroll and approve public access on the restored node.
 
 ### Protected databases
 
@@ -295,7 +387,7 @@ vaire sql --db app --write "…"   # on a protected database, asks for a code to
 vaire protect status             # every database, protected yes or no
 ```
 
-Protecting a database is refused until `vaire protect init` has run. A code works once, and 5 wrong codes lock codes out for 15 minutes. `vaire config set clusters.app.protected true` still works too. Root on the server can still edit the files directly; this guards against agents and slips, not against someone who owns the box.
+Protection is opt-in and requires `vaire protect init`. The master password does not substitute for an authenticator code. Protection does not change the write permissions of the application's `<db>_app` role. A code works once, and 5 wrong codes lock codes out for 15 minutes. This guards against mistakes and unintended operator writes, not a compromised server.
 
 ### Operator connections
 
@@ -326,9 +418,9 @@ Protecting a database is refused until `vaire protect init` has run. A code work
 ```
 
 - **A stanza per database.** Each database's cluster has its own WAL stream, so backups, point-in-time recovery, retention and verification are all per database, in one repository with one cipher. Everything names a database: `backup list --db`, `backup now --db`, `restore <db>`, `db fork <db>`.
-- **Restore window.** A database can be rewound to any second between just after its oldest backup and its last archived WAL, which is at most about a minute old. The backup sets only make restores faster; the WAL fills the gaps between them. `retention_full` is the window in weeks (default 4, and a database can have its own with `clusters.<db>.backup.retention_full`). Retention is time-based, so extra full backups never shorten it.
+- **Restore window.** `vaire backup list --db app` shows the actual window, from the oldest usable backup through the latest archived WAL. The WAL fills the gaps between backup sets. `retention_full` is the window in weeks (default 4, overridable with `clusters.<db>.backup.retention_full`). Retention is time-based, so extra full backups do not shorten it.
 - **`vaire backup setup`** probes the bucket from your machine, generates the repository cipher, switches every database's WAL archiving on with a reload (no restart), and takes a first full backup of each. Refresh your secrets handoff afterwards with `vaire secrets export`. Backups are optional during `server init`; until a bucket exists, `server init` and every `apply` warn `no_offsite_backup`.
-- **Staggered.** Each database's timers run at their own offset inside the maintenance window.
+- **Staggered.** Backup timers use per-database offsets so they don't all start together. Check the actual timer schedule rather than assuming that every backup runs within the maintenance window.
 - **Dropped databases stay restorable for their window.** `db drop` keeps the stanza; `vaire backup list` shows it until a daily timer deletes it once the window has passed.
 - **Restoring one database doesn't touch the others.** A restore builds a new cluster from the database's stanza beside the live one, you check it, and only `promote` swaps it in. It needs free space for one copy of the database.
 - **`vaire db follow <db> [--name <new>] [--size <size>]`** makes a read-only physical standby of one database on the same server, copied from the source's stanza (or with `pg_basebackup` when it has none) and streaming through a replication slot capped by `max_slot_wal_keep_size`. Clients read it at the node's host with the follower's name in the path (`db1.<domain>:6432/<new>`) as the source's `_ro` or `_app` role; writes fail. `vaire db unfollow <new> --confirm <new>/unfollow` promotes it into an independent database with its own roles (new passwords, printed once), its own stanza and a first full backup, for a migration rehearsal; the source is not touched. A follower and an unfollowed copy do not inherit the source's protection: protect the copy with `vaire db protect` if it needs it.
@@ -397,6 +489,24 @@ The package install is server-wide and held; a preload change requires the exact
 
 Backups retain the resolved extension requirements they observed, bound to the immutable stanza. Restore points older than that coverage need an explicit `recovery_extensions` declaration: absent means unknown, `[]` asserts none, and a populated list names the complete requirement.
 
+Daily maintenance is scheduled near the start of the maintenance window
+(02:00–05:00 in the VPS timezone by default), with a short randomized delay.
+It checks transaction ID age, analyzes stale tables, and handles restarts
+already deferred to that window. PostgreSQL autovacuum runs independently.
+
+### VPS updates
+
+Vaire configures unattended APT updates for OS security fixes. Automatic VPS
+reboots are disabled, but package installation can still restart services.
+`vaire doctor` warns when the OS reports a pending reboot. The Vaire maintenance
+window does not schedule VPS reboots or control APT's own timers.
+
+Vaire does not yet offer a command that plans OS package updates by restart
+impact. Use the distro's package tools to review pending updates and schedule
+service restarts or a VPS reboot as needed. PostgreSQL-related packages and
+nginx are excluded from unattended updates; `vaire pg update` is not yet
+implemented. `vaire upgrade` updates Vaire itself, not the VPS packages.
+
 For bloat, `vaire maint repack` rewrites one eligible table online with `pg_repack`, and opt-in `auto_repack` does so for estimated candidates at or above 64 MiB. Repack refuses protected databases and unsupported storage, never kills another backend, and reports a table whose rewrite completion cannot be attributed as `unknown`, not as repacked. `vaire maint report bloat --db app --table events --exact` measures one table with the full `pgstattuple` scan under the report's read lock and timeouts; it is not an instantaneous or reclaimable-space guarantee, and default reports remain estimates.
 
 ## Tools used and installed
@@ -420,8 +530,7 @@ Installed from the distribution's apt repositories unless noted. Steps install o
 | `pgbouncer` | PostgreSQL packages (PGDG) | Two poolers: transaction mode on 6432 (Debian's `pgbouncer.service`) and session mode on 5432 (`vaire-pgbouncer-session.service`) |
 | `nginx`, `libnginx-mod-stream`, `ssl-cert` | TLS step | ACME HTTP-01 on 80 and ALPN routing on 443; held with `apt-mark hold` |
 | `pgbackrest` (≥ 2.59.3) | PostgreSQL packages (PGDG) | Database backups, WAL archiving and restores; held with `apt-mark hold`. 2.59.3 is the floor because earlier releases have an encryption bug |
-| `vaire` | `server init` / `--auto-upgrade-nodes` | The node binary at `/usr/local/bin/vaire`, pushed from the operator and signature-checked |
-
+| `vaire` | `server init` | The matching node binary at `/usr/local/bin/vaire`, installed during trusted bootstrap |
 | `node_exporter` 1.12.1, `postgres_exporter` 0.20.1, `pgbouncer_exporter` 0.12.1 | metrics step (upstream release binaries, sha256 pinned in vaire) | Metrics on loopback, served through nginx's authenticated `/metrics`; the same versions on Debian and Ubuntu |
 
 No ACME client (certbot and the like) is installed: vaire issues certificates itself. vaire's bloat report embeds the estimate queries of [ioguix/pgsql-bloat-estimation](https://github.com/ioguix/pgsql-bloat-estimation) (BSD-2-Clause; `vaire version --licenses` prints the notice).
@@ -434,7 +543,6 @@ No ACME client (certbot and the like) is installed: vaire issues certificates it
 | WireGuard, SSH | Every remote command | Built into vaire (userspace WireGuard, in-process SSH). Nothing to install and no root needed |
 | `psql` ≥ 16 | `vaire psql` only | Your package manager; vaire offers the install command |
 | `usql` | `vaire console` only | On PATH, or vaire downloads a pinned release (v0.21.4) into `~/.cache/vaire/tools` and checks its SHA-256 |
-| `wireguard-tools` | `vaire wg export --install` only (not implemented yet) | Your package manager; for a kernel WireGuard interface instead of the built-in one |
 
 ### Built into the binary
 

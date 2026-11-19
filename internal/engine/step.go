@@ -120,6 +120,8 @@ type Runtime struct {
 	// when the file is missing, so an operator with stale credentials can't
 	// overwrite newer ones. vaire backup setup sets it.
 	RotateSecrets bool
+	// TrustedHostAdmin is set only for requests from a direct root session.
+	TrustedHostAdmin bool
 }
 
 // Restarter restarts one PostgreSQL cluster and reports how long it was

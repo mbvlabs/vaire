@@ -60,14 +60,14 @@ func (n *Node) Version(ctx context.Context) (node.BuildID, bool, error) {
 
 // HandshakeOptions steer Handshake.
 type HandshakeOptions struct {
-	// AutoUpgrade installs the operator's build on a mismatched node.
+	// AutoUpgrade bootstraps a missing node; existing binaries require an administrator.
 	AutoUpgrade bool
 	// Progress receives one line per action.
 	Progress func(line string)
 }
 
-// Handshake checks that the node runs the operator's build (§7.3). With
-// AutoUpgrade a mismatched node gets the operator's build first.
+// Handshake checks that the node runs the operator's build (§7.3).
+// AutoUpgrade can bootstrap a missing node, but cannot replace an existing binary.
 func (n *Node) Handshake(ctx context.Context, opts HandshakeOptions) error {
 	got, installed, err := n.Version(ctx)
 	if err != nil {
@@ -79,7 +79,7 @@ func (n *Node) Handshake(ctx context.Context, opts HandshakeOptions) error {
 		return nil
 	}
 
-	if !opts.AutoUpgrade {
+	if !opts.AutoUpgrade || installed {
 		return versionMismatch(got, want, installed)
 	}
 
@@ -97,11 +97,7 @@ func (n *Node) Handshake(ctx context.Context, opts HandshakeOptions) error {
 		return err
 	}
 
-	if installed {
-		if _, err := n.InstallUpgrade(ctx, art, CallOptions{}); err != nil {
-			return err
-		}
-	} else if err := n.InstallBootstrap(ctx, art); err != nil {
+	if err := n.InstallBootstrap(ctx, art); err != nil {
 		return err
 	}
 
@@ -128,6 +124,6 @@ func versionMismatch(got, want node.BuildID, installed bool) *output.CLIError {
 		output.CodeNodeVersionMismatch,
 		message,
 		output.ExitVersion,
-		"Run vaire node upgrade, or re-run with --auto-upgrade-nodes.",
+		"Have a trusted administrator install the matching vaire binary on the node.",
 	).WithDetails(map[string]any{"node": got, "client": want, "installed": installed})
 }

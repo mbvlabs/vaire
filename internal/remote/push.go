@@ -199,7 +199,8 @@ func (c *countingReader) Read(p []byte) (int, error) {
 
 // bootstrapInstall installs the first node binary as root (§7.5 step 4): it
 // copies the upload into a root-only staging file, checks the copy's sha256
-// and that it runs, then moves it into place. The upload is always removed.
+// and that it runs, then links it into place without replacing an existing
+// binary. The upload is always removed.
 const bootstrapInstall = `set -eu
 src="$1"
 want="$2"
@@ -216,10 +217,7 @@ if [ "$got" != "$want" ]; then
 fi
 "$stage" version --output json >/dev/null
 chmod 0755 "$stage"
-if [ -e "$dst" ]; then
-  ln -f "$dst" "$dst.prev"
-fi
-mv -f "$stage" "$dst"
+ln -T "$stage" "$dst"
 echo "installed $dst"
 `
 
@@ -247,26 +245,10 @@ func (n *Node) InstallBootstrap(ctx context.Context, art Artifact) error {
 	return nil
 }
 
-// InstallUpgrade pushes art and installs it through upgrade.install, which
-// verifies, swaps and self-checks the binary on the node (§7.5 step 3).
-func (n *Node) InstallUpgrade(ctx context.Context, art Artifact, opts CallOptions) (node.InstallResult, error) {
-	remote, err := n.Upload(ctx, art)
-	if err != nil {
-		return node.InstallResult{}, err
-	}
-
-	reply, err := n.Call(ctx, "upgrade.install", map[string]string{
-		"path":    remote,
-		"sha256":  art.SHA256,
-		"version": art.Build.Version,
-		"commit":  art.Build.Commit,
-		"channel": art.Build.Channel,
-	}, opts)
-	if err != nil {
-		return node.InstallResult{}, err
-	}
-
-	var res node.InstallResult
-
-	return res, reply.Decode(&res)
+// InstallUpgrade refuses delegated binary replacement, including on older nodes.
+func (n *Node) InstallUpgrade(_ context.Context, _ Artifact, _ CallOptions) (node.InstallResult, error) {
+	return node.InstallResult{}, output.NewError(output.CodePrecondition,
+		"node binary installation through RPC is disabled",
+		output.ExitPrecondition,
+		"Have a trusted administrator install the matching vaire binary on the node.")
 }

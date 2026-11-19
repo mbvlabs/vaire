@@ -277,6 +277,12 @@ func (r *initRun) collect() error {
 		}
 	}
 
+	if increases := config.ExposureIncreases(config.DefaultCluster(), cfg); len(increases) != 0 {
+		return output.NewError(output.CodePrecondition, "setup cannot enable public metrics or additional database access", output.ExitPrecondition,
+			"Finish setup with private defaults, enroll an exposure factor at the node console, then use vaire config set or config edit.").
+			WithDetails(map[string]any{"exposure_increases": increases})
+	}
+
 	if err := r.collectBackups(&cfg, answersRaw); err != nil {
 		return err
 	}
@@ -343,11 +349,6 @@ func (r *initRun) applyConfigFlags(cmd *cobra.Command, cfg *config.Cluster) {
 
 	if v := stringFlag(cmd, "acme-email"); v != "" {
 		cfg.ACMEEmail = v
-	}
-
-	if flagChanged(cmd, "allow") {
-		allow, _ := cmd.Flags().GetStringSlice("allow")
-		cfg.Network.ClientAllowlist = allow
 	}
 
 	if v := stringFlag(cmd, "profile"); v != "" {
@@ -1393,16 +1394,17 @@ func (r *initRun) installNodeBinary(ctx context.Context, n *remote.Node, arch st
 		return nil
 	}
 
+	if installed {
+		return output.NewError(output.CodePrecondition, "the node already has a different vaire build", output.ExitPrecondition,
+			"Use a fresh host or have a trusted host administrator install the matching signed build before continuing.")
+	}
+
 	art, err := remote.NodeArtifact(ctx, arch)
 	if err != nil {
 		return err
 	}
 
-	if installed {
-		if _, err := n.InstallUpgrade(ctx, art, remote.CallOptions{OnEvent: r.p.event}); err != nil {
-			return err
-		}
-	} else if err := n.InstallBootstrap(ctx, art); err != nil {
+	if err := n.InstallBootstrap(ctx, art); err != nil {
 		return err
 	}
 

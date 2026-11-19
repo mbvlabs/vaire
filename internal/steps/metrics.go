@@ -357,6 +357,14 @@ func metricsUnitsReason(ctx context.Context, cfg config.Cluster) string {
 }
 
 func (s metricsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
+	// The engine journals running before Apply and retries failed or interrupted
+	// steps even when the on-disk configuration already matches.
+	return applyExposure(cfg, func() (engine.ApplyResult, error) {
+		return s.apply(ctx, cfg, rt, report)
+	})
+}
+
+func (s metricsStep) apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
 	if !cfg.Metrics.Enabled {
 		return applyMetricsDisabled(ctx, rt, s.ID(), report)
 	}

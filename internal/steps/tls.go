@@ -83,6 +83,14 @@ func (tlsStep) Check(ctx context.Context, cfg config.Cluster, _ engine.Runtime) 
 }
 
 func (s tlsStep) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
+	// The engine journals running before Apply and retries failed or interrupted
+	// steps even when the on-disk configuration already matches.
+	return applyExposure(cfg, func() (engine.ApplyResult, error) {
+		return s.apply(ctx, cfg, rt, report)
+	})
+}
+
+func (s tlsStep) apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
 	// nginx and its distribution config are installed first, so vaire's
 	// nginx.conf is written over the package's default afterwards.
 	env := map[string]string{

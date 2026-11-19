@@ -2,7 +2,7 @@
 # Unix socket: the admin console and local tools.
 local     all  all                 scram-sha-256
 # Everyone else comes over TCP on 5432 (WireGuard, or the allowlist when
-# network.expose_postgres is set) and must use TLS.
+# network.expose_session_pooler is set) and must use TLS.
 hostssl   all  all  0.0.0.0/0      scram-sha-256
 hostssl   all  all  ::/0           scram-sha-256
 host      all  all  0.0.0.0/0      reject

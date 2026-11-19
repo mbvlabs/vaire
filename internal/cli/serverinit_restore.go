@@ -377,6 +377,12 @@ func (r *initRun) restoreConfig() error {
 			WithDetails(map[string]any{"reason": "bundle_server_mismatch"})
 	}
 
+	// Approvals belong to the old node, not the backup. Retain the private
+	// WireGuard topology and require new approval for public endpoints.
+	cfg.Network.ExposeSessionPooler = false
+	cfg.Network.ClientAllowlist = nil
+	cfg.Metrics.Enabled = false
+
 	r.cfg = cfg
 	if rr.state.NewAddress == "" {
 		addr, err := r.publicAddress()

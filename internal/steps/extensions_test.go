@@ -441,7 +441,7 @@ func TestPostgresPackagesScriptEnvAndFailureHonesty(t *testing.T) {
 		return nil
 	}
 
-	if err := installPostgresPackages(context.Background(), cfg, "postgres-packages-v1", engine.Runtime{}, nil); err != nil {
+	if err := installPostgresPackages(context.Background(), cfg, "postgres-packages-v1", engine.Runtime{TrustedHostAdmin: true}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -464,7 +464,7 @@ func TestPostgresPackagesScriptEnvAndFailureHonesty(t *testing.T) {
 		return nil
 	}
 
-	err := installPostgresPackages(context.Background(), cfg, "postgres-packages-v1", engine.Runtime{}, nil)
+	err := installPostgresPackages(context.Background(), cfg, "postgres-packages-v1", engine.Runtime{TrustedHostAdmin: true}, nil)
 	if err == nil || !strings.Contains(err.Error(), "extension prerequisites are not met") ||
 		!strings.Contains(err.Error(), "installed packages are not removed") {
 		t.Fatalf("post-install verification failure = %v", err)
@@ -474,7 +474,7 @@ func TestPostgresPackagesScriptEnvAndFailureHonesty(t *testing.T) {
 		return &engine.ScriptError{Step: "postgres-packages-v1", Status: 100, Tail: []string{"E: Unable to locate package postgresql-18-custom"}}
 	}
 
-	err = installPostgresPackages(context.Background(), cfg, "postgres-packages-v1", engine.Runtime{}, nil)
+	err = installPostgresPackages(context.Background(), cfg, "postgres-packages-v1", engine.Runtime{TrustedHostAdmin: true}, nil)
 	if err == nil || !strings.Contains(err.Error(), "Unable to locate package") ||
 		!strings.Contains(err.Error(), "installed packages are not removed") {
 		t.Fatalf("package failure = %v", err)
@@ -509,7 +509,7 @@ func TestPrepareExtensionStartScopedAPT(t *testing.T) {
 		return nil
 	}
 
-	if err := PrepareExtensionStart(context.Background(), cfg, cfg.Clusters[0], nil, engine.Runtime{}, nil); err != nil {
+	if err := PrepareExtensionStart(context.Background(), cfg, cfg.Clusters[0], nil, engine.Runtime{TrustedHostAdmin: true}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -552,7 +552,7 @@ func TestPrepareExtensionStartExtraAndPreinstalled(t *testing.T) {
 		Name: "extra", Source: catalog.SourceAPT, Package: "postgresql-18-extra",
 		ExtName: "extra_ext", Preload: "extra_lib",
 	}}
-	if err := PrepareExtensionStart(context.Background(), cfg, cfg.Clusters[0], extra, engine.Runtime{}, nil); err != nil {
+	if err := PrepareExtensionStart(context.Background(), cfg, cfg.Clusters[0], extra, engine.Runtime{TrustedHostAdmin: true}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -572,7 +572,7 @@ func TestPrepareExtensionStartExtraAndPreinstalled(t *testing.T) {
 	preinstalled := []ExtensionPrerequisite{{
 		Name: "custom", Source: catalog.SourcePreinstalled, ExtName: "custom_ext",
 	}}
-	err := PrepareExtensionStart(context.Background(), cfg, cfg.Clusters[0], preinstalled, engine.Runtime{}, nil)
+	err := PrepareExtensionStart(context.Background(), cfg, cfg.Clusters[0], preinstalled, engine.Runtime{TrustedHostAdmin: true}, nil)
 
 	if got != nil {
 		t.Fatalf("preinstalled-only prestart ran the package script: %#v", got)

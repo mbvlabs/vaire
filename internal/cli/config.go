@@ -245,32 +245,49 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	params := map[string]any{"set": map[string]string{key: value}, "base_revision": data.Revision}
+
+	preview, err := p.call(commandContext(cmd), s.node, "config.set", params, remote.CallOptions{DryRun: true, OnEvent: p.event})
+	if err != nil {
+		return err
+	}
+
+	var planned configSetPreview
+	if err := preview.Decode(&planned); err != nil {
+		return err
+	}
+
+	if dryRun(cmd) {
+		return output.Success(cmd, output.Result{
+			Data:     map[string]any{"key": key, "value": value, "plan": planned.Plan, "exposure_increases": planned.ExposureIncreases, "exposure_proposal": planned.ExposureProposal},
+			Message:  fmt.Sprintf("dry run: would set %s = %s; %d of %d steps would then apply", key, value, planned.Plan.WouldApply, planned.Plan.Total),
+			Warnings: append(s.warnings, preview.Warnings...),
+		})
+	}
+
+	exposure, err := exposureApproval(cmd, p, planned, fmt.Sprintf("Proposed change: %s = %s", key, value))
+	if err != nil {
+		return err
+	}
+
 	code, err := unprotectCode(cmd, s, p, lifted)
 	if err != nil {
 		return err
 	}
 
-	reply, err := p.call(commandContext(cmd), s.node, "config.set", map[string]any{
-		"set":           map[string]string{key: value},
-		"base_revision": data.Revision,
-	}, remote.CallOptions{DryRun: dryRun(cmd), Secrets: code, OnEvent: p.event})
-	if err != nil {
-		return err
+	if len(exposure) > 0 {
+		if code == nil {
+			code = map[string]string{}
+		}
+
+		maps.Copy(code, exposure)
+
+		params["exposure_proposal"] = planned.ExposureProposal
 	}
 
-	if dryRun(cmd) {
-		var planned struct {
-			Plan engine.PlanData `json:"plan"`
-		}
-		if err := reply.Decode(&planned); err != nil {
-			return err
-		}
-
-		return output.Success(cmd, output.Result{
-			Data:     map[string]any{"key": key, "value": value, "plan": planned.Plan},
-			Message:  fmt.Sprintf("dry run: would set %s = %s; %d of %d steps would then apply", key, value, planned.Plan.WouldApply, planned.Plan.Total),
-			Warnings: append(s.warnings, reply.Warnings...),
-		})
+	reply, err := p.call(commandContext(cmd), s.node, "config.set", params, remote.CallOptions{Secrets: code, OnEvent: p.event})
+	if err != nil {
+		return err
 	}
 
 	var res struct {
@@ -370,8 +387,13 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 		return output.Success(cmd, output.Result{Data: map[string]any{"changed": false}, Message: "no changes", Warnings: s.warnings})
 	}
 
-	if err := previewConfigSet(cmd, s, p, data, edited); err != nil {
+	planned, err := previewConfigSet(cmd, s, p, data, edited)
+	if err != nil {
 		return err
+	}
+
+	if dryRun(cmd) {
+		return output.Success(cmd, output.Result{Data: planned, Message: "dry run: configuration was not saved", Warnings: s.warnings})
 	}
 
 	ok, err := PromptYes(cmd, "Push this configuration?")
@@ -383,15 +405,32 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 		return output.NewError(output.CodeUnsafeAction, "the edit was discarded", output.ExitUnsafe, "")
 	}
 
+	exposure, err := exposureApproval(cmd, p, planned, "")
+	if err != nil {
+		return err
+	}
+
 	code, err := unprotectCode(cmd, s, p, liftedProtections(data.TOML, edited))
 	if err != nil {
 		return err
 	}
 
-	reply, err := p.call(commandContext(cmd), s.node, "config.set", map[string]any{
+	params := map[string]any{
 		"toml":          string(edited),
 		"base_revision": data.Revision,
-	}, remote.CallOptions{Secrets: code, OnEvent: p.event})
+	}
+
+	if len(exposure) > 0 {
+		if code == nil {
+			code = map[string]string{}
+		}
+
+		maps.Copy(code, exposure)
+
+		params["exposure_proposal"] = planned.ExposureProposal
+	}
+
+	reply, err := p.call(commandContext(cmd), s.node, "config.set", params, remote.CallOptions{Secrets: code, OnEvent: p.event})
 	if err != nil {
 		return err
 	}
@@ -455,26 +494,30 @@ func editConfigInEditor(cmd *cobra.Command, toml string) ([]byte, error) {
 
 // previewConfigSet shows the change and the steps it would schedule, without
 // saving it.
-func previewConfigSet(cmd *cobra.Command, s *session, p *progress, data configData, edited []byte) error {
+type configSetPreview struct {
+	Plan              engine.PlanData `json:"plan"`
+	ExposureIncreases []string        `json:"exposure_increases"`
+	ExposureProposal  string          `json:"exposure_proposal"`
+}
+
+func previewConfigSet(cmd *cobra.Command, s *session, p *progress, data configData, edited []byte) (configSetPreview, error) {
 	preview, err := p.call(commandContext(cmd), s.node, "config.set", map[string]any{
 		"toml":          string(edited),
 		"base_revision": data.Revision,
 	}, remote.CallOptions{DryRun: true, OnEvent: p.event})
 	if err != nil {
-		return err
+		return configSetPreview{}, err
 	}
 
-	var planned struct {
-		Plan engine.PlanData `json:"plan"`
-	}
+	var planned configSetPreview
 	if err := preview.Decode(&planned); err != nil {
-		return err
+		return configSetPreview{}, err
 	}
 
 	p.note(render.DiffBytes("cluster.toml", []byte(data.TOML), edited) +
 		fmt.Sprintf("%d of %d steps would apply on the next vaire apply.", planned.Plan.WouldApply, planned.Plan.Total))
 
-	return nil
+	return planned, nil
 }
 
 // liftedProtections are the databases whose protection this edit removes.

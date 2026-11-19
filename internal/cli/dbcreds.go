@@ -205,14 +205,23 @@ func serviceSecrets(workspaceName string) (map[string]string, workspaces.Credent
 // otherwise. richHeadline is the line above the block, whose frame is titled
 // title.
 func credentialsMessage(cmd *cobra.Command, headline, richHeadline, title string, secret databaseSecret) (plain, human string) {
-	plain = headline + "\n" + secret.String() + "\n" + shownOnceNote
+	note := secret.handoffNote()
+	plain = headline + "\n" + secret.String() + "\n" + note
 
 	width, ok := styledStdout(cmd)
 	if !ok {
 		return plain, ""
 	}
 
-	return plain, secret.styled(richHeadline, title, shownOnceNote, width)
+	return plain, secret.styled(richHeadline, title, note, width)
+}
+
+func (d databaseSecret) handoffNote() string {
+	if _, ok := d.Roles[steps.RoleMigrate]; ok {
+		return "Use the app credential for runtime. The migrate credential acts as the database owner and can change schema and data; keep it out of runtime configuration. " + shownOnceNote
+	}
+
+	return shownOnceNote
 }
 
 // styled renders the credentials block for a terminal width columns wide.

@@ -462,7 +462,7 @@ func TestExtAddCustomDescriptorPersistsOnlyAfterValidationAndAuthorization(t *te
 		"name": "custom_ext", "db": "app", "package": "postgresql-18-custom",
 		"preload": "custom_lib", "copy_safety": "safe", "standby_safe": standby,
 	}
-	env := &Env{Cluster: h.cfg, Req: extReq(t, params, "app/restart")}
+	env := &Env{TrustedHostAdmin: true, Cluster: h.cfg, Req: extReq(t, params, "app/restart")}
 
 	res, err := handleExtAdd(context.Background(), env)
 	if err != nil {
@@ -1654,7 +1654,7 @@ func TestExtAddProviderChangeRenewalAccepted(t *testing.T) {
 		return map[string]extensionInstalledVersion{"pg_stat_statements": {Name: "pg_stat_statements", Version: "1.12", Default: "1.12"}}, nil
 	}
 
-	env := &Env{Cluster: base, Req: extReq(t, map[string]any{
+	env := &Env{TrustedHostAdmin: true, Cluster: base, Req: extReq(t, map[string]any{
 		"name": "pg_stat_statements", "db": "app", "package": "postgresql-18-pgstat-b",
 		"copy_safety": "safe", "standby_safe": true,
 	}, "app/restart")}
@@ -1670,7 +1670,7 @@ func TestExtAddProviderChangeRenewalAccepted(t *testing.T) {
 		return map[string]extensionInstalledVersion{"pg_stat_statements": {Name: "pg_stat_statements", Version: "1.12", Default: "1.12"}}, nil
 	}
 
-	env = &Env{Cluster: base, Req: extReq(t, map[string]any{
+	env = &Env{TrustedHostAdmin: true, Cluster: base, Req: extReq(t, map[string]any{
 		"name": "pg_stat_statements", "db": "app", "package": "postgresql-18-pgstat-b",
 		"copy_safety": "safe", "standby_safe": false,
 	}, "app/restart")}
@@ -1698,7 +1698,7 @@ func TestExtAddProviderChangeRenewalAccepted(t *testing.T) {
 		return map[string]extensionInstalledVersion{"pg_cron": {Name: "pg_cron", Version: "1.6", Default: "1.6"}}, nil
 	}
 
-	env = &Env{Cluster: preloadBase, Req: extReq(t, map[string]any{
+	env = &Env{TrustedHostAdmin: true, Cluster: preloadBase, Req: extReq(t, map[string]any{
 		"name": "pg_cron", "db": "app", "preload": "two", "copy_safety": "disabled", "standby_safe": true,
 	}, "app/restart")}
 	if _, err := handleExtAdd(context.Background(), env); err != nil {
@@ -1720,7 +1720,7 @@ func TestExtAddProviderChangeRenewalAccepted(t *testing.T) {
 		return map[string]extensionInstalledVersion{"pg_stat_statements": {Name: "pg_stat_statements", Version: "1.12", Default: "1.12"}}, nil
 	}
 
-	env = &Env{Cluster: base, Req: extReq(t, map[string]any{
+	env = &Env{TrustedHostAdmin: true, Cluster: base, Req: extReq(t, map[string]any{
 		"name": "pg_stat_statements", "db": "app", "preinstalled": true,
 		"copy_safety": "safe", "standby_safe": true,
 	}, "app/restart")}
@@ -1753,7 +1753,7 @@ func TestExtAddPartialDirectFlagsPreserveExistingOverride(t *testing.T) {
 	h.installedFn = func(int) (map[string]extensionInstalledVersion, error) {
 		return map[string]extensionInstalledVersion{"pg_stat_statements": {Name: "pg_stat_statements", Version: "1.12", Default: "1.12", Schema: "public"}}, nil
 	}
-	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{
+	env := &Env{TrustedHostAdmin: true, Cluster: cfg, Req: extReq(t, map[string]any{
 		"name": "pg_stat_statements", "db": "app",
 		"settings": map[string]string{"pg_stat_statements.max": "20000"},
 	}, "app/restart")}
@@ -2102,7 +2102,7 @@ func TestExtAddCustomUnauthorizedHasZeroEffects(t *testing.T) {
 	cfg := extTestCfg()
 	h := newExtHarness(t, cfg)
 	standby := true
-	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{
+	env := &Env{TrustedHostAdmin: true, Cluster: cfg, Req: extReq(t, map[string]any{
 		"name": "custom_ext", "db": "app", "package": "postgresql-18-custom",
 		"preload": "custom_lib", "settings": map[string]string{"custom.mode": "on"},
 		"copy_safety": "safe", "standby_safe": standby,
@@ -2111,6 +2111,22 @@ func TestExtAddCustomUnauthorizedHasZeroEffects(t *testing.T) {
 	_, err := handleExtAdd(context.Background(), env)
 	if err == nil || extDetails(t, err)["confirm_token"] != "app/restart" {
 		t.Fatalf("custom without token: %v", err)
+	}
+
+	assertNoExtEffects(t, h)
+}
+
+func TestExtAddCustomPackageRequiresTrustedHost(t *testing.T) {
+	cfg := extTestCfg()
+	h := newExtHarness(t, cfg)
+	env := &Env{Cluster: cfg, Req: extReq(t, map[string]any{
+		"name": "custom_ext", "db": "app", "package": "postgresql-18-custom",
+		"copy_safety": "safe", "standby_safe": true,
+	}, "app/restart")}
+
+	_, err := handleExtAdd(context.Background(), env)
+	if err == nil || extReason(t, err) != "trusted_host_admin_required" {
+		t.Fatalf("custom package selection: %v", err)
 	}
 
 	assertNoExtEffects(t, h)

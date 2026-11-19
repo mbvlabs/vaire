@@ -16,9 +16,10 @@ import (
 )
 
 type configSetParams struct {
-	TOML         string            `json:"toml"`
-	Set          map[string]string `json:"set"`
-	BaseRevision string            `json:"base_revision"`
+	TOML             string            `json:"toml"`
+	Set              map[string]string `json:"set"`
+	BaseRevision     string            `json:"base_revision"`
+	ExposureProposal string            `json:"exposure_proposal"`
 }
 
 type configValidateParams struct {
@@ -80,6 +81,14 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 
+	if cfg.Server.AdminUser != old.Server.AdminUser || cfg.Server.DataRoot != old.Server.DataRoot {
+		return Result{}, trustedHostAdminRequired()
+	}
+
+	if err := checkExtensionPackageChange(old, cfg, env.TrustedHostAdmin); err != nil {
+		return Result{}, err
+	}
+
 	// These pure policy checks run before protection verification so a
 	// combined destructive request cannot consume a TOTP code before it is
 	// refused. Deleting a database declaration belongs to db drop, not a
@@ -104,6 +113,13 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 
+	var save func() error
+
+	save, err = configExposureSave(ctx, env, store, raw, old, cfg, p, current)
+	if err != nil {
+		return Result{}, err
+	}
+
 	if err := configSetSafetyChecks(ctx, env, old, cfg); err != nil {
 		return Result{}, err
 	}
@@ -114,7 +130,7 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 
 	extensionWarnings := extensionIntentWarnings(old, cfg)
 	// A dry run previews the plan for the new file without saving it.
-	revision, synced, err := saveConfigSet(ctx, env, store, raw, old, cfg, p, current)
+	revision, synced, err := saveConfigSet(ctx, env, store, old, cfg, p, current, save)
 	if err != nil {
 		return Result{}, err
 	}
@@ -125,6 +141,18 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	data := map[string]any{"revision": revision, "plan": plan, "saved": !env.Req.DryRun}
 
 	warnings := append(append(synced, extensionWarnings...), oversubscriptionWarnings(cfg, rt.Host)...)
+	if env.Req.DryRun {
+		if increases := config.ExposureIncreases(old, cfg); len(increases) > 0 {
+			data["exposure_increases"] = increases
+			data["exposure_proposal"] = exposureProposal(current, raw)
+
+			warnings = append(warnings, output.Warning{
+				Code:    "exposure_increase",
+				Message: "proposed configuration widens access or enables an exposure control: " + strings.Join(increases, ", "),
+			})
+		}
+	}
+
 	if planErr != nil {
 		warnings = append(warnings, output.Warning{Code: "plan_unavailable", Message: "the change was saved but the plan preview could not be computed: " + planErr.Error()})
 	}
@@ -206,7 +234,7 @@ func configSetSafetyChecks(ctx context.Context, env *Env, old, cfg config.Cluste
 	return checkRepoMove(ctx, old, cfg)
 }
 
-func saveConfigSet(ctx context.Context, env *Env, store state.Store, raw []byte, old, cfg config.Cluster, p configSetParams, current string) (string, []output.Warning, error) {
+func saveConfigSet(ctx context.Context, env *Env, store state.Store, old, cfg config.Cluster, p configSetParams, current string, save func() error) (string, []output.Warning, error) {
 	if env.Req.DryRun {
 		return current, nil, nil
 	}
@@ -222,7 +250,7 @@ func saveConfigSet(ctx context.Context, env *Env, store state.Store, raw []byte,
 		return "", nil, err
 	}
 
-	if err := store.Save(raw); err != nil {
+	if err := save(); err != nil {
 		return "", nil, err
 	}
 
@@ -236,6 +264,40 @@ func saveConfigSet(ctx context.Context, env *Env, store state.Store, raw []byte,
 	}
 
 	return revision, synced, nil
+}
+
+func exposureProposal(base string, raw []byte) string {
+	return state.RevisionOf(append([]byte(base+"\n"), raw...))
+}
+
+func configExposureSave(ctx context.Context, env *Env, store state.Store, raw []byte, old, cfg config.Cluster, p configSetParams, current string) (func() error, error) {
+	if env.Req.DryRun {
+		return nil, nil
+	}
+
+	if len(config.ExposureIncreases(old, cfg)) == 0 {
+		return func() error { return store.Save(raw) }, nil
+	}
+
+	approved, ok := store.(interface {
+		SaveApproved([]byte, string, func() error) error
+	})
+	if !ok {
+		return nil, output.NewError(output.CodePrecondition, "config store does not support exposure approval", output.ExitPrecondition, "")
+	}
+
+	if p.ExposureProposal != exposureProposal(current, raw) {
+		return nil, output.NewError(output.CodePrecondition, "the exposure proposal is missing or no longer matches", output.ExitPrecondition,
+			"Preview the exact change again before approving it.").WithDetails(map[string]any{"reason": "exposure_proposal_changed"})
+	}
+
+	if err := verifyExposureFactor(ctx, env.Req.Secrets["exposure_password"], env.Req.Secrets["exposure_totp"]); err != nil {
+		return nil, err
+	}
+
+	// The proof is internal to this request: same raw config and same base
+	// revision, checked again by the store under its activation lock.
+	return func() error { return approved.SaveApproved(raw, current, func() error { return nil }) }, nil
 }
 
 func checkExtensionConfigChange(ctx context.Context, env *Env, old, cfg config.Cluster) error {

@@ -18,6 +18,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/hostinfo"
 	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/state"
 	"github.com/mbvlabs/vaire/internal/steps"
 	"golang.org/x/crypto/ssh"
 )
@@ -98,6 +99,10 @@ func handleClusterBootstrap(ctx context.Context, env *Env) (Result, error) {
 	var p bootstrapParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
+	}
+
+	if (p.Phase == PhaseHost || p.Phase == PhaseRestore) && !env.TrustedHostAdmin {
+		return Result{}, trustedHostAdminRequired()
 	}
 
 	switch p.Phase {
@@ -186,7 +191,7 @@ func bootstrapHost(ctx context.Context, env *Env, p bootstrapParams) (Result, er
 
 func validateOperator(op config.Operator) error {
 	var bad []string
-	if strings.TrimSpace(op.Name) == "" {
+	if !config.NamePattern.MatchString(op.Name) {
 		bad = append(bad, "name")
 	}
 
@@ -353,8 +358,11 @@ func writeBootstrapFiles(cfg config.Cluster, spec config.NodeSpec, op config.Ope
 		return err
 	}
 
+	if err := (state.FileStore{}).SaveHost(clusterRaw); err != nil {
+		return err
+	}
+
 	for path, raw := range map[string][]byte{
-		config.ClusterPath:   clusterRaw,
 		config.NodePath:      nodeRaw,
 		config.OperatorsPath: opsRaw,
 	} {

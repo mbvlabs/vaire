@@ -261,7 +261,7 @@ func installUpgrade(cmd *cobra.Command, manifest release.Manifest, target string
 func nodesWarning() output.Warning {
 	return output.Warning{
 		Code:    "nodes_not_upgraded",
-		Message: "nodes are not upgraded: run vaire apply --auto-upgrade-nodes",
+		Message: "nodes are not upgraded: have a trusted host administrator install the matching signed build",
 	}
 }
 

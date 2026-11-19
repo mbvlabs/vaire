@@ -2562,6 +2562,10 @@ func PrepareExtensionStart(ctx context.Context, cfg config.Cluster, spec config.
 // boundary: no full raw cfg union, no repository setup, no upgrade and no
 // uninstall.
 func PrepareExtensionRequirements(ctx context.Context, reqs []ExtensionPrerequisite, rt engine.Runtime, report engine.Reporter) error {
+	if err := CheckExtensionPackageAuthority(reqs, rt.TrustedHostAdmin); err != nil {
+		return err
+	}
+
 	packages := extensionPackagesFrom(reqs)
 	if len(packages) > 0 {
 		env := map[string]string{

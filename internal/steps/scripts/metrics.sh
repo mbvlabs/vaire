@@ -30,7 +30,7 @@ if [ "${PHASE}" = "disable" ]; then
   : "${ALL_UNITS:?ALL_UNITS is required}"
   for unit in ${ALL_UNITS}; do
     if systemctl list-unit-files --quiet "${unit}" >/dev/null 2>&1; then
-      systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+      systemctl disable --now "${unit}"
     fi
   done
   nginx -t
@@ -40,7 +40,7 @@ if [ "${PHASE}" = "disable" ]; then
 fi
 
 for unit in ${STOP_UNITS:-}; do
-  systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+  systemctl disable --now "${unit}"
   printf '%s stopped\n' "${unit}"
 done
 for unit in ${START_UNITS:-}; do

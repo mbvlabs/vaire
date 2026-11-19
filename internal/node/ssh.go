@@ -407,7 +407,7 @@ func restoreSnapshot(ctx context.Context, sh engine.Shell, res *RevertResult, re
 	hadWG := false
 
 	for line := range strings.SplitSeq(string(rawRules), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
+		if line = strings.TrimSpace(line); line == steps.RuleWGSSH || line == steps.RulePublicSSH {
 			rules = append(rules, line)
 			hadWG = hadWG || line == steps.RuleWGSSH
 		}

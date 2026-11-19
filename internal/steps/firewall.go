@@ -60,29 +60,41 @@ func configuredRules(cfg config.Cluster) []string {
 
 		for _, cidr := range cfg.Network.ClientAllowlist {
 			if p, err := netip.ParsePrefix(cidr); err == nil {
-				rules = appendRule(rules, allowFromRule(p, port))
+				if p.Bits() == 0 {
+					// UFW's show added collapses either family's /0 to a
+					// family-neutral rule. Two /1s retain the family.
+					for _, half := range splitDefaultRoute(p) {
+						rules = appendRule(rules, allowFromRule(half, port))
+					}
+				} else {
+					rules = appendRule(rules, allowFromRule(p, port))
+				}
 			}
 		}
 	}
 	dbPort(PgbouncerPort, cfg.Network.ExposePgbouncer)
-	dbPort(SessionPoolerPort, cfg.Network.ExposePostgres)
+	dbPort(SessionPoolerPort, cfg.Network.ExposeSessionPooler)
 
 	return rules
 }
 
 // allowFromRule is the rule that opens port to the clients in p, as ufw
-// prints it: ufw keeps a single address without its /32 or /128, and a rule
-// from any address (/0) in its short form.
+// prints it: ufw keeps a single address without its /32 or /128.
 func allowFromRule(p netip.Prefix, port int) string {
 	p = p.Masked()
-	switch {
-	case p.Bits() == 0:
-		return fmt.Sprintf("allow %d/tcp", port)
-	case p.IsSingleIP():
+	if p.IsSingleIP() {
 		return fmt.Sprintf("allow from %s to any port %d proto tcp", p.Addr().Unmap(), port)
 	}
 
 	return fmt.Sprintf("allow from %s to any port %d proto tcp", p, port)
+}
+
+func splitDefaultRoute(p netip.Prefix) [2]netip.Prefix {
+	if p.Addr().Is4() {
+		return [2]netip.Prefix{netip.MustParsePrefix("0.0.0.0/1"), netip.MustParsePrefix("128.0.0.0/1")}
+	}
+
+	return [2]netip.Prefix{netip.MustParsePrefix("::/1"), netip.MustParsePrefix("8000::/1")}
 }
 
 // appendRule appends rule unless rules has it: ufw keeps one copy of a rule.
@@ -268,6 +280,12 @@ func quoteRules(rules []string) string {
 }
 
 func (s firewall) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
+	return applyExposure(cfg, func() (engine.ApplyResult, error) {
+		return s.apply(ctx, cfg, rt, report)
+	})
+}
+
+func (s firewall) apply(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
 	rules, err := firewallInputs(ctx, cfg)
 	if err != nil {
 		return engine.ApplyResult{}, err

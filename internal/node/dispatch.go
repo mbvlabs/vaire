@@ -27,10 +27,11 @@ import (
 
 // Env is what a method handler gets for one request.
 type Env struct {
-	Req     rpc.Request
-	Cluster config.Cluster
-	Log     *engine.RunLog
-	Report  engine.Reporter
+	Req              rpc.Request
+	Cluster          config.Cluster
+	Log              *engine.RunLog
+	Report           engine.Reporter
+	TrustedHostAdmin bool
 	// LockMode is the global lock mode the dispatcher actually acquired from
 	// its pre-lock configuration/records snapshot. A handler that reloads
 	// configuration after the lock compares against this decision instead of
@@ -265,7 +266,7 @@ func serveCheckMethod(req rpc.Request, m method, known bool, table map[string]me
 		return nil, out.fail(req.Method, err), false
 	}
 
-	env := &Env{Req: req, Report: out.emit}
+	env := &Env{Req: req, Report: out.emit, TrustedHostAdmin: trustedHostAdmin()}
 	if code, ok := serveClusterCheck(req, m, env, out, rec); !ok {
 		return nil, code, false
 	}

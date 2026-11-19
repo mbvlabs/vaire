@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Step 2 (admin-user-v1): create the admin user, install the operators' SSH
-# keys, set the sudo password when one is given, and install the validated
-# sudoers drop-in that lets the admin user run vaire node commands as root.
+# keys, set the break-glass SSH password when one is given, and install the validated
+# sudoers drop-in that lets the admin user run the vaire node RPC endpoint.
 set -euo pipefail
 
 : "${ADMIN_USER:?ADMIN_USER is required}"
@@ -10,16 +10,29 @@ set -euo pipefail
 : "${SUDOERS_PATH:?SUDOERS_PATH is required}"
 : "${SUDO_PASSWORD:=}"
 
+if [ "${ADMIN_USER}" = root ]; then
+  printf 'the managed admin user must not be root\n' >&2
+  exit 1
+fi
 if ! id "${ADMIN_USER}" >/dev/null 2>&1; then
   useradd --create-home --shell /bin/bash "${ADMIN_USER}"
   printf 'created user %s\n' "${ADMIN_USER}"
 fi
+[ "$(id -u "${ADMIN_USER}")" != 0 ] || { printf 'the managed admin user must not have UID 0\n' >&2; exit 1; }
+groups="$(id -nG "${ADMIN_USER}")"
+for group in ${groups}; do
+  case "${group}" in
+    sudo|wheel|admin|root|docker|lxd|incus|disk|libvirt)
+      printf 'the managed admin user must not belong to privileged group %s\n' "${group}" >&2
+      exit 1
+      ;;
+  esac
+done
 usermod --shell /bin/bash "${ADMIN_USER}"
-usermod --append --groups sudo "${ADMIN_USER}"
 
 if [ -n "${SUDO_PASSWORD}" ]; then
   printf '%s:%s\n' "${ADMIN_USER}" "${SUDO_PASSWORD}" | chpasswd
-  printf 'set the sudo password for %s\n' "${ADMIN_USER}"
+  printf 'set the break-glass SSH password for %s\n' "${ADMIN_USER}"
 fi
 
 home="$(getent passwd "${ADMIN_USER}" | cut -d: -f6)"

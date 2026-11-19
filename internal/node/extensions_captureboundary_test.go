@@ -173,7 +173,7 @@ func TestExtAddPrerequisiteFailureRetainsOnlyOutgoingRequirements(t *testing.T) 
 				t.Fatal(err)
 			}
 
-			_, err = handleExtAdd(context.Background(), &Env{Cluster: cfg, Req: extReq(t, tc.params)})
+			_, err = handleExtAdd(context.Background(), &Env{TrustedHostAdmin: true, Cluster: cfg, Req: extReq(t, tc.params)})
 			assertCapturePrerequisiteFailure(t, h, err)
 			assertOutgoingRequirementsRetained(t, captureBoundaryHistory(t).Requirements, seededAt)
 		})
@@ -199,7 +199,7 @@ func TestExtAddSequentialFailedProvidersLeaveNoIncomingConflict(t *testing.T) {
 			"copy_safety": "safe", "standby_safe": true,
 		},
 	} {
-		_, err := handleExtAdd(context.Background(), &Env{Cluster: cfg, Req: extReq(t, params)})
+		_, err := handleExtAdd(context.Background(), &Env{TrustedHostAdmin: true, Cluster: cfg, Req: extReq(t, params)})
 		if err == nil || extReason(t, err) != "package_install_failed" {
 			t.Fatalf("sequential proposal failure = %v", err)
 		}
@@ -257,7 +257,7 @@ func TestExtAddFailedProposalKeepsExistingProviderHistory(t *testing.T) {
 		"copy_safety": "safe", "standby_safe": true,
 	}
 
-	_, err = handleExtAdd(context.Background(), &Env{Cluster: cfg, Req: extReq(t, params)})
+	_, err = handleExtAdd(context.Background(), &Env{TrustedHostAdmin: true, Cluster: cfg, Req: extReq(t, params)})
 	if err == nil || extReason(t, err) != "package_install_failed" {
 		t.Fatalf("failed add = %v", err)
 	}

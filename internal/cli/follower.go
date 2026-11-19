@@ -343,9 +343,11 @@ func printCredentialBlock(cmd *cobra.Command, note, title string, secret databas
 		return
 	}
 
-	text := note + "\n" + secret.String() + "\n" + shownOnceNote
+	handoff := secret.handoffNote()
+
+	text := note + "\n" + secret.String() + "\n" + handoff
 	if width, ok := styledStdout(cmd); ok {
-		text = ui.Warn(note) + "\n" + secret.styled("", title, shownOnceNote, width)
+		text = ui.Warn(note) + "\n" + secret.styled("", title, handoff, width)
 	}
 
 	resume := ui.Suspend()

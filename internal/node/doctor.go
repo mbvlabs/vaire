@@ -353,7 +353,7 @@ func openAllowlists(cfg config.Cluster) []string {
 		list []string
 		on   bool
 	}{
-		{"network.client_allowlist", cfg.Network.ClientAllowlist, cfg.Network.ExposePgbouncer || cfg.Network.ExposePostgres},
+		{"network.client_allowlist", cfg.Network.ClientAllowlist, cfg.Network.ExposePgbouncer || cfg.Network.ExposeSessionPooler},
 		{"metrics.allowlist", cfg.Metrics.Allowlist, true},
 	} {
 		if !l.on {

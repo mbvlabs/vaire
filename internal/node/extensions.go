@@ -416,11 +416,15 @@ func handleExtAdd(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, databaseNotFound(spec.Name)
 	}
 
+	alreadyEnabled := extensionEnabled(cfg, spec, ext.Name)
+	if err := checkExtensionAddPackage(ext, descriptorSaved || !alreadyEnabled, env.TrustedHostAdmin); err != nil {
+		return Result{}, err
+	}
+
 	if err := extensionAddDescriptorChecks(ctx, cfg, updated, updatedSpec, ext, spec.Name, descriptorSaved); err != nil {
 		return Result{}, err
 	}
 
-	alreadyEnabled := extensionEnabled(cfg, spec, ext.Name)
 	if !env.Req.DryRun && len(cfg.FollowerNames(spec.Name)) > 0 {
 		propagated, _, err := propagateFollowerExtensions(cfg, updated)
 		if err != nil {
@@ -436,6 +440,16 @@ func handleExtAdd(ctx context.Context, env *Env) (Result, error) {
 	}
 
 	return extensionAddStandalone(ctx, env, cfg, updated, updatedSpec, spec, ext, descriptorSaved, alreadyEnabled)
+}
+
+func checkExtensionAddPackage(ext catalog.Extension, changed, trusted bool) error {
+	if !changed {
+		return nil
+	}
+
+	return steps.CheckExtensionPackageAuthority([]steps.ExtensionPrerequisite{{
+		Name: ext.Name, Source: ext.Source, Package: ext.Package,
+	}}, trusted)
 }
 
 func extensionAddDescriptorChecks(ctx context.Context, cfg, updated config.Cluster, updatedSpec config.ClusterSpec, ext catalog.Extension, db string, descriptorSaved bool) error {

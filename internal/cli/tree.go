@@ -397,7 +397,7 @@ func phase1Commands() []cmdSpec {
 				Summary: "Forward a local port to the transaction or session pooler",
 				WhenToUse: []string{
 					"Point a GUI or library at 127.0.0.1 through the tunnel. Both poolers route by the database name in the DSN.",
-					"Run migrations as <db>_migrate with --target postgres, the session pooler on 5432: the transaction pooler refuses the migrate role, and 5432 is closed to the internet unless network.expose_postgres is set.",
+					"Run migrations as <db>_migrate with --target postgres, the session pooler on 5432. The transaction pooler refuses the migrate role. Public access to 5432 requires network.expose_session_pooler and a client allowlist.",
 				},
 				Examples: []string{"vaire tunnel", "vaire tunnel --db app --target postgres --local-port 6544"},
 			},
@@ -559,8 +559,8 @@ func phase1Commands() []cmdSpec {
 				flagBool("skip-nodes", "Update only the local binary"),
 			},
 			meta: CommandMeta{
-				Summary:          "Install a signed vaire release and upgrade nodes",
-				WhenToUse:        []string{"Move the operator CLI and its nodes to a newer signed release."},
+				Summary:          "Install a signed release of the operator CLI",
+				WhenToUse:        []string{"Update the local CLI. A trusted host administrator updates existing nodes separately."},
 				Examples:         []string{"vaire upgrade", "vaire upgrade --version 1.2.0 --dry-run"},
 				Mutating:         true,
 				SupportsDryRun:   true,
@@ -714,7 +714,6 @@ func serverCommands() cmdSpec {
 				flagString("profile", "", "Workload profile: oltp, mixed, or analytics"),
 				flagString("default-size", "", "Default database size: nano, small, medium, large, or xlarge (default medium)"),
 				flagInt("client-connections", 1000, "PgBouncer max client connections"),
-				flagStrings("allow", "Client CIDR allowed to reach the database ports (repeatable)"),
 				flagString("backup-provider", "", "Backup provider preset: r2, s3, b2, hetzner, minio, or custom"),
 				flagString("backup-endpoint", "", "S3-compatible endpoint URL"),
 				flagString("backup-region", "", "Bucket region"),
@@ -763,7 +762,6 @@ func serverCommands() cmdSpec {
 					"--admin-user",
 					"--timezone",
 					"--data-root",
-					"--allow",
 					"--profile",
 					"--default-size",
 					"--client-connections",
@@ -1564,6 +1562,18 @@ func nodeCommands() cmdSpec {
 			LinuxOnly: true,
 		},
 		children: []cmdSpec{
+			{
+				use:  "exposure-enroll <password|totp>",
+				args: cobra.ExactArgs(1),
+				run:  runNodeExposureEnroll,
+				meta: CommandMeta{
+					Summary:   "Enroll an exposure approval factor at the root console",
+					WhenToUse: []string{"Enroll or replace an exposure password or authenticator factor. An existing factor is required after first enrollment."},
+					Examples:  []string{"sudo vaire node exposure-enroll password", "sudo vaire node exposure-enroll totp"},
+					Mutating:  true, LinuxOnly: true,
+					SkipDryRunCheck: true, SkipDryRunReason: "enrollment requires an interactive secret and has no preview",
+				},
+			},
 			{
 				use: "upgrade",
 				run: notImplemented,

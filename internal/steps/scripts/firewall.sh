@@ -30,7 +30,8 @@ wanted() {
 }
 
 add_all
-mapfile -t have < <(ufw show added | sed -n 's/^ufw //p')
+added=$(ufw show added)
+mapfile -t have < <(printf '%s\n' "${added}" | sed -n 's/^ufw //p')
 for rule in "${have[@]}"; do
   [ -n "${rule}" ] || continue
   wanted "${rule}" && continue
@@ -38,7 +39,8 @@ for rule in "${have[@]}"; do
   if ufw delete "${args[@]}" >/dev/null; then
     printf 'removed rule: %s\n' "${rule}"
   else
-    printf 'could not remove rule: %s\n' "${rule}"
+    printf 'could not remove rule: %s\n' "${rule}" >&2
+    exit 1
   fi
 done
 add_all

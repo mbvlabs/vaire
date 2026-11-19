@@ -43,6 +43,19 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 		).WithDetails(map[string]any{"reason": "host_phase_incomplete"})
 	}
 
+	current, err := config.LoadCluster(config.ClusterPath)
+	if err != nil {
+		return Result{}, err
+	}
+
+	if cfg.Server.AdminUser != current.Server.AdminUser || cfg.Server.DataRoot != current.Server.DataRoot {
+		return Result{}, trustedHostAdminRequired()
+	}
+
+	if err := checkExtensionPackageChange(current, cfg, env.TrustedHostAdmin); err != nil {
+		return Result{}, err
+	}
+
 	raw, err := cfg.Encode()
 	if err != nil {
 		return Result{}, err

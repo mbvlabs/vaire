@@ -143,9 +143,9 @@ type Postgres struct {
 
 // Network is [network].
 type Network struct {
-	ClientAllowlist []string `toml:"client_allowlist"`
-	ExposePgbouncer bool     `toml:"expose_pgbouncer"`
-	ExposePostgres  bool     `toml:"expose_postgres"`
+	ClientAllowlist     []string `toml:"client_allowlist"`
+	ExposePgbouncer     bool     `toml:"expose_pgbouncer"`
+	ExposeSessionPooler bool     `toml:"expose_session_pooler"`
 }
 
 // MasterBackup is [master_backup] (RFC 6.5): the retention of the master's
@@ -229,7 +229,7 @@ func DefaultCluster() Cluster {
 		},
 		MasterBackup: MasterBackup{RetentionDays: 30, RetentionWeeks: 52, LocalKeep: 10},
 		Maintenance:  Maintenance{Window: "02:00-05:00", RepackBloatThreshold: 0.40},
-		Metrics:      Metrics{Enabled: true, PathPrefix: "/metrics", Allowlist: []string{}},
+		Metrics:      Metrics{PathPrefix: "/metrics", Allowlist: []string{}},
 	}
 }
 
