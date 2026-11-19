@@ -2,11 +2,40 @@ package state
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/mbvlabs/vaire/internal/config"
 )
+
+func TestEarlierEdgeApprovalDoesNotOpenBothPoolers(t *testing.T) {
+	store := FileStore{Path: filepath.Join(t.TempDir(), "cluster.toml")}
+	cfg := config.DefaultCluster()
+	cfg.Network.ClientAllowlist = []string{"192.0.2.10/32"}
+
+	prior := `{"Network":{"ClientAllowlist":["192.0.2.10/32"],"ExposePgbouncer":true,"ExposeSessionPooler":false}}`
+	if err := os.WriteFile(store.Path+".exposure", []byte(prior), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := cfg.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(store.Path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.WithExposure(cfg, func() error {
+		t.Fatal("prior approval reached activation")
+
+		return nil
+	}); err == nil {
+		t.Fatal("prior approval was accepted for both poolers")
+	}
+}
 
 func TestExposureApprovalCeiling(t *testing.T) {
 	store := FileStore{Path: filepath.Join(t.TempDir(), "cluster.toml")}
@@ -14,7 +43,7 @@ func TestExposureApprovalCeiling(t *testing.T) {
 	closed.ClusterName = "fixture"
 	closed.Nodes = []config.NodeSpec{{Name: "db1", Role: config.RoleMaster, PublicAddress: "192.0.2.1", WGAddress: "10.42.0.1"}}
 	opened := closed
-	opened.Network.ExposeSessionPooler = true
+	opened.Network.ClientAllowlist = []string{"192.0.2.10/32"}
 
 	save := func(cfg config.Cluster, auth *exposureAuthorization) error {
 		t.Helper()

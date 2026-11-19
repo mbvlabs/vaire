@@ -11,13 +11,8 @@ import (
 func ExposureIncreases(old, next Cluster) []string {
 	var surfaces []string
 
-	if next.Network.ExposeSessionPooler && (!old.Network.ExposeSessionPooler ||
-		prefixesWiden(old.Network.ClientAllowlist, next.Network.ClientAllowlist)) {
-		surfaces = append(surfaces, "session_pooler")
-	}
-
-	if prefixesWiden(poolerClients(old), poolerClients(next)) {
-		surfaces = append(surfaces, "transaction_pooler")
+	if prefixesWiden(old.Network.ClientAllowlist, next.Network.ClientAllowlist) {
+		surfaces = append(surfaces, "session_pooler", "transaction_pooler")
 	}
 
 	if next.Transport.Subnet != "" && prefixesWiden(
@@ -38,14 +33,6 @@ func subnetPrefixes(subnet string) []string {
 	}
 
 	return []string{subnet}
-}
-
-func poolerClients(c Cluster) []string {
-	if !c.Network.ExposePgbouncer {
-		return nil
-	}
-
-	return c.Network.ClientAllowlist
 }
 
 func metricsClients(c Cluster) []string {

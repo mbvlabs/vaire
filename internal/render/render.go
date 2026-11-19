@@ -312,11 +312,9 @@ func PgbouncerUserlist(verifiers map[string]string) []byte {
 func NginxConf(cfg config.Cluster, hostname, acmeWebroot string) []byte {
 	var allow []string
 
-	if cfg.Network.ExposePgbouncer {
-		for _, cidr := range cfg.Network.ClientAllowlist {
-			if p, err := netip.ParsePrefix(cidr); err == nil {
-				allow = append(allow, p.Masked().String())
-			}
+	for _, cidr := range cfg.Network.ClientAllowlist {
+		if p, err := netip.ParsePrefix(cidr); err == nil {
+			allow = append(allow, p.Masked().String())
 		}
 	}
 

@@ -351,15 +351,10 @@ func openAllowlists(cfg config.Cluster) []string {
 	for _, l := range []struct {
 		name string
 		list []string
-		on   bool
 	}{
-		{"network.client_allowlist", cfg.Network.ClientAllowlist, cfg.Network.ExposePgbouncer || cfg.Network.ExposeSessionPooler},
-		{"metrics.allowlist", cfg.Metrics.Allowlist, true},
+		{"network.client_allowlist", cfg.Network.ClientAllowlist},
+		{"metrics.allowlist", cfg.Metrics.Allowlist},
 	} {
-		if !l.on {
-			continue
-		}
-
 		for _, cidr := range l.list {
 			if open, err := openToAll(cidr); err == nil && open {
 				out = append(out, l.name+" "+cidr)

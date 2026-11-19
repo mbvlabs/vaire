@@ -33,10 +33,10 @@ func TestDelegatedBootstrapRequiresTrustedRoot(t *testing.T) {
 func TestExposureProposalRejectsDifferentConfigAndRevision(t *testing.T) {
 	old := config.DefaultCluster()
 	proposed := old
-	proposed.Network.ExposeSessionPooler = true
+	proposed.Network.ClientAllowlist = []string{"192.0.2.10/32"}
 
 	store := state.FileStore{Path: filepath.Join(t.TempDir(), "cluster.toml")}
-	raw := []byte("[network]\nexpose_session_pooler = true\n")
+	raw := []byte("[network]\nclient_allowlist = [\"192.0.2.10/32\"]\n")
 	preview := exposureProposal("revision", raw)
 
 	for _, tc := range []struct {

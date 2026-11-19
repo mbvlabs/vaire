@@ -34,8 +34,6 @@ ufw allow from 2001:db8::1 to any port 5432 proto tcp`
 // and doctor's fw.rules failed on a converged firewall.
 func TestConfiguredRulesMatchUFWShowAdded(t *testing.T) {
 	cfg := config.DefaultCluster()
-	cfg.Network.ExposePgbouncer = true
-	cfg.Network.ExposeSessionPooler = true
 	cfg.Network.ClientAllowlist = []string{"203.0.113.7/32", "203.0.113.7/32", "198.51.100.9/24", "2001:db8::1/128"}
 	want := configuredRules(cfg)
 
@@ -63,7 +61,6 @@ func TestDefaultRoutesPreserveAddressFamily(t *testing.T) {
 	} {
 		t.Run(tc.cidr, func(t *testing.T) {
 			cfg := config.DefaultCluster()
-			cfg.Network.ExposePgbouncer = true
 			cfg.Network.ClientAllowlist = []string{tc.cidr, tc.cidr}
 			rules := configuredRules(cfg)
 
@@ -74,7 +71,7 @@ func TestDefaultRoutesPreserveAddressFamily(t *testing.T) {
 				}
 			}
 
-			if slices.Contains(rules, "allow 6432/tcp") || len(rules) != 8 {
+			if slices.Contains(rules, "allow 6432/tcp") || len(rules) != 10 {
 				t.Errorf("unexpected rules: %v", rules)
 			}
 

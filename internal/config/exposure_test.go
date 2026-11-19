@@ -6,23 +6,24 @@ import (
 	"testing"
 )
 
-func TestSessionPoolerExposureConfig(t *testing.T) {
-	if DefaultCluster().Network.ExposeSessionPooler {
-		t.Fatal("the session pooler must be private by default")
+func TestClientAllowlistConfig(t *testing.T) {
+	cfg := DefaultCluster()
+	if len(cfg.Network.ClientAllowlist) != 0 {
+		t.Fatal("both poolers must be private by default")
 	}
 
-	cfg, err := ParseCluster([]byte("[network]\nexpose_session_pooler = true\n"))
-	if err != nil || !cfg.Network.ExposeSessionPooler {
-		t.Fatalf("new boolean did not decode: %v", err)
+	if err := cfg.Set("network.client_allowlist", `["203.0.113.7/32"]`); err != nil {
+		t.Fatal(err)
 	}
 
-	raw, err := cfg.Encode()
-	if err != nil || !strings.Contains(string(raw), "expose_session_pooler = true") {
-		t.Fatalf("new boolean did not encode: %v", err)
+	if !slices.Equal(cfg.Network.ClientAllowlist, []string{"203.0.113.7/32"}) {
+		t.Fatalf("config set produced %v", cfg.Network.ClientAllowlist)
 	}
 
-	if _, err := ParseCluster([]byte("[network]\nexpose_postgres = true\n")); err == nil {
-		t.Fatal("the retired beta.1 key must not be silently accepted")
+	for key := range strings.FieldsSeq("expose_postgres expose_session_pooler expose_pgbouncer") {
+		if _, err := ParseCluster([]byte("[network]\n" + key + " = true\n")); err == nil {
+			t.Fatalf("retired key %s was silently accepted", key)
+		}
 	}
 }
 
@@ -34,20 +35,14 @@ func TestExposureIncreases(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "session activation requires approval even without clients",
-			next: Cluster{Network: Network{ExposeSessionPooler: true}},
-			want: []string{"session_pooler"},
-		},
-		{
-			name: "shared list can widen both poolers",
-			old:  Cluster{Network: Network{ExposeSessionPooler: true, ExposePgbouncer: true}},
-			next: Cluster{Network: Network{ExposeSessionPooler: true, ExposePgbouncer: true, ClientAllowlist: []string{"192.0.2.1/32"}}},
+			name: "one client widens both poolers",
+			next: Cluster{Network: Network{ClientAllowlist: []string{"192.0.2.1/32"}}},
 			want: []string{"session_pooler", "transaction_pooler"},
 		},
 		{
 			name: "closing database ports and restricting metrics",
 			old: Cluster{
-				Network: Network{ExposeSessionPooler: true, ExposePgbouncer: true, ClientAllowlist: []string{"192.0.2.1/32"}},
+				Network: Network{ClientAllowlist: []string{"192.0.2.1/32"}},
 				Metrics: Metrics{Enabled: true},
 			},
 			next: Cluster{Metrics: Metrics{Enabled: true, Allowlist: []string{"192.0.2.1/32"}}},

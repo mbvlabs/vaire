@@ -14,7 +14,7 @@ events {
 # without terminating TLS on 443 itself.
 stream {
     # Who may reach PgBouncer through 443: WireGuard peers always, the client
-    # allowlist when expose_pgbouncer is set, the same as port 6432.
+    # allowlist, the same as port 6432.
     geo $vaire_pg_allowed {
         default 0;
         {{ .WGSubnet }} 1;

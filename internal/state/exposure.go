@@ -12,13 +12,14 @@ import (
 
 // Keep the approval ceiling local to the node, outside the master bundle.
 type exposurePolicy struct {
+	Version int
 	Network config.Network
 	Metrics config.Metrics
 	Subnet  string
 }
 
 func policyOf(cfg config.Cluster) exposurePolicy {
-	return exposurePolicy{Network: cfg.Network, Metrics: cfg.Metrics, Subnet: cfg.Transport.Subnet}
+	return exposurePolicy{Version: 1, Network: cfg.Network, Metrics: cfg.Metrics, Subnet: cfg.Transport.Subnet}
 }
 
 func (p exposurePolicy) cluster() config.Cluster {
@@ -38,6 +39,12 @@ func (s FileStore) exposureCeiling() (config.Cluster, error) {
 	var p exposurePolicy
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return config.Cluster{}, err
+	}
+
+	// Earlier edge approvals may cover only one pooler. Never interpret
+	// one of those approvals as permission to open both.
+	if p.Version != 1 {
+		return config.DefaultCluster(), nil
 	}
 
 	return p.cluster(), nil

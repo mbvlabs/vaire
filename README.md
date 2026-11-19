@@ -251,8 +251,7 @@ After bootstrap the server has exactly these public ports open, enforced by ufw 
       │         │         │          │                         │
   51820/udp   80/tcp   443/tcp   6432/tcp, 5432/tcp       22/tcp
   WireGuard   ACME     nginx     only from client_allowlist CLOSED
-      │       HTTP-01  stream    (expose_pgbouncer /       (wg0 only)
-      │         │         │       expose_session_pooler)
+      │       HTTP-01  stream                              (wg0 only)
       ▼         ▼         ▼          ▼
  ┌───────────────────────────────────────────────────────────────┐
  │ wg0 10.42.0.1 ── sshd :22, transaction pooler :6432,          │
@@ -264,7 +263,7 @@ After bootstrap the server has exactly these public ports open, enforced by ufw 
 - **SSH only over WireGuard.** Port 22 is allowed only `in on wg0`. Root login and password authentication are off, and only the admin user may log in, with the operator's key.
 - **Commit-confirm lockdown.** Before vaire closes public SSH, it snapshots sshd and firewall state and arms a server-side timer. If vaire doesn't confirm a working SSH-over-WireGuard session within two minutes, the server reverts on its own. A broken tunnel can't lock you out.
 - **Break-glass** is the provider console plus `vaire node unlock-ssh`, which re-opens public SSH with a password for the admin user for a fixed window. The steps are in the secrets handoff.
-- **Public database access is off by default.** Add client egress CIDRs to `network.client_allowlist` for direct application connections. `network.expose_pgbouncer` controls transaction-pooler access on 6432 and PostgreSQL over 443; `network.expose_session_pooler` separately controls session-pooler access on 5432. An empty allowlist admits no public database clients. WireGuard peers can reach both poolers regardless. No PostgreSQL cluster has a TCP listener.
+- **Public database access is off by default.** Adding a client egress CIDR to `network.client_allowlist` grants network access to both poolers: `_app` on `6432` (or direct TLS on `443`) and `_migrate` on `5432`. Each still requires its own database credentials and TLS. An empty allowlist admits no public database clients. WireGuard peers can reach both poolers regardless. No PostgreSQL cluster has a TCP listener.
 - **fail2ban** watches sshd. unattended-upgrades installs security updates only, with PostgreSQL, PgBouncer and nginx held for controlled updates.
 
 ### TLS and nginx
@@ -365,8 +364,18 @@ recovery password. Exposure TOTP is separate from database protection.
 After first enrollment, adding or replacing a factor requires an existing one.
 
 Use interactive `vaire config set` or `vaire config edit` to review and approve
-a change that widens public database access or HTTPS metrics. Enabling the
-session pooler switch requires approval even with an empty database allowlist.
+a change that widens public database access or HTTPS metrics. For example,
+replace the database allowlist with one deploy host's outbound IPv4 address:
+
+```sh
+vaire config set network.client_allowlist '["203.0.113.7/32"]' --apply
+```
+
+Include any existing entries you want to keep, and the deploy host's outbound
+IPv6 `/128` if it uses IPv6. One approval covers both poolers. Use `_migrate`
+only in the deploy job and `_app` in the running service; neither needs
+WireGuard from an approved address.
+
 Dry runs and narrowing do not need a factor. An approved edit can be applied
 later. A fresh restore does not inherit approvals: database access starts
 private and metrics are off. Re-enroll and approve public access on the restored node.

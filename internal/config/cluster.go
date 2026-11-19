@@ -143,9 +143,8 @@ type Postgres struct {
 
 // Network is [network].
 type Network struct {
-	ClientAllowlist     []string `toml:"client_allowlist"`
-	ExposePgbouncer     bool     `toml:"expose_pgbouncer"`
-	ExposeSessionPooler bool     `toml:"expose_session_pooler"`
+	// ClientAllowlist grants public access to both poolers, not database privileges.
+	ClientAllowlist []string `toml:"client_allowlist"`
 }
 
 // MasterBackup is [master_backup] (RFC 6.5): the retention of the master's
@@ -216,7 +215,7 @@ func DefaultCluster() Cluster {
 			DefaultSize:              DefaultSize,
 			Settings:                 map[string]string{},
 		},
-		Network: Network{ClientAllowlist: []string{}, ExposePgbouncer: true},
+		Network: Network{ClientAllowlist: []string{}},
 		Backup: Backup{
 			Database: BackupDatabase{
 				FullSchedule:   "Sun *-*-* 01:00:00",
