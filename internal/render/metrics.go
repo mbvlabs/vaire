@@ -95,8 +95,7 @@ type sdTarget struct {
 	Labels  map[string]string `json:"labels"`
 }
 
-// TargetsJSON renders the Prometheus http_sd (and Grafana Alloy
-// discovery.http) target list (Phase 4 D6): one entry per location with a
+// TargetsJSON renders the Prometheus http_sd target list: one entry per location with a
 // __metrics_path__, so a scraper configured once follows db create and db
 // drop. host is the node's hostname; locations without labels (targets.json
 // itself) are left out.

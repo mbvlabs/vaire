@@ -25,7 +25,7 @@ From your laptop (or from a coding agent), `vaire` takes a new Debian 13 or Ubun
 | Jobs | `vaire job list\|follow` |
 | Health | `vaire status [--watch]`, `vaire doctor [--only security]`, `vaire top`, `vaire queries` |
 | Evidence | `vaire activity list\|show\|health`, `vaire diagnostics collect\|inspect` (local metadata-only history and portable incident files) |
-| Metrics | `vaire metrics show\|rotate`: an authenticated `https://db1.<domain>/metrics/...` for Prometheus or Grafana Alloy, with a `targets.json` for service discovery |
+| Metrics | `vaire metrics show\|rotate`: authenticated HTTPS endpoints for node, PostgreSQL and PgBouncer metrics, with Prometheus service discovery via `targets.json` |
 | Extensions | `vaire ext list\|add` (built-in and explicit custom definitions; APT or preinstalled) |
 | Maintenance | `vaire maint vacuum\|analyze\|reindex\|repack\|report\|kill` (including one-table `--exact`), nightly and weekly maintenance timers |
 | Operations | `vaire logs`, `vaire secrets export`, `vaire upgrade` |

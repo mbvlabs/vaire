@@ -73,15 +73,17 @@ func TestReportMessage(t *testing.T) {
 	}
 }
 
-func TestSnippets(t *testing.T) {
+func TestPrometheusSnippet(t *testing.T) {
 	p := prometheusSnippet("prod", "https://db1.example.com/metrics/targets.json", "metrics", "pw")
-	if !strings.Contains(p, "http_sd_configs") || !strings.Contains(p, "job_name: vaire-prod") {
-		t.Errorf("%s", p)
+
+	for _, want := range []string{"http_sd_configs:", "job_name: vaire-prod", "scheme: https", "url: https://db1.example.com/metrics/targets.json"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("missing %q in\n%s", want, p)
+		}
 	}
 
-	a := alloySnippet("my-prod", "https://x/metrics/targets.json", "metrics", "pw")
-	if !strings.Contains(a, `discovery.http "vaire_my_prod"`) {
-		t.Errorf("%s", a)
+	if strings.Count(p, "username: metrics") != 2 || strings.Count(p, "password: pw") != 2 {
+		t.Errorf("want credentials for discovery and scraping:\n%s", p)
 	}
 }
 

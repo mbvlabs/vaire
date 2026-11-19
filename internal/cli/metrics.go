@@ -31,7 +31,6 @@ type metricsShowData struct {
 	Username    string            `json:"username,omitempty"`
 	Password    string            `json:"password,omitempty"`
 	Prometheus  string            `json:"prometheus_config"`
-	Alloy       string            `json:"alloy_config"`
 }
 
 func metricsCommands() cmdSpec {
@@ -40,7 +39,7 @@ func metricsCommands() cmdSpec {
 		run: parentRun,
 		meta: CommandMeta{
 			Summary:   "Show or rotate the authenticated /metrics endpoint",
-			WhenToUse: []string{"Point a Prometheus or Grafana Alloy at the server, or replace the endpoint's credential."},
+			WhenToUse: []string{"Point Prometheus at the server, or replace the endpoint's credential."},
 			Examples:  []string{"vaire metrics show"},
 			Remote:    true,
 		},
@@ -53,7 +52,7 @@ func metricsCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:   "Show the /metrics paths, the service-discovery URL and scrape configs",
-					WhenToUse: []string{"Configure an external scraper. The Prometheus and Alloy snippets use targets.json, so new databases appear without edits."},
+					WhenToUse: []string{"Configure Prometheus. The scrape config uses targets.json, so new databases appear without edits."},
 					WhenNotToUse: []string{
 						"Agents: never pass --reveal or print the password; the human copies it from the secrets handoff.",
 					},
@@ -124,7 +123,6 @@ func runMetricsShow(cmd *cobra.Command, _ []string) error {
 	}
 
 	data.Prometheus = prometheusSnippet(s.ctx.Name, data.TargetsURL, user, password)
-	data.Alloy = alloySnippet(s.ctx.Name, data.TargetsURL, user, password)
 
 	lines := []string{fmt.Sprintf("/metrics on %s (user %s)", data.BaseURL, user)}
 	if !data.Enabled {
@@ -135,7 +133,7 @@ func runMetricsShow(cmd *cobra.Command, _ []string) error {
 		lines = append(lines, "  "+path.Path)
 	}
 
-	lines = append(lines, "", "service discovery: "+data.TargetsURL, "", "Prometheus:", indent(data.Prometheus), "", "Grafana Alloy:", indent(data.Alloy))
+	lines = append(lines, "", "service discovery: "+data.TargetsURL, "", "Prometheus:", indent(data.Prometheus))
 	if note := metricsPasswordNote(creds.Metrics != nil, flagTrue(cmd, "reveal")); note != "" {
 		lines = append(lines, "", note)
 	}
@@ -187,31 +185,6 @@ func prometheusSnippet(server, targetsURL, user, password string) string {
           username: %s
           password: %s
 `, server, user, password, targetsURL, user, password)
-}
-
-// alloySnippet is the Grafana Alloy equivalent.
-func alloySnippet(server, targetsURL, user, password string) string {
-	id := strings.ReplaceAll(server, "-", "_")
-
-	return fmt.Sprintf(`discovery.http "vaire_%s" {
-  url              = "%s"
-  refresh_interval = "5m"
-  basic_auth {
-    username = "%s"
-    password = "%s"
-  }
-}
-
-prometheus.scrape "vaire_%s" {
-  targets    = discovery.http.vaire_%s.targets
-  scheme     = "https"
-  basic_auth {
-    username = "%s"
-    password = "%s"
-  }
-  forward_to = [prometheus.remote_write.default.receiver]
-}
-`, id, targetsURL, user, password, id, id, user, password)
 }
 
 func runMetricsRotate(cmd *cobra.Command, _ []string) error {
