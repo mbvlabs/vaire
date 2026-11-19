@@ -21,7 +21,7 @@ candidates and will be listed in the release notes.
 | Access | `vaire login`, `vaire workspace list\|show\|use\|remove\|set-address`, `vaire ssh`, `vaire tunnel` |
 | Desired state | `vaire plan`, `vaire apply`, `vaire config show\|get\|set\|edit\|validate` |
 | Databases | `vaire db list\|create\|resize\|drop\|credentials\|copy\|fork\|follow\|unfollow\|protect\|unprotect` |
-| Protection | `vaire protect init\|status` (two-factor code), `vaire db protect\|unprotect` |
+| Protection | `vaire auth setup`, `vaire protect status`, `vaire db protect\|unprotect` |
 | SQL | `vaire sql` (multiple statements and ordered results, JSON-friendly), `vaire psql`, `vaire console` (usql) |
 | Tuning | `vaire tune show\|explain\|apply` |
 | Backups | `vaire backup setup\|now\|list\|verify` (physical backups and WAL) |
@@ -325,7 +325,7 @@ Default privileges grant access to new tables created by the owner in `public`: 
   - an ASCII-armored `age` transfer bundle (scrypt), with a generated passphrase.
 - You type `stored` to confirm you've saved it, and vaire offers to clear the screen. Nothing is written to disk unless you ask with `--secrets-out`.
 - `vaire login` on any machine takes the bundle and passphrase and sets up a **workspace**: credentials under `~/.config/vaire/workspaces/<name>/`, files 0600.
-- Later full-document reveals (`vaire secrets export` and replacement handoffs) require a master password or a node-verified authenticator code at a real terminal. With neither configured, set one using `vaire secrets password set` or `vaire protect init`. This is a command gate, not encryption of workspace files at rest.
+- Later full-document reveals (`vaire secrets export` and replacement handoffs) require a master password or authenticator code at a terminal. Set either with `vaire auth setup`. This is a command gate, not encryption of workspace files at rest.
 - Releases are signed with cosign. Use `vaire upgrade --skip-nodes` for the CLI. Node binary replacement is a separate, trusted host-administrator operation; operator RPC cannot install or downgrade it.
 
 ### Approving public access
@@ -341,9 +341,12 @@ factor without a root console or setup code. Set it up before giving an agent
 operator access: until a factor exists, any authenticated operator can enroll
 first. After that, adding or replacing a factor requires an existing one.
 
-If the workspace already has a master password for secrets export, enter that
-same password to enable node-side verification. This is not the SSH recovery
-password. Setting up an approval factor does not turn on database protection.
+The master password set during `server init` is already registered on the
+node. If you skip it, use `vaire auth setup` later to choose a master password
+or TOTP. No root console or setup code is needed. Until a factor is set,
+changes that require approval are refused.
+The master password is not the SSH recovery password. Setting up a factor
+does not turn on database protection.
 
 Use interactive `vaire config set` or `vaire config edit` to review and approve
 a change that widens public database access or HTTPS metrics. For example,
@@ -562,7 +565,7 @@ No ACME client (certbot and the like) is installed: vaire issues certificates it
 | `sigstore/sigstore-go` | Verifying signed releases on upgrade |
 | `pelletier/go-toml` | `cluster.toml` |
 | `itchyny/gojq` | `--jq` output filtering |
-| `rsc.io/qr` | The QR code `vaire protect init` shows for the authenticator app |
+| `rsc.io/qr` | The QR code `vaire auth setup` shows for the authenticator app |
 
 ## Agent-first
 

@@ -361,7 +361,7 @@ func phase1Commands() []cmdSpec {
 				Summary: "Run SQL as vaire_admin. Read-only unless --write is set",
 				WhenToUse: []string{"Inspect data or, with --write, change it. vaire keeps no application database passwords, so it connects as vaire_admin through the session pooler on 5432 of the node the database runs on, which routes by --db.",
 					"Several statements separated by semicolons run in order in one transaction; human output prints each statement's rows or command tag, and --json keeps the last statement's columns, rows and command_tag at the top with every statement's result under results.",
-					"On a protected database a read needs nothing; --write asks once per command, without echo, for the current 6-digit code from the authenticator app set up with vaire protect init, before it connects, and the node checks it and hands out a short-lived write login (protect_code_rejected when wrong, reused or locked out). With --yes, without a terminal or with structured output it is refused (database_protected, reason write_requires_human): agents get read-only access to a protected database."},
+					"On a protected database a read needs nothing; --write asks once per command, without echo, for the master password or a current authenticator code, before it connects, and the node checks it and hands out a short-lived write login (protect_code_rejected when wrong, reused or locked out). With --yes, without a terminal or with structured output it is refused (database_protected, reason write_requires_human): agents get read-only access to a protected database."},
 				WhenNotToUse:     []string{"Interactive exploration; use vaire psql.", "Agents: --write on a protected database. Ask the human to run it at their terminal."},
 				Examples:         []string{"vaire sql --db app \"select 1\"", "vaire sql --db app \"select count(*) from users; select count(*) from orders\"", "vaire sql --db app --write \"alter role app_app set statement_timeout = '30s'\""},
 				Mutating:         true,
@@ -511,7 +511,7 @@ func phase1Commands() []cmdSpec {
 				meta: CommandMeta{
 					Summary: "Rebuild the secrets handoff from the local workspace",
 					WhenToUse: []string{"Replace the stored secrets after a password rotation.",
-						"The whole document is shown, so a human factor is required: the master password set with vaire secrets password set, or a current code from the authenticator app that the node verifies. There is no flag or environment variable for either, so with --json, --no-input or no terminal it is refused (secret_gate_required) and an agent cannot export."},
+						"The whole document is shown, so a human factor is required: the master password or a current authenticator code. Set up factors with vaire auth setup. There is no flag or environment variable for either factor."},
 					Examples:         []string{"vaire secrets export", "vaire secrets export --out bundle.txt --reveal-passphrase --output json"},
 					Mutating:         true,
 					Prompts:          true,
@@ -520,27 +520,6 @@ func phase1Commands() []cmdSpec {
 					SkipDryRunReason: "export builds a new transfer bundle and has no host step to preview",
 					ErrorCodes:       []string{"secret_gate_required", "secrets_error"},
 				},
-			}, {
-				use: "password",
-				run: parentRun,
-				meta: CommandMeta{
-					Summary:   "Set the master password that gates secrets export",
-					WhenToUse: []string{"Guard vaire secrets export and a new handoff with a password that lives only in the workspace as an argon2id hash."},
-					Examples:  []string{"vaire secrets password set"},
-				},
-				children: []cmdSpec{{
-					use: "set",
-					run: runSecretsPasswordSet,
-					meta: CommandMeta{
-						Summary:          "Set or change the master password",
-						WhenToUse:        []string{"Set a master password, or change it (the current password, or a code from the authenticator app, is required to change it). It is never taken from a flag and only its argon2id hash is stored (0600); vaire login carries the hash from the document to another machine. It prompts for the password at a terminal and is refused without one."},
-						Examples:         []string{"vaire secrets password set"},
-						Mutating:         true,
-						SkipDryRunCheck:  true,
-						SkipDryRunReason: "the password is never previewed or passed by flag",
-						ErrorCodes:       []string{"secret_gate_required", "input_required"},
-					},
-				}},
 			}},
 		},
 		{
@@ -848,7 +827,7 @@ func configCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:   "Set one cluster.toml key",
-					WhenToUse: []string{"Change a single setting without opening an editor.", "clusters.<db>.protected true protects a database; it is refused until vaire protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized). Setting it false, or removing a protected entry, asks for the current 6-digit code from the authenticator app, typed without echo at an interactive terminal; the node checks it (protect_code_rejected when wrong, reused or locked out after 5 wrong codes). With --yes, without a terminal or with structured output it is refused (database_protected), so an agent cannot lift it. vaire db protect and vaire db unprotect make the same change for one or more databases."},
+					WhenToUse: []string{"Change a single setting without opening an editor.", "clusters.<db>.protected true protects a database; it is refused until vaire auth setup has registered an approval factor (precondition_failed, reason protect_not_initialized). Setting it false, or removing a protected entry, asks for the current 6-digit code from the authenticator app, typed without echo at an interactive terminal; the node checks it (protect_code_rejected when wrong, reused or locked out after 5 wrong codes). With --yes, without a terminal or with structured output it is refused (database_protected), so an agent cannot lift it. vaire db protect and vaire db unprotect make the same change for one or more databases."},
 					Examples: []string{
 						"vaire config set postgres.settings.work_mem 64MB",
 						"vaire config set clusters.app.size large",
@@ -900,35 +879,12 @@ func protectCommands() cmdSpec {
 		use: "protect",
 		run: parentRun,
 		meta: CommandMeta{
-			Summary:   "Set up the two-factor code that lifts a database's protection, and protect databases",
-			WhenToUse: []string{"Protected databases (clusters.<db>.protected) refuse db drop, a shrinking resize, credential rotation and restore promote/undo. Lifting the protection asks for a TOTP code from an authenticator app; vaire protect init sets that up and protects the databases in the same run. vaire db protect and vaire db unprotect change it later."},
-			Examples:  []string{"vaire protect init", "vaire protect init --all", "vaire protect status"},
+			Summary:   "Inspect database protection",
+			WhenToUse: []string{"Check which databases are protected. Set up an approval factor with vaire auth setup and use vaire db protect or vaire db unprotect to change protection."},
+			Examples:  []string{"vaire protect status"},
 			Remote:    true,
 		},
 		children: []cmdSpec{
-			{
-				use: "init",
-				run: runProtectInit,
-				flags: []fl{
-					flagBool("rotate", "Replace the existing secret; asks for a current code from it first"),
-					flagStringArray("db", "Protect this database once the code is confirmed, without asking; repeatable"),
-					flagBool("all", "Protect every database once the code is confirmed, without asking"),
-				},
-				meta: CommandMeta{
-					Summary: "Set up the TOTP secret that lifting a database's protection asks a code from, and protect databases",
-					WhenToUse: []string{
-						"Once per cluster, by a human, before the first database is protected: the node makes a 160-bit secret and keeps it root-only, this shows it once as a QR code (and as base32), and a code from the authenticator app confirms it before the node uses it. Interactive only: without a terminal, with --yes or with structured output it is refused (input_required).",
-						"Once the code is confirmed it protects databases in the same run: the ones --db names (repeatable) or every one with --all, or else it asks which of the unprotected databases to protect, all of them picked to start with. An unknown --db name is refused before the QR code is shown. The result names the protected databases (data.protected_databases, data.newly_protected) and gives vaire db protect with the names of any left unprotected. With no databases yet, create them protected with vaire db create --protected.",
-						"With a secret already set up it is refused (precondition_failed, reason protect_already_initialized) unless --rotate, which asks for a current code from the old secret first; the old one keeps working until the new one is confirmed.",
-					},
-					Examples:         []string{"vaire protect init", "vaire protect init --all", "vaire protect init --db app --db billing", "vaire protect init --rotate"},
-					Mutating:         true,
-					SkipDryRunCheck:  true,
-					SkipDryRunReason: "init is interactive and only writes the node's TOTP secret, which has nothing to preview",
-					Remote:           true,
-					ErrorCodes:       []string{"input_required", "precondition_failed", "protect_code_rejected"},
-				},
-			},
 			{
 				use: "status",
 				run: runProtectStatus,
@@ -995,12 +951,12 @@ func dbCommands() cmdSpec {
 					flagString("size", "", "Size of the database's cluster: nano, small, medium, large, xlarge or custom (default [postgres] default_size)"),
 					flagString("memory", "", "Memory for the cluster, such as 768MiB or 2GiB; overrides the size's (custom needs it)"),
 					flagString("profile", "", "Workload profile for its tuning: oltp, mixed or analytics (default [postgres] profile)"),
-					flagBool("protected", "Protect it (clusters.<db>.protected): db drop, a shrinking resize, credential rotation and restore promote/undo are refused even with --confirm. Needs vaire protect init first"),
+					flagBool("protected", "Protect it (clusters.<db>.protected): db drop, a shrinking resize, credential rotation and restore promote/undo are refused even with --confirm. Needs an approval factor from vaire auth setup first"),
 					flagBool("allow-overcommit", "Create it even when its size pushes the databases' sizes past the server's memory budget (warning memory_overcommitted instead of the refusal)"),
 				},
 				meta: CommandMeta{
 					Summary:        "Create a database in its own PostgreSQL cluster, with its migrate, app, and read-only roles",
-					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. Each database is its own cluster with a size (memory, CPU weight, connections). Without --size or --memory it gets [postgres] default_size. A size that pushes the databases' sizes past the server's memory budget (RAM less the reserve) is refused, with or without --size (precondition_failed, reason memory_overcommitted): the error gives the numbers and the largest size that still fits with the complete command (details.largest_size, details.suggested_command), or says no size fits and to resize another database down or use a bigger server. Nothing steps down by itself. --allow-overcommit creates it anyway with the warning memory_overcommitted. A cluster that couldn't start is refused (would_not_start, with the smallest size that would). Creating a database changes the other databases' share of the server, so their changed postgres-config is applied in the same run as a reload; a change that needs a restart is left pending (warning restart_pending with the confirm token). With backups on, it gets its own pgBackRest stanza, a first full backup and its backup timers, staggered from the other databases' (warning first_backup_failed when that fails; vaire apply retries). The app and ro URLs use the transaction pooler on 6432; the migrate URL uses the session pooler on 5432, because the transaction pooler refuses the migrate role. Both route by the database name. The credentials are printed once; if the connection is lost after the request was sent (transport_failed), they are still printed (and in error.details.database), since the node keeps creating the database and vaire apply finishes it. --protected marks it protected (see vaire db protect); it is refused until vaire protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized)."},
+					WhenToUse:      []string{"Add an application database and persist it in cluster.toml. Each database is its own cluster with a size (memory, CPU weight, connections). Without --size or --memory it gets [postgres] default_size. A size that pushes the databases' sizes past the server's memory budget (RAM less the reserve) is refused, with or without --size (precondition_failed, reason memory_overcommitted): the error gives the numbers and the largest size that still fits with the complete command (details.largest_size, details.suggested_command), or says no size fits and to resize another database down or use a bigger server. Nothing steps down by itself. --allow-overcommit creates it anyway with the warning memory_overcommitted. A cluster that couldn't start is refused (would_not_start, with the smallest size that would). Creating a database changes the other databases' share of the server, so their changed postgres-config is applied in the same run as a reload; a change that needs a restart is left pending (warning restart_pending with the confirm token). With backups on, it gets its own pgBackRest stanza, a first full backup and its backup timers, staggered from the other databases' (warning first_backup_failed when that fails; vaire apply retries). The app and ro URLs use the transaction pooler on 6432; the migrate URL uses the session pooler on 5432, because the transaction pooler refuses the migrate role. Both route by the database name. The credentials are printed once; if the connection is lost after the request was sent (transport_failed), they are still printed (and in error.details.database), since the node keeps creating the database and vaire apply finishes it. --protected marks it protected (see vaire db protect); it is refused until vaire auth setup has registered an approval factor (precondition_failed, reason protect_not_initialized)."},
 					Examples:       []string{"vaire db create app --size small", "vaire db create app --protected", "vaire db create app --memory 768MiB --profile oltp", "vaire db create big --size xlarge --allow-overcommit", "vaire db create app --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
@@ -1113,7 +1069,7 @@ func dbCommands() cmdSpec {
 				},
 				meta: CommandMeta{
 					Summary:        "Protect databases so drop, a shrinking resize, credential rotation and restore promote/undo are refused",
-					WhenToUse:      []string{"Guard production databases against a drop or a destructive restore, by an agent or a slip. Takes one or more database names, or --all. It sets clusters.<db>.protected true in cluster.toml, as vaire config set clusters.<db>.protected true does; the node checks it live, so nothing needs applying. Databases already protected are reported and left alone. It is refused until vaire protect init has set up two-factor protection (precondition_failed, reason protect_not_initialized), since a protection must be liftable. An unknown name is refused before anything changes (precondition_failed, reason database_not_found). Lifting it is vaire db unprotect, for a human with the authenticator app."},
+					WhenToUse:      []string{"Guard production databases against a drop or a destructive restore, by an agent or a slip. Takes one or more database names, or --all. It sets clusters.<db>.protected true in cluster.toml, as vaire config set clusters.<db>.protected true does; the node checks it live, so nothing needs applying. Databases already protected are reported and left alone. It is refused until vaire auth setup has registered an approval factor (precondition_failed, reason protect_not_initialized), since a protection must be liftable. An unknown name is refused before anything changes (precondition_failed, reason database_not_found). Lifting it is vaire db unprotect, for a human with the authenticator app."},
 					Examples:       []string{"vaire db protect app", "vaire db protect app billing", "vaire db protect --all", "vaire db protect app --dry-run"},
 					Mutating:       true,
 					SupportsDryRun: true,
@@ -1126,8 +1082,8 @@ func dbCommands() cmdSpec {
 				args: cobra.MinimumNArgs(1),
 				run:  runDBUnprotect,
 				meta: CommandMeta{
-					Summary:        "Lift the protection of databases, with a code from the authenticator app",
-					WhenToUse:      []string{"A human lifts a protection before dropping, shrinking, rotating or restoring a protected database. It asks once, without echo, for the current 6-digit code from the authenticator app set up with vaire protect init, for every database named, and the node checks it (protect_code_rejected when wrong, reused or locked out after 5 wrong codes). With --yes, without a terminal or with structured output it is refused (database_protected, reason unprotect_requires_human), so an agent cannot lift it. It sets clusters.<db>.protected false, as vaire config set clusters.<db>.protected false does. Databases that are not protected are reported and left alone."},
+					Summary:        "Lift the protection of databases, with an approval factor",
+					WhenToUse:      []string{"A human lifts a protection before dropping, shrinking, rotating or restoring a protected database. It asks once, without echo, for the master password or a current authenticator code, for every database named, and the node checks it (protect_code_rejected when wrong, reused or locked out after 5 wrong codes). With --yes, without a terminal or with structured output it is refused (database_protected, reason unprotect_requires_human), so an agent cannot lift it. It sets clusters.<db>.protected false, as vaire config set clusters.<db>.protected false does. Databases that are not protected are reported and left alone."},
 					WhenNotToUse:   []string{"Agents: never. Ask the human to run it at their terminal."},
 					Examples:       []string{"vaire db unprotect app", "vaire db unprotect app billing"},
 					Mutating:       true,

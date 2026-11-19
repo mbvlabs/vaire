@@ -16,7 +16,7 @@ import (
 // The secrets export gate. vaire secrets export rebuilds the whole secrets
 // document, and commands that show a new handoff (vaire backup setup) reveal the
 // same. They need a human factor: the master password (an argon2id hash in the
-// workspace, set with vaire secrets password set or at server init), or a current
+// workspace, set with vaire auth setup or at server init), or a current
 // code from the authenticator app the node verifies. There is no flag or
 // environment variable for either, so an agent cannot export: structured
 // output, --no-input and a missing terminal all refuse with
@@ -25,7 +25,7 @@ import (
 // secretGateRequired refuses when the gate cannot ask a human: structured
 // output, --yes, --no-input or no terminal.
 func secretGateRequired(masterPasswordSet bool) *output.CLIError {
-	hint := "Set a master password with vaire secrets password set, then run this at a terminal and type it. Two-factor protection (vaire protect init) also opens the gate, with a code from the authenticator app."
+	hint := "Set up a master password or authenticator with vaire auth setup, then run this at a terminal."
 	if masterPasswordSet {
 		hint = "Run this at a terminal and type the master password, or a current code from the authenticator app. There is no flag or environment variable for either, so scripts and agents cannot export."
 	}
@@ -72,14 +72,36 @@ func secretGateUnlock(cmd *cobra.Command, hash string, s *session, p *progress, 
 			s, p, closeFn = openSecretGateSession(cmd)
 		}
 
-		if s != nil && p != nil {
-			if st, err := fetchProtectStatus(cmd, s, p); err == nil && st.Configured {
-				return func() error { return secretGateCode(cmd, s, p, hash, action) }, closeFn
-			}
+		if s == nil || p == nil {
+			return nil, closeFn
+		}
+
+		st, err := fetchProtectStatus(cmd, s, p)
+		if err != nil {
+			return nil, closeFn
+		}
+
+		if factors := st.ApprovalFactors; factors != nil && (factors.Password || factors.TOTP) {
+			return func() error { return secretGateApproval(cmd, s, p, factors) }, closeFn
+		}
+
+		if st.Configured {
+			return func() error { return secretGateCode(cmd, s, p, hash, action) }, closeFn
 		}
 
 		return nil, closeFn
 	}, func() error { return secretGatePassword(cmd, hash, action) })
+}
+
+func secretGateApproval(cmd *cobra.Command, s *session, p *progress, factors *node.ExposureFactorStatus) error {
+	values, err := promptApprovalFactor(cmd, factors, "Approve with")
+	if err != nil {
+		return err
+	}
+
+	_, err = p.call(commandContext(cmd), s.node, "protect.verify", nil, remote.CallOptions{Secrets: values, OnEvent: p.event})
+
+	return err
 }
 
 // unlockSecretFactors always discovers the code factor, even when a password
@@ -165,68 +187,4 @@ func secretGatePassword(cmd *cobra.Command, hash, action string) error {
 	return output.NewError(output.CodeSecretGateRequired, "the master password is wrong; "+action+" was refused", output.ExitUnsafe,
 		"Try again at a terminal. If the password is lost, a code from the authenticator app still opens the gate while protection is set up; otherwise the secrets document cannot be exported.").
 		WithDetails(map[string]any{"reason": "secret_gate_required"})
-}
-
-// runSecretsPasswordSet sets or changes the workspace's master password. It
-// never takes the password from a flag: replacing it needs the current
-// password, or a code when two-factor protection is set up.
-func runSecretsPasswordSet(cmd *cobra.Command, _ []string) error {
-	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
-	if err != nil {
-		return err
-	}
-
-	if MustNotPrompt(cmd) {
-		return output.NewError(output.CodeInputRequired,
-			"setting the master password needs a terminal", output.ExitInput,
-			"Run vaire secrets password set yourself at a terminal. There is no flag or environment variable for the password.").
-			WithDetails(map[string]any{"reason": "password_requires_human"})
-	}
-
-	hash, err := masterPasswordHash(c.Name)
-	if err != nil {
-		return err
-	}
-
-	if hash != "" {
-		// Changing the password needs the current one, or a code when
-		// protection is set up.
-		if !stdinIsTTY() {
-			return secretGateRequired(true)
-		}
-
-		if err := secretGateUnlock(cmd, hash, nil, nil, "changing the master password"); err != nil {
-			return err
-		}
-	}
-
-	newPw, err := readSecretTTY(cmd, fmt.Sprintf("New master password (at least %d characters)", password.MinLength))
-	if err != nil {
-		return err
-	}
-
-	again, err := readSecretTTY(cmd, "Repeat the new master password")
-	if err != nil {
-		return err
-	}
-
-	if newPw != again {
-		return output.NewError(output.CodeInputRequired, "the two master passwords do not match", output.ExitInput, "Run the command again.")
-	}
-
-	encoded, err := password.Hash(newPw)
-	if err != nil {
-		return output.NewError(output.CodeInputRequired, err.Error(), output.ExitInput,
-			fmt.Sprintf("Use at least %d characters.", password.MinLength)).
-			WithDetails(map[string]any{"reason": "password_too_short", "min_length": password.MinLength})
-	}
-
-	if err := workspaces.SetMasterPasswordHash(c.Name, encoded); err != nil {
-		return err
-	}
-
-	return output.Success(cmd, output.Result{
-		Data:    map[string]any{"workspace": c.Name, "master_password_set": true},
-		Message: "master password set for workspace " + c.Name + "; vaire secrets export and a new handoff now need it, or a code from the authenticator app",
-	})
 }

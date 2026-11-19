@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 
@@ -11,6 +12,36 @@ import (
 	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
+
+type initialPasswordCaller struct {
+	err  error
+	seen bool
+}
+
+func (c *initialPasswordCaller) Call(_ context.Context, method string, _ any, opts remote.CallOptions) (remote.Reply, error) {
+	c.seen = method == "auth.setup" && opts.Secrets["new_password"] == "fixture password" &&
+		opts.Secrets["exposure_password"] == opts.Secrets["new_password"]
+
+	return remote.Reply{}, c.err
+}
+
+func TestInitKeepsMasterHashOnlyAfterNodeAcceptsPassword(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	r := &initRun{p: newProgress(cmd)}
+	refusal := errors.New("node refused enrollment")
+	caller := &initialPasswordCaller{err: refusal}
+
+	if err := r.setInitialMasterPassword(t.Context(), caller, "fixture password", "fixture hash"); !errors.Is(err, refusal) || r.masterHash != "" {
+		t.Fatalf("saved local hash after node refusal: %v", err)
+	}
+
+	caller.err = nil
+	if err := r.setInitialMasterPassword(t.Context(), caller, "fixture password", "fixture hash"); err != nil || !caller.seen || r.masterHash != "fixture hash" {
+		t.Fatalf("master password not registered before handoff: %v", err)
+	}
+}
 
 type bootstrapOperationCaller struct{ ids []string }
 

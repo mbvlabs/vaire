@@ -462,7 +462,15 @@ type protectVerify struct {
 // changing anything: the node-side check the vaire secrets export gate uses.
 // It reuses the write path's guard, so a code is one use and failures lock
 // codes out as they do there.
-func handleProtectVerify(_ context.Context, env *Env) (Result, error) {
+func handleProtectVerify(ctx context.Context, env *Env) (Result, error) {
+	if carriesApprovalFactor(env.Req.Secrets) {
+		if err := verifyApprovalFactor(ctx, env.Req.Secrets); err != nil {
+			return Result{}, err
+		}
+
+		return Result{Data: protectVerify{Verified: true}}, nil
+	}
+
 	ok, err := defaultProtectGuard.configured()
 	if err != nil {
 		return Result{}, err

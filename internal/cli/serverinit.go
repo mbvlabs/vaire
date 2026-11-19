@@ -1007,7 +1007,7 @@ func runInitRemote(cmd *cobra.Command) error {
 	}
 
 	// 12. Secrets handoff, then the node records the confirmation.
-	if err := r.askMasterPassword(cmd); err != nil {
+	if err := r.askMasterPassword(cmd, rt.node); err != nil {
 		return err
 	}
 
@@ -1717,16 +1717,15 @@ func (r *initRun) lockdownFailed(ctx context.Context, armedAt time.Time, publicS
 }
 
 // document builds the secrets document from the pending state (§10.1).
-// askMasterPassword offers to set the master password that gates vaire secrets
-// export. It is optional and needs a terminal: skipping leaves the gate to a
-// code from the authenticator app (vaire protect init) or a later
-// vaire secrets password set. Only the argon2id hash is kept.
-func (r *initRun) askMasterPassword(cmd *cobra.Command) error {
+// askMasterPassword sets up the node verifier before saving the local hash
+// for secrets export. If setup is interrupted, the same password can be used
+// on resume to verify the factor already enrolled on the node.
+func (r *initRun) askMasterPassword(cmd *cobra.Command, caller remote.Caller) error {
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return nil
 	}
 
-	ok, err := PromptYes(cmd, "Set a master password now to gate vaire secrets export?")
+	ok, err := PromptYes(cmd, "Set a master password for server approvals and secrets export?")
 	if err != nil || !ok {
 		return err
 	}
@@ -1752,14 +1751,32 @@ func (r *initRun) askMasterPassword(cmd *cobra.Command) error {
 				continue
 			}
 
-			r.masterHash = hash
+			if err := r.setInitialMasterPassword(commandContext(cmd), caller, pw, hash); err != nil {
+				return err
+			}
 
 			return nil
 		}
 	}
 
 	r.warnings = append(r.warnings, output.Warning{Code: "master_password_unset",
-		Message: "no master password was set; set one later with vaire secrets password set, or use a code from the authenticator app"})
+		Message: "no master password was set; set up a master password or authenticator later with vaire auth setup"})
+
+	return nil
+}
+
+func (r *initRun) setInitialMasterPassword(ctx context.Context, caller remote.Caller, pw, hash string) error {
+	secrets.Add(pw)
+	// On first setup the current password is ignored. On resume it
+	// authorizes setting the same password without allowing replacement.
+	options := remote.CallOptions{Secrets: map[string]string{
+		"new_password": pw, "exposure_password": pw,
+	}, OnEvent: r.p.event}
+	if _, err := r.p.call(ctx, caller, "auth.setup", map[string]string{"mode": "password"}, options); err != nil {
+		return err
+	}
+
+	r.masterHash = hash
 
 	return nil
 }
@@ -1919,7 +1936,7 @@ func runInitLocal(cmd *cobra.Command) error {
 		return err
 	}
 
-	if err := r.askMasterPassword(cmd); err != nil {
+	if err := r.askMasterPassword(cmd, caller); err != nil {
 		return err
 	}
 

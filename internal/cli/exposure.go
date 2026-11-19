@@ -149,7 +149,7 @@ func runAuthSetup(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	localHash, err := prepareAuthFactor(cmd, s.ctx.Name, mode, status.Password, values)
+	localHash, err := prepareAuthFactor(cmd, s.ctx.Name, mode, values)
 	if err != nil {
 		return err
 	}
@@ -196,9 +196,9 @@ func authSetupProof(cmd *cobra.Command, status node.ExposureFactorStatus) (map[s
 	return map[string]string{"exposure_totp": code}, err
 }
 
-func prepareAuthFactor(cmd *cobra.Command, workspace, mode string, replacingPassword bool, values map[string]string) (string, error) {
+func prepareAuthFactor(cmd *cobra.Command, workspace, mode string, values map[string]string) (string, error) {
 	if mode == "password" {
-		return prepareAuthPassword(cmd, workspace, replacingPassword, values)
+		return prepareAuthPassword(cmd, values)
 	}
 
 	key, err := totp.NewSecret()
@@ -233,18 +233,7 @@ func showApprovalSecret(cmd *cobra.Command, workspace, key string) error {
 	return err
 }
 
-func prepareAuthPassword(cmd *cobra.Command, workspace string, replacing bool, values map[string]string) (string, error) {
-	if !replacing {
-		hash, err := masterPasswordHash(workspace)
-		if err != nil {
-			return "", err
-		}
-
-		if hash != "" {
-			return reuseWorkspaceMasterPassword(cmd, hash, values)
-		}
-	}
-
+func prepareAuthPassword(cmd *cobra.Command, values map[string]string) (string, error) {
 	pw, err := readSecretTTY(cmd, "New master password")
 	if err != nil {
 		return "", err
@@ -266,21 +255,4 @@ func prepareAuthPassword(cmd *cobra.Command, workspace string, replacing bool, v
 	values["new_password"] = pw
 
 	return password.Hash(pw)
-}
-
-func reuseWorkspaceMasterPassword(cmd *cobra.Command, hash string, values map[string]string) (string, error) {
-	pw, err := readSecretTTY(cmd, "Master password already set in this workspace")
-	if err != nil {
-		return "", err
-	}
-
-	secrets.Add(pw)
-
-	if !password.Verify(hash, pw) {
-		return "", output.NewError(output.CodeInputRequired, "the workspace master password is incorrect", output.ExitInput, "")
-	}
-
-	values["new_password"] = pw
-
-	return "", nil
 }

@@ -22,21 +22,6 @@ func TestGroupSecret(t *testing.T) {
 	}
 }
 
-func TestRetryableCode(t *testing.T) {
-	rejected := func(reason string) error {
-		return output.NewError(output.CodeProtectCodeRejected, "x", output.ExitUnsafe, "").WithDetails(map[string]any{"reason": reason})
-	}
-	for reason, want := range map[string]bool{"code_invalid": true, "code_reused": true, "locked": false, "code_required": false} {
-		if got := retryableCode(rejected(reason)); got != want {
-			t.Fatalf("%s: got %v, want %v", reason, got, want)
-		}
-	}
-
-	if retryableCode(errors.New("boom")) {
-		t.Fatal("a plain error is not retryable")
-	}
-}
-
 func cliErrorOf(t *testing.T, err error) *output.CLIError {
 	t.Helper()
 
@@ -85,56 +70,6 @@ func TestProtectTargets(t *testing.T) {
 	e := cliErrorOf(t, err)
 	if e.Code != output.CodePrecondition || reasonOf(e) != "database_not_found" || !strings.Contains(e.Message, "nope, gone") {
 		t.Fatalf("unknown names: %s %q %q", e.Code, reasonOf(e), e.Message)
-	}
-}
-
-func TestParseSelection(t *testing.T) {
-	options := []string{"app", "billing", "other"}
-	for line, want := range map[string][]string{
-		"\n":              options,
-		"  all ":          options,
-		"none":            {},
-		"other app":       {"app", "other"},
-		"billing,app\n":   {"app", "billing"},
-		"app, app,other ": {"app", "other"},
-	} {
-		got, err := parseSelection(line, options)
-		if err != nil || !slices.Equal(got, want) {
-			t.Errorf("parseSelection(%q) = %v, %v; want %v", line, got, err, want)
-		}
-	}
-
-	if _, err := parseSelection("app nope", options); err == nil || !strings.Contains(err.Error(), "nope") {
-		t.Fatalf("unknown name: %v", err)
-	}
-}
-
-func TestProtectInitOutcome(t *testing.T) {
-	cases := []struct {
-		protected, unprotected []string
-		message                string
-		next                   []string
-	}{
-		{nil, nil, "no databases yet", nil},
-		{[]string{"app", "billing"}, nil, "protected: app, billing", []string{"vaire protect status"}},
-		{nil, []string{"app", "billing"}, "no database is protected", []string{"vaire db protect app billing", "vaire protect status"}},
-		{[]string{"app"}, []string{"scratch"}, "protected: app; not protected: scratch", []string{"vaire db protect scratch", "vaire protect status"}},
-	}
-	for _, c := range cases {
-		message, next := protectInitOutcome(c.protected, c.unprotected)
-		if !strings.Contains(message, c.message) || !slices.Equal(next, c.next) {
-			t.Errorf("protectInitOutcome(%v, %v) = %q, %v; want %q, %v", c.protected, c.unprotected, message, next, c.message, c.next)
-		}
-
-		for _, n := range next {
-			if strings.Contains(n, "<") {
-				t.Errorf("next step %q has a placeholder", n)
-			}
-		}
-	}
-
-	if message, _ := protectInitOutcome(nil, nil); !strings.Contains(message, "--protected") {
-		t.Errorf("no databases: %q should point at --protected", message)
 	}
 }
 
@@ -230,8 +165,12 @@ func TestProtectCommandsInTree(t *testing.T) {
 		t.Fatalf("metadata: %v", report.Failures)
 	}
 
+	cmd, _, err := NewRoot().Find([]string{"protect", "init"})
+	if err == nil && cmd.CommandPath() == "vaire protect init" {
+		t.Fatal("protect init must not be registered")
+	}
+
 	for path, flags := range map[string][]string{
-		"protect init": {"db", "all", "rotate"},
 		"db protect":   {"all", "dry-run"},
 		"db unprotect": {"dry-run"},
 	} {
@@ -256,14 +195,6 @@ func TestDBProtectUsage(t *testing.T) {
 
 	if e := cliErrorOf(t, runDBProtect(commandAt(t, "db protect", "--all"), []string{"app"})); e.Code != output.CodeUsage {
 		t.Fatalf("names and --all: %s", e.Code)
-	}
-}
-
-func TestProtectInitFlagsConflict(t *testing.T) {
-	// Refused before the terminal check and before any connection.
-	err := runProtectInit(commandAt(t, "protect init", "--all", "--db", "app"), nil)
-	if e := cliErrorOf(t, err); e.Code != output.CodeUsage {
-		t.Fatalf("--all with --db: %s", e.Code)
 	}
 }
 
