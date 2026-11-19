@@ -89,6 +89,7 @@ cmp "${work}/published" dist/release-edge/releases/1.0.0-alpha.4/install.sh
 if bash scripts/backfill-installer.sh; then echo 'overwrote installer' >&2; exit 1; fi
 if VERSION=1.0.0-alpha.04 bash scripts/backfill-installer.sh; then echo 'accepted invalid version' >&2; exit 1; fi
 grep -Fq 'workflow_dispatch:' "${source_root}/.github/workflows/backfill-installer.yml"
-grep -Fq 'environment: stable' "${source_root}/.github/workflows/backfill-installer.yml"
+grep -Fq "environment: \${{ needs.route.outputs.environment }}" "${source_root}/.github/workflows/backfill-installer.yml"
+grep -Fq 'run: bash scripts/tagged-release-route.sh' "${source_root}/.github/workflows/backfill-installer.yml"
 grep -Fq 'run: bash scripts/backfill-installer.sh' "${source_root}/.github/workflows/backfill-installer.yml"
 echo 'versioned installer tests passed'

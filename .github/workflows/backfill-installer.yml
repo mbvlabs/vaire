@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Full stable version without v (for example 1.0.0-alpha.4)
+        description: Full tagged version without v (for example 1.0.0-beta.1)
         required: true
         type: string
 
@@ -12,13 +12,27 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish-stable
+  group: publish-releases
   cancel-in-progress: false
 
 jobs:
-  backfill:
+  route:
     runs-on: ubuntu-24.04
-    environment: stable
+    outputs:
+      environment: ${{ steps.release.outputs.environment }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate version
+        id: release
+        env:
+          VERSION: ${{ inputs.version }}
+        run: bash scripts/tagged-release-route.sh "${VERSION}" >> "${GITHUB_OUTPUT}"
+  backfill:
+    needs: route
+    runs-on: ubuntu-24.04
+    environment: ${{ needs.route.outputs.environment }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1

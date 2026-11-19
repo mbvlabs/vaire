@@ -4,6 +4,28 @@
 set -euo pipefail
 
 source_root="$(cd "$(dirname "$0")/.." && pwd)"
+
+route="${source_root}/scripts/tagged-release-route.sh"
+check_route() {
+  local actual
+  actual="$(bash "$route" "$1")"
+  if [ "$actual" != "$(printf 'channel=%s\nenvironment=%s' "$2" "$3")" ]; then
+    printf 'unexpected route for %s: %s\n' "$1" "$actual" >&2
+    exit 1
+  fi
+}
+check_route 1.0.0-alpha.1 edge prerelease
+check_route 1.0.0-beta.1 edge prerelease
+check_route 1.0.0-rc.1 rc prerelease
+check_route 1.0.0 stable-1.x stable
+check_route 2.1.0 stable-2.x stable
+for invalid in v1.0.0 1.0.0-beta 1.0.0-rc.01 1.0.0-preview.1 edge-123456789abc; do
+  if bash "$route" "$invalid" >/dev/null 2>&1; then
+    printf 'accepted invalid tagged version: %s\n' "$invalid" >&2
+    exit 1
+  fi
+done
+
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 mkdir -p "${work}/repo/scripts" "${work}/bin" "${work}/fixtures" "${work}/dest"

@@ -6,16 +6,41 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: publish-releases
   cancel-in-progress: false
 
 jobs:
-  publish:
+  route:
     runs-on: ubuntu-24.04
-    environment: stable
+    outputs:
+      channel: ${{ steps.release.outputs.channel }}
+      environment: ${{ steps.release.outputs.environment }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate tag and source
+        id: release
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          route="$(bash scripts/tagged-release-route.sh "${version}")"
+          git merge-base --is-ancestor "${GITHUB_SHA}" "refs/remotes/origin/${version%%.*}.x"
+          case "${version}" in
+            *-alpha.* | *-beta.*)
+              git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/master
+              ;;
+          esac
+          printf '%s\n' "${route}" >> "${GITHUB_OUTPUT}"
+  publish:
+    needs: route
+    runs-on: ubuntu-24.04
+    environment: ${{ needs.route.outputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,28 +63,8 @@ jobs:
             echo "RELEASE_BASE_URL must equal buildinfo.ReleaseBaseURL" >&2
             exit 1
           }
-      - name: Verify tagged source
-        id: release
+      - name: Check release tooling
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          number='(0|[1-9][0-9]*)'
-          [[ "${GITHUB_REF_NAME}" =~ ^v${number}\.${number}\.${number}(-(alpha|beta|rc)\.${number})?$ ]] || {
-            echo "invalid release tag" >&2
-            exit 1
-          }
-          major="${version%%.*}"
-          git fetch --no-tags origin "${major}.x"
-          git merge-base --is-ancestor "${GITHUB_SHA}" FETCH_HEAD
-          case "${version}" in
-            *-alpha.* | *-beta.*)
-              channel=edge
-              git fetch --no-tags origin master
-              git merge-base --is-ancestor "${GITHUB_SHA}" FETCH_HEAD
-              ;;
-            *-rc.*) channel=rc ;;
-            *) channel="stable-${major}.x" ;;
-          esac
-          echo "channel=${channel}" >> "${GITHUB_OUTPUT}"
           mapfile -t go_files < <(git ls-files '*.go')
           test -z "$(gofmt -l "${go_files[@]}")"
           go vet ./...
@@ -69,13 +74,13 @@ jobs:
       - name: Build the tagged release
         env:
           RELEASE_BASE_URL: ${{ vars.RELEASE_BASE_URL }}
-          CHANNEL: ${{ steps.release.outputs.channel }}
+          CHANNEL: ${{ needs.route.outputs.channel }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           scripts/build-release.sh "${version}" "${CHANNEL}" "${RELEASE_BASE_URL}"
       - name: Sign and verify the tagged release
         env:
-          CHANNEL: ${{ steps.release.outputs.channel }}
+          CHANNEL: ${{ needs.route.outputs.channel }}
         run: scripts/sign-release.sh "dist/release-${CHANNEL}"
       - name: Upload the immutable artifacts
         env:
@@ -84,7 +89,7 @@ jobs:
           AWS_DEFAULT_REGION: auto
           RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          CHANNEL: ${{ steps.release.outputs.channel }}
+          CHANNEL: ${{ needs.route.outputs.channel }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           existing="$(aws s3api list-objects-v2 \
@@ -102,7 +107,7 @@ jobs:
           AWS_DEFAULT_REGION: auto
           RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          CHANNEL: ${{ steps.release.outputs.channel }}
+          CHANNEL: ${{ needs.route.outputs.channel }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           git fetch --tags origin
@@ -111,7 +116,7 @@ jobs:
             scripts/upload-release.sh "dist/release-${CHANNEL}" "${CHANNEL}" "${RELEASE_BUCKET}" "${R2_ENDPOINT}" channel
           fi
       - name: Move the root channel when this is the highest version
-        if: startsWith(steps.release.outputs.channel, 'stable-')
+        if: needs.route.outputs.environment == 'stable'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
