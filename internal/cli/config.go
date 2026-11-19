@@ -270,19 +270,14 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	code, err := unprotectCode(cmd, s, p, lifted)
-	if err != nil {
-		return err
-	}
-
+	code := exposure
 	if len(exposure) > 0 {
-		if code == nil {
-			code = map[string]string{}
-		}
-
-		maps.Copy(code, exposure)
-
 		params["exposure_proposal"] = planned.ExposureProposal
+	} else {
+		code, err = unprotectCode(cmd, s, p, lifted)
+		if err != nil {
+			return err
+		}
 	}
 
 	reply, err := p.call(commandContext(cmd), s.node, "config.set", params, remote.CallOptions{Secrets: code, OnEvent: p.event})
@@ -410,10 +405,7 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	code, err := unprotectCode(cmd, s, p, liftedProtections(data.TOML, edited))
-	if err != nil {
-		return err
-	}
+	code := exposure
 
 	params := map[string]any{
 		"toml":          string(edited),
@@ -421,13 +413,12 @@ func runConfigEdit(cmd *cobra.Command, _ []string) error {
 	}
 
 	if len(exposure) > 0 {
-		if code == nil {
-			code = map[string]string{}
-		}
-
-		maps.Copy(code, exposure)
-
 		params["exposure_proposal"] = planned.ExposureProposal
+	} else {
+		code, err = unprotectCode(cmd, s, p, liftedProtections(data.TOML, edited))
+		if err != nil {
+			return err
+		}
 	}
 
 	reply, err := p.call(commandContext(cmd), s.node, "config.set", params, remote.CallOptions{Secrets: code, OnEvent: p.event})
@@ -536,11 +527,8 @@ func liftedProtections(oldTOML string, edited []byte) []string {
 	return node.Unprotected(old, updated)
 }
 
-// unprotectCode asks for a current code from the authenticator app that
-// vaire protect init set up when the change lifts a database's protection, and
-// returns it as the request's protect_code secret: secrets are redacted and
-// never logged. The node checks the code; a typed word would prove nothing,
-// since an agent at a terminal can type it too. It refuses without an
+// unprotectCode asks for an enrolled approval factor when the change lifts a
+// database's protection. It refuses without an
 // interactive terminal, with --yes and in structured output. A dry run lifts
 // nothing, so it asks nothing.
 func unprotectCode(cmd *cobra.Command, s *session, p *progress, lifted []string) (map[string]string, error) {
@@ -551,8 +539,8 @@ func unprotectCode(cmd *cobra.Command, s *session, p *progress, lifted []string)
 	names := strings.Join(lifted, ", ")
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return nil, output.NewError(output.CodeDatabaseProtected,
-			"lifting the protection of "+names+" needs a code from the authenticator app, typed at a terminal", output.ExitUnsafe,
-			"A person runs this command in an interactive terminal, without --yes or structured output, and types the current 6-digit code from the authenticator app set up with vaire protect init.").
+			"lifting the protection of "+names+" needs human approval at a terminal", output.ExitUnsafe,
+			"Run in an interactive terminal, without --yes or structured output, and provide an enrolled approval factor.").
 			WithDetails(map[string]any{"reason": "unprotect_requires_human", "databases": lifted})
 	}
 	// Ask the node first, so nobody types a code that cannot work.
@@ -561,10 +549,15 @@ func unprotectCode(cmd *cobra.Command, s *session, p *progress, lifted []string)
 		return nil, err
 	}
 
+	if status.ApprovalFactors != nil && (status.ApprovalFactors.Password || status.ApprovalFactors.TOTP) {
+		p.note("Lifting the protection of " + names + " needs approval.")
+		return promptApprovalFactor(cmd, status.ApprovalFactors, "Approve lifting protection with")
+	}
+
 	if !status.Configured {
 		return nil, output.NewError(output.CodeDatabaseProtected,
-			"lifting the protection of "+names+" needs two-factor protection, which this node does not have set up", output.ExitUnsafe,
-			"A human runs vaire protect init first, at a terminal, and scans the QR code with an authenticator app. Lifting a protection then needs a current code from it.").
+			"lifting the protection of "+names+" needs an approval factor, which this node does not have set up", output.ExitUnsafe,
+			node.ExposureEnrollmentHint).
 			WithDetails(map[string]any{"reason": "protect_not_initialized", "databases": lifted})
 	}
 

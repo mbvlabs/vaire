@@ -135,7 +135,7 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 		return Result{Data: WriteAccess{}}, nil
 	}
 
-	if err := g.checkWrite(p.DB, "writing to it", env.Req.Secrets[ProtectCodeSecret]); err != nil {
+	if err := g.checkWriteApproval(ctx, p.DB, "writing to it", env.Req.Secrets); err != nil {
 		return Result{}, err
 	}
 
@@ -158,6 +158,14 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 
 	return Result{Data: WriteAccess{Protected: true, User: role.User,
 		ValidUntil: role.ValidUntil.UTC().Format(time.RFC3339)}}, nil
+}
+
+func (g protectGuard) checkWriteApproval(ctx context.Context, name, action string, values map[string]string) error {
+	if carriesApprovalFactor(values) {
+		return verifyApprovalFactor(ctx, values)
+	}
+
+	return g.checkWrite(name, action, values[ProtectCodeSecret])
 }
 
 // checkWrite verifies the protect_code a write to protected database name
@@ -199,7 +207,7 @@ func (g protectGuard) requireWriteCode(action string, applies func(rpc.Request) 
 		}
 
 		if writes {
-			if err := g.checkRequestedWrite(action, env); err != nil {
+			if err := g.checkRequestedWrite(ctx, action, env); err != nil {
 				return Result{}, err
 			}
 		}
@@ -208,7 +216,7 @@ func (g protectGuard) requireWriteCode(action string, applies func(rpc.Request) 
 	}
 }
 
-func (g protectGuard) checkRequestedWrite(action string, env *Env) error {
+func (g protectGuard) checkRequestedWrite(ctx context.Context, action string, env *Env) error {
 	var params map[string]any
 
 	_ = json.Unmarshal(env.Req.Params, &params)
@@ -225,7 +233,7 @@ func (g protectGuard) checkRequestedWrite(action string, env *Env) error {
 	// A follower takes no writes, so a code from the authenticator app can
 	// never authorise one: its handler or PostgreSQL refuses the write instead
 	// (Phase 6).
-	return g.checkWrite(name, action, env.Req.Secrets[ProtectCodeSecret])
+	return g.checkWriteApproval(ctx, name, action, env.Req.Secrets)
 }
 
 // sqlWrites reports whether a sql request writes.

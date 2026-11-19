@@ -336,15 +336,14 @@ credentials. The approval guard does not constrain a host administrator.
 Do not use `beta.2` to retrofit this boundary onto a `beta.1` node.
 
 Run `vaire auth setup` on your workstation and select **Master password** or
-**Authenticator code (TOTP)**. For first-time setup, a trusted administrator
-runs `vaire node auth-setup-code` in a root session on the node and passes the
-one-time code to the person setting up the factor. The managed operator account
-cannot issue that code. After first setup, an existing factor authorizes adding
-or replacing a factor.
+**Authenticator code (TOTP)**. An authenticated operator can set the first
+factor without a root console or setup code. Set it up before giving an agent
+operator access: until a factor exists, any authenticated operator can enroll
+first. After that, adding or replacing a factor requires an existing one.
 
 If the workspace already has a master password for secrets export, enter that
 same password to enable node-side verification. This is not the SSH recovery
-password. The authenticator entry for approvals does not enable database protection.
+password. Setting up an approval factor does not turn on database protection.
 
 Use interactive `vaire config set` or `vaire config edit` to review and approve
 a change that widens public database access or HTTPS metrics. For example,
@@ -377,21 +376,21 @@ private and metrics are off. Re-enroll and approve public access on the restored
 
 ### Protected databases
 
-A protected database refuses `db drop`, a shrinking resize, credential rotation and restore promote/undo, even with `--confirm`. Lifting the protection asks for a current 6-digit code from an authenticator app, typed at a terminal and checked on the node, so an agent with a shell can't lift it by typing a word.
+A protected database refuses `db drop`, a shrinking resize, credential rotation and restore promote/undo, even with `--confirm`. To lift protection or authorize a Vaire write, select the master password or authenticator code at a terminal. The node verifies the selected factor.
 
-Writing to it takes a code too. `vaire sql --write`, `vaire psql --write`, `vaire console --write` and `vaire maint kill` ask for one when they start, before anything connects; a `psql` or `console` session then stays writable until you close it, and `vaire sql --write` asks on every run. Reads never ask. Without a terminal, with `--yes` or with `--output json`/`agent` the write is refused, so an agent gets read-only access. The node enforces it: on a protected database the `vaire_admin` login in every workspace can only read, and a write runs as a two-minute login role the node creates after it checks the code. Vacuum, analyze and reindex, restores into a copy and forks work as before.
+`vaire sql --write`, `vaire psql --write`, `vaire console --write` and `vaire maint kill` ask for approval at startup. A `psql` or `console` session stays writable until you close it; `vaire sql --write` asks on every run. Reads never ask. A protected write is refused without a terminal, with `--yes`, or with structured output. The node keeps `vaire_admin` read-only on protected databases and creates a two-minute login for approved interactive writes. Vacuum, analyze, reindex, restores into a copy and forks work as before.
 
-Set it up once with `vaire protect init`: the node makes the secret and keeps it root-only, and vaire shows it as a QR code. Once the code is confirmed, it asks which of your databases to protect (all of them picked to start with) and protects them in the same run; `--all` or `--db app` (repeatable) choose without asking. After that:
+Set up an approval factor once with `vaire auth setup`, then protect the databases you choose:
 
 ```sh
 vaire db protect app billing     # or --all; in effect at once, no apply
 vaire db create scratch --protected
-vaire db unprotect app           # asks for a code from the authenticator app
-vaire sql --db app --write "…"   # on a protected database, asks for a code too
+vaire db unprotect app           # asks for a master password or authenticator code
+vaire sql --db app --write "…"   # on a protected database, asks for approval too
 vaire protect status             # every database, protected yes or no
 ```
 
-Protection is opt-in and requires `vaire protect init`. The master password does not substitute for an authenticator code. Protection does not change the write permissions of the application's `<db>_app` role. A code works once, and 5 wrong codes lock codes out for 15 minutes. This guards against mistakes and unintended operator writes, not a compromised server.
+Protection is opt-in and requires a factor set up with `vaire auth setup`. Existing authenticator enrollments from `vaire protect init` also work. Protection does not change the application's `<db>_app` privileges. A TOTP code works once. This guards against mistakes and unintended operator writes, not a compromised server.
 
 ### Operator connections
 

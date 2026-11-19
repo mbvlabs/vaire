@@ -239,7 +239,7 @@ func newlyProtected(old, updated config.Cluster) []string {
 	return out
 }
 
-// checkProtect refuses to protect names while no TOTP secret is confirmed:
+// checkProtect refuses to protect names while no approval factor is ready:
 // a database must never be protected without a way to lift it.
 func (g protectGuard) checkProtect(names []string) error {
 	if len(names) == 0 {
@@ -257,6 +257,28 @@ func (g protectGuard) checkProtect(names []string) error {
 
 	return protectNotInitialized(output.CodePrecondition,
 		"protecting "+strings.Join(names, ", ")+" needs two-factor protection set up first", output.ExitPrecondition)
+}
+
+func checkProtectionAvailable(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+
+	ready, err := hasApprovalFactor()
+	if err != nil || ready {
+		return err
+	}
+
+	if err := defaultProtectGuard.checkProtect(names); err != nil {
+		if cliErr, ok := errors.AsType[*output.CLIError](err); ok && cliErr.Code == output.CodePrecondition {
+			return output.NewError(output.CodePrecondition, "protecting "+strings.Join(names, ", ")+" needs an approval factor", output.ExitPrecondition, ExposureEnrollmentHint).
+				WithDetails(map[string]any{"reason": "protect_not_initialized"})
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 // checkUnprotect refuses a config.set that lifts a database's protection (or
@@ -295,7 +317,25 @@ type protectInitParams struct {
 // refuses unless rotate, and rotating needs a current code from the old one.
 // The secret is in the result, so the method writes no run log.
 func handleProtectInit(_ context.Context, env *Env) (Result, error) {
+	if err := checkLegacyFactorEnrollment(); err != nil {
+		return Result{}, err
+	}
+
 	return defaultProtectGuard.init(env)
+}
+
+func checkLegacyFactorEnrollment() error {
+	legacy, err := defaultProtectGuard.configured()
+	if err != nil || legacy {
+		return err
+	}
+
+	ready, err := hasApprovalFactor()
+	if err != nil || !ready {
+		return err
+	}
+
+	return exposureFactorError("use_auth_setup", "use vaire auth setup to add an authenticator to the existing approval factors")
 }
 
 func (g protectGuard) init(env *Env) (Result, error) {
@@ -349,6 +389,10 @@ func (g protectGuard) init(env *Env) (Result, error) {
 // handleProtectConfirm checks a code from the pending secret and makes it
 // the confirmed one.
 func handleProtectConfirm(_ context.Context, env *Env) (Result, error) {
+	if err := checkLegacyFactorEnrollment(); err != nil {
+		return Result{}, err
+	}
+
 	return defaultProtectGuard.confirm(env)
 }
 
@@ -373,12 +417,13 @@ func (g protectGuard) confirm(env *Env) (Result, error) {
 
 // protectStatus is the protect.status result.
 type protectStatus struct {
-	Configured  bool     `json:"configured"`
-	Pending     bool     `json:"pending"`
-	ConfirmedAt string   `json:"confirmed_at,omitempty"`
-	Failures    int      `json:"failures"`
-	LockedUntil string   `json:"locked_until,omitempty"`
-	Protected   []string `json:"protected_databases"`
+	ApprovalFactors *ExposureFactorStatus `json:"approval_factors,omitempty"`
+	Configured      bool                  `json:"configured"`
+	Pending         bool                  `json:"pending"`
+	ConfirmedAt     string                `json:"confirmed_at,omitempty"`
+	Failures        int                   `json:"failures"`
+	LockedUntil     string                `json:"locked_until,omitempty"`
+	Protected       []string              `json:"protected_databases"`
 	// Databases is every database in cluster.toml with its protection.
 	Databases []ProtectedDatabase `json:"databases"`
 }
@@ -393,7 +438,19 @@ type ProtectedDatabase struct {
 }
 
 func handleProtectStatus(_ context.Context, _ *Env) (Result, error) {
-	return defaultProtectGuard.status(config.ClusterPath)
+	res, err := defaultProtectGuard.status(config.ClusterPath)
+	if err != nil {
+		return Result{}, err
+	}
+
+	if factors, err := ReadExposureFactorStatus(); err == nil {
+		if status, ok := res.Data.(protectStatus); ok {
+			status.ApprovalFactors = &factors
+			res.Data = status
+		}
+	}
+
+	return res, nil
 }
 
 // protectVerify is protect.verify's result.

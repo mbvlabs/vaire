@@ -10,9 +10,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// protectedWriteCode asks once, when a writing command starts, for a code
-// from the authenticator app when db is protected, and returns it as the
-// request's protect_code secret. It returns nil when db is not protected:
+// protectedWriteCode asks for approval when a writing command starts on a
+// protected database. It returns nil when db is not protected:
 // reads, and writes to unprotected databases, need no code. what names the
 // write in the messages ("writing to it"). status reads protect.status;
 // note prints a line before the prompt. Without an interactive terminal,
@@ -38,15 +37,20 @@ func protectedWriteCode(cmd *cobra.Command, db, what string, status func() (prot
 
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return nil, output.NewError(output.CodeDatabaseProtected,
-			"database "+db+" is protected, so "+what+" needs a code from the authenticator app, typed at a terminal", output.ExitUnsafe,
-			"Reads need no code: run it without --write. A person who means to write runs the command at an interactive terminal, without --yes or structured output, and types the current 6-digit code from the authenticator app set up with vaire protect init.").
+			"database "+db+" is protected, so "+what+" needs human approval at a terminal", output.ExitUnsafe,
+			"Reads need no approval: run it without --write. To write, run at an interactive terminal without --yes or structured output and provide an enrolled approval factor.").
 			WithDetails(map[string]any{"reason": "write_requires_human", "database": db})
+	}
+
+	if st.ApprovalFactors != nil && (st.ApprovalFactors.Password || st.ApprovalFactors.TOTP) {
+		note("Database " + db + " is protected: " + what + " needs approval.")
+		return promptApprovalFactor(cmd, st.ApprovalFactors, "Approve writing to "+db+" with")
 	}
 
 	if !st.Configured {
 		return nil, output.NewError(output.CodeDatabaseProtected,
-			"database "+db+" is protected and "+what+" needs two-factor protection, which this node does not have set up", output.ExitUnsafe,
-			"A human runs vaire protect init first, at a terminal, and scans the QR code with an authenticator app.").
+			"database "+db+" is protected and "+what+" needs an approval factor, which this node does not have set up", output.ExitUnsafe,
+			node.ExposureEnrollmentHint).
 			WithDetails(map[string]any{"reason": "protect_not_initialized", "database": db})
 	}
 

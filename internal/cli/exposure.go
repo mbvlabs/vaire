@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
@@ -77,12 +76,16 @@ func exposureApproval(cmd *cobra.Command, p *progress, preview configSetPreview,
 
 	p.note("Exposure increases: " + strings.Join(preview.ExposureIncreases, ", "))
 
-	options := exposureChoices(preview.ExposureFactors)
+	return promptApprovalFactor(cmd, preview.ExposureFactors, "Approve with")
+}
+
+func promptApprovalFactor(cmd *cobra.Command, status *node.ExposureFactorStatus, title string) (map[string]string, error) {
+	options := exposureChoices(status)
 	if len(options) == 0 {
 		return nil, output.NewError(output.CodePrecondition, "no exposure factor is enrolled", output.ExitPrecondition, node.ExposureEnrollmentHint)
 	}
 
-	factor, err := chooseExposureFactor(cmd, "Approve with", options)
+	factor, err := chooseExposureFactor(cmd, title, options)
 	if err != nil {
 		return nil, err
 	}
@@ -109,21 +112,6 @@ func exposureApproval(cmd *cobra.Command, p *progress, preview configSetPreview,
 	default:
 		return nil, output.NewError(output.CodeInputRequired, "choose password or totp", output.ExitInput, "Retry and choose an enrolled exposure factor.")
 	}
-}
-
-func runNodeAuthSetupCode(cmd *cobra.Command, _ []string) error {
-	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") || os.Getuid() != 0 || os.Geteuid() != 0 {
-		return output.NewError(output.CodeInputRequired, "issuing a setup code needs a trusted interactive root session", output.ExitInput, node.ExposureEnrollmentHint)
-	}
-
-	code, err := node.IssueFactorSetupCode(commandContext(cmd))
-	if err != nil {
-		return err
-	}
-
-	_, err = fmt.Fprintf(cmd.OutOrStdout(), "One-time setup code: %s\nEnter it at the prompt in vaire auth setup on your workstation.\n", code)
-
-	return err
 }
 
 func runAuthSetup(cmd *cobra.Command, _ []string) error {
@@ -156,7 +144,7 @@ func runAuthSetup(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	values, err := authSetupProof(cmd, p, status)
+	values, err := authSetupProof(cmd, status)
 	if err != nil {
 		return err
 	}
@@ -180,15 +168,14 @@ func runAuthSetup(cmd *cobra.Command, _ []string) error {
 	return output.Success(cmd, output.Result{Data: map[string]string{"factor": mode}, Message: "Approval factor set up"})
 }
 
-func authSetupProof(cmd *cobra.Command, p *progress, status node.ExposureFactorStatus) (map[string]string, error) {
+func authSetupProof(cmd *cobra.Command, status node.ExposureFactorStatus) (map[string]string, error) {
 	options := exposureChoices(&status)
 	if len(options) == 0 {
-		p.note(node.ExposureEnrollmentHint)
+		if status.LegacyTOTP {
+			return readAuthenticatorCode(cmd, "no approval factor was added", nil)
+		}
 
-		code, err := readSecretTTY(cmd, "One-time setup code")
-		secrets.Add(code)
-
-		return map[string]string{"setup_code": code}, err
+		return map[string]string{}, nil
 	}
 
 	factor, err := chooseExposureFactor(cmd, "Verify an existing factor", options)

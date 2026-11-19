@@ -105,7 +105,7 @@ func methods() map[string]method {
 		},
 		{name: "auth.status", handler: handleAuthStatus},
 		// Setup secrets must never enter a run log.
-		{name: "auth.setup", handler: handleAuthSetup},
+		{name: "auth.setup", lock: fixedLock(engine.LockExclusive), handler: handleAuthSetup},
 		{
 			// No run log: the result carries the new TOTP secret.
 			name:    "protect.init",

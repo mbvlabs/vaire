@@ -19,12 +19,13 @@ import (
 
 // protectStatusData is the protect.status result.
 type protectStatusData struct {
-	Configured  bool     `json:"configured"`
-	Pending     bool     `json:"pending"`
-	ConfirmedAt string   `json:"confirmed_at,omitempty"`
-	Failures    int      `json:"failures"`
-	LockedUntil string   `json:"locked_until,omitempty"`
-	Protected   []string `json:"protected_databases"`
+	Configured      bool                       `json:"configured"`
+	Pending         bool                       `json:"pending"`
+	ConfirmedAt     string                     `json:"confirmed_at,omitempty"`
+	Failures        int                        `json:"failures"`
+	LockedUntil     string                     `json:"locked_until,omitempty"`
+	Protected       []string                   `json:"protected_databases"`
+	ApprovalFactors *node.ExposureFactorStatus `json:"approval_factors"`
 	// Databases is every database with whether it is protected.
 	Databases []node.ProtectedDatabase `json:"databases"`
 }
@@ -513,7 +514,7 @@ func runDBUnprotect(cmd *cobra.Command, args []string) error {
 
 	message := "lifted the protection of " + strings.Join(lift, ", ")
 	if dryRun(cmd) {
-		message = "dry run: would lift the protection of " + strings.Join(lift, ", ") + "; the real run asks for a code from the authenticator app"
+		message = "dry run: would lift the protection of " + strings.Join(lift, ", ") + "; the real run asks for an approval factor"
 	}
 
 	if len(notProtected) > 0 {
@@ -612,6 +613,8 @@ func runProtectStatus(cmd *cobra.Command, _ []string) error {
 		message = "two-factor protection is set up (since " + data.ConfirmedAt + ")"
 	case data.Configured:
 		message = "two-factor protection is set up"
+	case data.ApprovalFactors != nil && (data.ApprovalFactors.Password || data.ApprovalFactors.TOTP):
+		message = "an approval factor is set up"
 	default:
 		message = "two-factor protection is not set up"
 	}
@@ -630,12 +633,12 @@ func runProtectStatus(cmd *cobra.Command, _ []string) error {
 	warnings := s.warnings
 
 	var next []string
-	if !data.Configured {
-		next = []string{"vaire protect init"}
+	if !data.Configured && (data.ApprovalFactors == nil || (!data.ApprovalFactors.Password && !data.ApprovalFactors.TOTP)) {
+		next = []string{"vaire auth setup"}
 
 		if len(data.Protected) > 0 {
 			warnings = append(warnings, output.Warning{Code: "protect_not_initialized",
-				Message: strings.Join(data.Protected, ", ") + " is protected but two-factor protection is not set up, so the protection cannot be lifted until a human runs vaire protect init"})
+				Message: strings.Join(data.Protected, ", ") + " is protected but no approval factor is set up. Run vaire auth setup to set one up."})
 		}
 	}
 

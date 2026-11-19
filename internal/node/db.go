@@ -265,7 +265,7 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 	}
 
 	if p.Protected {
-		if err := defaultProtectGuard.checkProtect([]string{p.Name}); err != nil {
+		if err := checkProtectionAvailable([]string{p.Name}); err != nil {
 			return Result{}, err
 		}
 	}

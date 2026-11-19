@@ -229,17 +229,27 @@ func prepareConfigSet(store state.Store, p configSetParams) ([]byte, config.Clus
 }
 
 func configSetSafetyChecks(ctx context.Context, env *Env, old, cfg config.Cluster) error {
-	if err := defaultProtectGuard.checkProtect(newlyProtected(old, cfg)); err != nil {
+	if err := checkProtectionAvailable(newlyProtected(old, cfg)); err != nil {
 		return err
 	}
 
-	if !env.Req.DryRun {
-		if err := defaultProtectGuard.checkUnprotect(old, cfg, env.Req.Secrets[ProtectCodeSecret]); err != nil {
+	// Widening changes already verified the factor for this exact config
+	// proposal. In particular, don't consume the same TOTP a second time.
+	if !env.Req.DryRun && len(config.ExposureIncreases(old, cfg)) == 0 {
+		if err := checkUnprotectApproval(ctx, old, cfg, env.Req.Secrets); err != nil {
 			return err
 		}
 	}
 
 	return checkRepoMove(ctx, old, cfg)
+}
+
+func checkUnprotectApproval(ctx context.Context, old, cfg config.Cluster, values map[string]string) error {
+	if len(Unprotected(old, cfg)) != 0 && carriesApprovalFactor(values) {
+		return verifyApprovalFactor(ctx, values)
+	}
+
+	return defaultProtectGuard.checkUnprotect(old, cfg, values[ProtectCodeSecret])
 }
 
 func saveConfigSet(ctx context.Context, env *Env, store state.Store, old, cfg config.Cluster, p configSetParams, current string, save func() error) (string, []output.Warning, error) {

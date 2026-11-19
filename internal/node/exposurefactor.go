@@ -20,13 +20,11 @@ import (
 const exposureFactorDir = "/etc/vaire/exposure-factor"
 
 type exposureFactorState struct {
-	PasswordHash     string    `json:"password_hash,omitempty"`
-	Secret           string    `json:"secret,omitempty"`
-	SetupCodeHash    string    `json:"setup_code_hash,omitempty"`
-	SetupCodeExpires time.Time `json:"setup_code_expires,omitzero"`
-	LastStep         int64     `json:"last_step,omitempty"`
-	Failures         int       `json:"failures,omitempty"`
-	LockedUntil      time.Time `json:"locked_until,omitzero"`
+	PasswordHash string    `json:"password_hash,omitempty"`
+	Secret       string    `json:"secret,omitempty"`
+	LastStep     int64     `json:"last_step,omitempty"`
+	Failures     int       `json:"failures,omitempty"`
+	LockedUntil  time.Time `json:"locked_until,omitzero"`
 }
 
 type exposureFactorGuard struct {
@@ -47,12 +45,27 @@ func exposureFactorError(reason, message string) error {
 }
 
 // ExposureEnrollmentHint points to the trusted first-enrollment path.
-const ExposureEnrollmentHint = "Run vaire auth setup. For first-time setup, a trusted administrator must run vaire node auth-setup-code in a root session to issue a one-time code."
+const ExposureEnrollmentHint = "Run vaire auth setup from your workstation and select Master password or Authenticator code (TOTP)."
+
+func hasApprovalFactor() (bool, error) {
+	st, err := ReadExposureFactorStatus()
+
+	return st.Password || st.TOTP, err
+}
+
+func carriesApprovalFactor(values map[string]string) bool {
+	return values["exposure_password"] != "" || values["exposure_totp"] != ""
+}
+
+func verifyApprovalFactor(ctx context.Context, values map[string]string) error {
+	return verifyExposureFactor(ctx, values["exposure_password"], values["exposure_totp"])
+}
 
 // ExposureFactorStatus reports enrolled methods without returning secrets.
 type ExposureFactorStatus struct {
-	Password bool `json:"password"`
-	TOTP     bool `json:"totp"`
+	Password   bool `json:"password"`
+	TOTP       bool `json:"totp"`
+	LegacyTOTP bool `json:"legacy_totp,omitempty"`
 }
 
 // ReadExposureFactorStatus reads the atomically replaced node state without
@@ -286,7 +299,6 @@ func (g exposureFactorGuard) enroll(ctx context.Context, mode, existingPassword,
 		}
 
 		st.Failures, st.LockedUntil = 0, time.Time{}
-		st.SetupCodeHash, st.SetupCodeExpires = "", time.Time{}
 
 		return g.save(st)
 	})

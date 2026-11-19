@@ -96,7 +96,7 @@ func phase1Commands() []cmdSpec {
 				run: runAuthSetup,
 				meta: CommandMeta{
 					Summary:   "Set up a master password or authenticator for approvals",
-					WhenToUse: []string{"Set up or replace an approval factor at a terminal. First setup requires a one-time code issued by a trusted administrator."},
+					WhenToUse: []string{"Set up the first approval factor from an authenticated workstation. Adding or replacing a factor requires an existing one."},
 					Examples:  []string{"vaire auth setup"},
 					Mutating:  true, Remote: true, Prompts: true,
 					InteractiveFlags: []string{"--no-input"},
@@ -1582,17 +1582,6 @@ func nodeCommands() cmdSpec {
 			LinuxOnly: true,
 		},
 		children: []cmdSpec{
-			{
-				use: "auth-setup-code",
-				run: runNodeAuthSetupCode,
-				meta: CommandMeta{
-					Summary:   "Issue a one-time code for initial approval-factor setup",
-					WhenToUse: []string{"Run in a trusted root session and enter the code in vaire auth setup on the workstation."},
-					Examples:  []string{"vaire node auth-setup-code"},
-					Mutating:  true, LinuxOnly: true,
-					SkipDryRunCheck: true, SkipDryRunReason: "issuing a setup code requires a trusted interactive session",
-				},
-			},
 			{
 				use: "upgrade",
 				run: notImplemented,
