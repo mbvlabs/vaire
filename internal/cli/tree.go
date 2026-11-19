@@ -85,6 +85,26 @@ func joinLines(lines []string) string {
 func phase1Commands() []cmdSpec {
 	return []cmdSpec{
 		{
+			use: "auth",
+			meta: CommandMeta{
+				Summary:   "Manage approval factors",
+				WhenToUse: []string{"Set up the master password or authenticator used to approve changes."},
+				Examples:  []string{"vaire auth setup"},
+			},
+			children: []cmdSpec{{
+				use: "setup",
+				run: runAuthSetup,
+				meta: CommandMeta{
+					Summary:   "Set up a master password or authenticator for approvals",
+					WhenToUse: []string{"Set up or replace an approval factor at a terminal. First setup requires a one-time code issued by a trusted administrator."},
+					Examples:  []string{"vaire auth setup"},
+					Mutating:  true, Remote: true, Prompts: true,
+					InteractiveFlags: []string{"--no-input"},
+					SkipDryRunCheck:  true, SkipDryRunReason: "factor setup requires an interactive secret",
+				},
+			}},
+		},
+		{
 			use: "version",
 			run: runVersion,
 			flags: []fl{
@@ -1563,15 +1583,14 @@ func nodeCommands() cmdSpec {
 		},
 		children: []cmdSpec{
 			{
-				use:  "exposure-enroll <password|totp>",
-				args: cobra.ExactArgs(1),
-				run:  runNodeExposureEnroll,
+				use: "auth-setup-code",
+				run: runNodeAuthSetupCode,
 				meta: CommandMeta{
-					Summary:   "Enroll an exposure approval factor at the root console",
-					WhenToUse: []string{"Enroll or replace an exposure password or authenticator factor. An existing factor is required after first enrollment."},
-					Examples:  []string{"sudo vaire node exposure-enroll password", "sudo vaire node exposure-enroll totp"},
+					Summary:   "Issue a one-time code for initial approval-factor setup",
+					WhenToUse: []string{"Run in a trusted root session and enter the code in vaire auth setup on the workstation."},
+					Examples:  []string{"vaire node auth-setup-code"},
 					Mutating:  true, LinuxOnly: true,
-					SkipDryRunCheck: true, SkipDryRunReason: "enrollment requires an interactive secret and has no preview",
+					SkipDryRunCheck: true, SkipDryRunReason: "issuing a setup code requires a trusted interactive session",
 				},
 			},
 			{

@@ -20,11 +20,13 @@ import (
 const exposureFactorDir = "/etc/vaire/exposure-factor"
 
 type exposureFactorState struct {
-	PasswordHash string    `json:"password_hash,omitempty"`
-	Secret       string    `json:"secret,omitempty"`
-	LastStep     int64     `json:"last_step,omitempty"`
-	Failures     int       `json:"failures,omitempty"`
-	LockedUntil  time.Time `json:"locked_until,omitzero"`
+	PasswordHash     string    `json:"password_hash,omitempty"`
+	Secret           string    `json:"secret,omitempty"`
+	SetupCodeHash    string    `json:"setup_code_hash,omitempty"`
+	SetupCodeExpires time.Time `json:"setup_code_expires,omitzero"`
+	LastStep         int64     `json:"last_step,omitempty"`
+	Failures         int       `json:"failures,omitempty"`
+	LockedUntil      time.Time `json:"locked_until,omitzero"`
 }
 
 type exposureFactorGuard struct {
@@ -35,8 +37,30 @@ type exposureFactorGuard struct {
 var defaultExposureFactorGuard = exposureFactorGuard{dir: exposureFactorDir, now: time.Now}
 
 func exposureFactorError(reason, message string) error {
-	return output.NewError(output.CodePrecondition, message, output.ExitPrecondition, "").
+	hint := ""
+	if reason == "factor_not_initialized" {
+		hint = ExposureEnrollmentHint
+	}
+
+	return output.NewError(output.CodePrecondition, message, output.ExitPrecondition, hint).
 		WithDetails(map[string]any{"reason": reason})
+}
+
+// ExposureEnrollmentHint points to the trusted first-enrollment path.
+const ExposureEnrollmentHint = "Run vaire auth setup. For first-time setup, a trusted administrator must run vaire node auth-setup-code in a root session to issue a one-time code."
+
+// ExposureFactorStatus reports enrolled methods without returning secrets.
+type ExposureFactorStatus struct {
+	Password bool `json:"password"`
+	TOTP     bool `json:"totp"`
+}
+
+// ReadExposureFactorStatus reads the atomically replaced node state without
+// creating it. The result is advisory; enrollment and approval recheck it.
+func ReadExposureFactorStatus() (ExposureFactorStatus, error) {
+	st, err := defaultExposureFactorGuard.load()
+
+	return ExposureFactorStatus{Password: st.PasswordHash != "", TOTP: st.Secret != ""}, err
 }
 
 func exposureRoot() error {
@@ -262,6 +286,7 @@ func (g exposureFactorGuard) enroll(ctx context.Context, mode, existingPassword,
 		}
 
 		st.Failures, st.LockedUntil = 0, time.Time{}
+		st.SetupCodeHash, st.SetupCodeExpires = "", time.Time{}
 
 		return g.save(st)
 	})

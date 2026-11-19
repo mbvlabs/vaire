@@ -103,6 +103,9 @@ func methods() map[string]method {
 			name:    "config.validate",
 			handler: handleConfigValidate,
 		},
+		{name: "auth.status", handler: handleAuthStatus},
+		// Setup secrets must never enter a run log.
+		{name: "auth.setup", handler: handleAuthSetup},
 		{
 			// No run log: the result carries the new TOTP secret.
 			name:    "protect.init",

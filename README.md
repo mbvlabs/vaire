@@ -335,11 +335,16 @@ account general sudo, membership in privileged groups, or access to provider
 credentials. The approval guard does not constrain a host administrator.
 Do not use `beta.2` to retrofit this boundary onto a `beta.1` node.
 
-From the provider console as root, run `vaire node exposure-enroll password`
-or `vaire node exposure-enroll totp`. The password is verified on the node
-and is separate from the local secrets-export master password and the SSH
-recovery password. Exposure TOTP is separate from database protection.
-After first enrollment, adding or replacing a factor requires an existing one.
+Run `vaire auth setup` on your workstation and select **Master password** or
+**Authenticator code (TOTP)**. For first-time setup, a trusted administrator
+runs `vaire node auth-setup-code` in a root session on the node and passes the
+one-time code to the person setting up the factor. The managed operator account
+cannot issue that code. After first setup, an existing factor authorizes adding
+or replacing a factor.
+
+If the workspace already has a master password for secrets export, enter that
+same password to enable node-side verification. This is not the SSH recovery
+password. The authenticator entry for approvals does not enable database protection.
 
 Use interactive `vaire config set` or `vaire config edit` to review and approve
 a change that widens public database access or HTTPS metrics. For example,

@@ -146,6 +146,8 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 			data["exposure_increases"] = increases
 			data["exposure_proposal"] = exposureProposal(current, raw)
 
+			addExposureFactorStatus(data)
+
 			warnings = append(warnings, output.Warning{
 				Code:    "exposure_increase",
 				Message: "proposed configuration widens access or enables an exposure control: " + strings.Join(increases, ", "),
@@ -158,6 +160,12 @@ func handleConfigSet(ctx context.Context, env *Env) (Result, error) {
 	}
 
 	return Result{Data: data, Warnings: warnings}, nil
+}
+
+func addExposureFactorStatus(data map[string]any) {
+	if status, err := ReadExposureFactorStatus(); err == nil {
+		data["exposure_factors"] = status
+	}
 }
 
 // refuseClusterDeclarationRemoval keeps cluster deletion on its guarded path.

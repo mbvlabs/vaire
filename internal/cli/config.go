@@ -495,9 +495,10 @@ func editConfigInEditor(cmd *cobra.Command, toml string) ([]byte, error) {
 // previewConfigSet shows the change and the steps it would schedule, without
 // saving it.
 type configSetPreview struct {
-	Plan              engine.PlanData `json:"plan"`
-	ExposureIncreases []string        `json:"exposure_increases"`
-	ExposureProposal  string          `json:"exposure_proposal"`
+	Plan              engine.PlanData            `json:"plan"`
+	ExposureIncreases []string                   `json:"exposure_increases"`
+	ExposureProposal  string                     `json:"exposure_proposal"`
+	ExposureFactors   *node.ExposureFactorStatus `json:"exposure_factors"`
 }
 
 func previewConfigSet(cmd *cobra.Command, s *session, p *progress, data configData, edited []byte) (configSetPreview, error) {
