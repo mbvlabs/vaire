@@ -10,8 +10,8 @@ if [[ ! "${version}" =~ ^${number}\.${number}\.${number}(-(alpha|beta|rc)\.${num
 fi
 
 case "${version}" in
-  *-alpha.* | *-beta.*) channel=edge; environment=prerelease ;;
-  *-rc.*) channel=rc; environment=prerelease ;;
+  *-alpha.* | *-beta.*) channel=edge; environment=edge ;;
+  *-rc.*) channel=rc; environment=rc ;;
   *) channel="stable-${version%%.*}.x"; environment=stable ;;
 esac
 

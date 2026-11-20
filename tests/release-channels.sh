@@ -14,9 +14,9 @@ check_route() {
     exit 1
   fi
 }
-check_route 1.0.0-alpha.1 edge prerelease
-check_route 1.0.0-beta.1 edge prerelease
-check_route 1.0.0-rc.1 rc prerelease
+check_route 1.0.0-alpha.1 edge edge
+check_route 1.0.0-beta.1 edge edge
+check_route 1.0.0-rc.1 rc rc
 check_route 1.0.0 stable-1.x stable
 check_route 2.1.0 stable-2.x stable
 for invalid in v1.0.0 1.0.0-beta 1.0.0-rc.01 1.0.0-preview.1 edge-123456789abc; do
