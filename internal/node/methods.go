@@ -44,6 +44,7 @@ func methods() map[string]method {
 			name:    "selfcheck",
 			handler: handleSelfcheck,
 		},
+		{name: "whoami", cluster: true, handler: handleWhoami},
 		{
 			name:    "cluster.bootstrap",
 			lock:    fixedLock(engine.LockExclusive),

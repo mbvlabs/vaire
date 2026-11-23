@@ -25,6 +25,26 @@ const MaxRequestBytes = 1 << 20
 // DefaultLockTimeout applies when the request omits lock_timeout_s.
 const DefaultLockTimeout = 30 * time.Second
 
+// IdentityLegacyShared identifies a node-authenticated OS login that does
+// not distinguish operators or devices.
+const IdentityLegacyShared = "legacy_shared"
+
+// IdentityVerifiedDevice identifies a registry-backed managed device.
+const IdentityVerifiedDevice = "verified_device"
+
+// WhoamiReply describes the account and node observed by the RPC server.
+type WhoamiReply struct {
+	Server       string `json:"server"`
+	Node         string `json:"node"`
+	SSHAccount   string `json:"ssh_account"`
+	IdentityKind string `json:"identity_kind"`
+	OperatorID   string `json:"operator_id,omitempty"`
+	Operator     string `json:"operator,omitempty"`
+	DeviceID     string `json:"device_id,omitempty"`
+	Device       string `json:"device,omitempty"`
+	Role         string `json:"role,omitempty"`
+}
+
 // Request is one node RPC call.
 type Request struct {
 	Schema    string            `json:"schema"`

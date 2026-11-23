@@ -258,6 +258,16 @@ func phase1Commands() []cmdSpec {
 		},
 		configCommands(),
 		{
+			use: "whoami",
+			run: runWhoami,
+			meta: CommandMeta{
+				Summary:   "Show the login recognized by the connected node",
+				WhenToUse: []string{"Check which node answered and which login it recognized."},
+				Examples:  []string{"vaire whoami", "vaire -w prod whoami --json"},
+				Remote:    true,
+			},
+		},
+		{
 			use: "status",
 			run: runStatus,
 			flags: []fl{
@@ -1538,6 +1548,7 @@ func nodeCommands() cmdSpec {
 			LinuxOnly: true,
 		},
 		children: []cmdSpec{
+			nodeAccessSSHCommand(),
 			{
 				use: "upgrade",
 				run: notImplemented,

@@ -32,6 +32,7 @@ type Env struct {
 	Log              *engine.RunLog
 	Report           engine.Reporter
 	TrustedHostAdmin bool
+	DeviceIdentity   *rpc.WhoamiReply
 	// LockMode is the global lock mode the dispatcher actually acquired from
 	// its pre-lock configuration/records snapshot. A handler that reloads
 	// configuration after the lock compares against this decision instead of
@@ -245,6 +246,12 @@ func Serve(stdin io.Reader, stdout io.Writer) (code int) {
 }
 
 func serveCheckMethod(req rpc.Request, m method, known bool, table map[string]method, out *eventWriter, rec *activityRecorder) (*Env, int, bool) {
+	identity, err := authorizeDeviceCaller(os.Getenv("SUDO_UID"), req.Method)
+	if err != nil {
+		recordActivityRefusal(context.Background(), rec, req, req.Method, err, "device_access_denied")
+		return nil, out.fail(req.Method, err), false
+	}
+
 	if !known || !m.versionExempt {
 		if err := checkVersion(req); err != nil {
 			recordActivityRefusal(context.Background(), rec, req, req.Method, err, "version_mismatch")
@@ -266,7 +273,7 @@ func serveCheckMethod(req rpc.Request, m method, known bool, table map[string]me
 		return nil, out.fail(req.Method, err), false
 	}
 
-	env := &Env{Req: req, Report: out.emit, TrustedHostAdmin: trustedHostAdmin()}
+	env := &Env{Req: req, Report: out.emit, TrustedHostAdmin: trustedHostAdmin(), DeviceIdentity: identity}
 	if code, ok := serveClusterCheck(req, m, env, out, rec); !ok {
 		return nil, code, false
 	}
