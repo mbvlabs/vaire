@@ -86,7 +86,7 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 	rt := runtimeFor(env, false)
 
 	data, warnings, err := bootstrapDatabaseSteps(ctx, cfg, rt, env.Report,
-		steps.Catalog(), engine.Apply, steps.RestarterFor(cfg, rt, env.Report), initFailureHint(cfg.ClusterName, p.Local), ownerPtr, complete)
+		steps.Catalog(), engine.Apply, steps.RestarterFor(cfg, rt, env.Report), initFailureHint(cfg.ClusterName), ownerPtr, complete)
 	if err != nil {
 		return Result{}, err
 	}

@@ -51,10 +51,9 @@ const (
 
 // Lockdown timing (§8.3, §8.5).
 const (
-	lockdownTimeout      = 120 * time.Second
-	localLockdownTimeout = 30 * time.Minute
-	confirmWithin        = 60 * time.Second
-	revertGrace          = 15 * time.Second
+	lockdownTimeout = 120 * time.Second
+	confirmWithin   = 60 * time.Second
+	revertGrace     = 15 * time.Second
 )
 
 // machineOperatorPrefix marks the operator identity generated for a fresh
@@ -72,7 +71,6 @@ const tlsWaitTimeout = 120 * time.Second
 type initRun struct {
 	cmd      *cobra.Command
 	p        *progress
-	local    bool
 	name     string
 	cfg      config.Cluster
 	boot     workspaces.Bootstrap
@@ -112,7 +110,6 @@ type initPlanData struct {
 	PublicAddress string   `json:"public_address"`
 	WGAddress     string   `json:"wg_address"`
 	AdminUser     string   `json:"admin_user"`
-	Local         bool     `json:"local"`
 	Resume        bool     `json:"resume"`
 	Done          []string `json:"done,omitempty"`
 	Steps         []string `json:"steps"`
@@ -130,8 +127,6 @@ type initResult struct {
 	Passphrase       string   `json:"passphrase,omitempty"`
 	PublicSSHClosed  bool     `json:"public_ssh_closed"`
 	LockdownPending  bool     `json:"lockdown_pending"`
-	LockdownDeadline string   `json:"lockdown_confirm_by,omitempty"`
-	LoginCommand     string   `json:"login_command,omitempty"`
 	TLS              string   `json:"tls,omitempty"`
 	TLSNotAfter      string   `json:"tls_not_after,omitempty"`
 	RestartPerformed bool     `json:"restart_performed,omitempty"`
@@ -153,17 +148,13 @@ func runServerInit(cmd *cobra.Command, args []string) error {
 		return runInitDiscard(cmd)
 	}
 
-	if flagTrue(cmd, "local") {
-		return runInitLocal(cmd)
-	}
-
 	return runInitRemote(cmd)
 }
 
 // prepareInit collects the answers, or loads them on --resume, checks every
 // non-interactive requirement before anything changes, and asks for the go.
-func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
-	r := &initRun{cmd: cmd, p: newProgress(cmd), local: local}
+func prepareInit(cmd *cobra.Command) (*initRun, error) {
+	r := &initRun{cmd: cmd, p: newProgress(cmd)}
 
 	resume := flagTrue(cmd, "resume")
 	if resume {
@@ -178,12 +169,12 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 		return nil, config.ValidationError(err)
 	}
 
-	if !local && len(r.cfg.Nodes) != 1 {
+	if len(r.cfg.Nodes) != 1 {
 		return nil, output.NewError(output.CodePrecondition, "automatic owner enrollment requires a single node", output.ExitPrecondition, "")
 	}
 
 	if !resume {
-		if workspaces.Exists(r.name) && !local {
+		if workspaces.Exists(r.name) {
 			return nil, output.NewError(
 				output.CodePrecondition,
 				"a workspace named "+r.name+" already exists on this machine",
@@ -227,10 +218,7 @@ func (r *initRun) confirm() error {
 		return nil
 	}
 
-	target := "this server"
-	if !r.local {
-		target = r.boot.User + "@" + r.boot.Host
-	}
+	target := r.boot.User + "@" + r.boot.Host
 
 	ok, err := PromptYes(cmd, fmt.Sprintf("Bootstrap %s as server %s? This hardens the host and closes public SSH.", target, r.name))
 	if err != nil {
@@ -292,7 +280,7 @@ func (r *initRun) collect() error {
 	}
 
 	r.cfg = cfg
-	r.prog = &workspaces.Progress{Local: r.local, Phases: map[string]string{}}
+	r.prog = &workspaces.Progress{Phases: map[string]string{}}
 
 	return nil
 }
@@ -408,7 +396,7 @@ func (r *initRun) applyBootFlags(cmd *cobra.Command) (userGiven, portGiven bool,
 // resolveHost asks for the server to bootstrap when nothing named one, then
 // fills the user and port from ~/.ssh/config and the defaults.
 func (r *initRun) resolveHost(cmd *cobra.Command, userGiven, portGiven *bool) error {
-	if !r.local && r.boot.Host == "" {
+	if r.boot.Host == "" {
 		if err := RequireFlag(cmd, false, "--host", "server init"); err != nil {
 			return err
 		}
@@ -427,10 +415,8 @@ func (r *initRun) resolveHost(cmd *cobra.Command, userGiven, portGiven *bool) er
 		*userGiven, *portGiven = hostFlagExplicit(v)
 	}
 
-	if !r.local {
-		if src := applySSHConfig(&r.boot, *userGiven, *portGiven, r.boot.Identity != ""); src != "" {
-			r.p.note("Using " + src + " for first contact.")
-		}
+	if src := applySSHConfig(&r.boot, *userGiven, *portGiven, r.boot.Identity != ""); src != "" {
+		r.p.note("Using " + src + " for first contact.")
 	}
 
 	if r.boot.User == "" {
@@ -523,26 +509,9 @@ func decodeBootstrap(raw []byte) ([]byte, workspaces.Bootstrap, error) {
 	return raw, wrap.Bootstrap, nil
 }
 
-// publicAddress resolves the node's public IP: the --host for a remote init,
-// the default-route source address for --local.
+// publicAddress resolves the node's public IP from --host.
 func (r *initRun) publicAddress() (string, error) {
 	host := r.boot.Host
-	if r.local && host == "" {
-		addr, err := defaultRouteAddress(r.cmd.Context())
-		if err != nil {
-			return "", output.NewError(output.CodeInputRequired, "could not detect this server's public address", output.ExitInput,
-				"Pass it with --host <public-ip>.").WithDetails(map[string]any{"flag": "--host"})
-		}
-
-		if addr.IsPrivate() {
-			r.warnings = append(r.warnings, output.Warning{
-				Code:    "public_address_private",
-				Message: "the detected address " + addr.String() + " is private; pass --host <public-ip> if operators connect through NAT",
-			})
-		}
-
-		return addr.String(), nil
-	}
 
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return ip.Unmap().String(), nil
@@ -564,29 +533,6 @@ func (r *initRun) publicAddress() (string, error) {
 	}
 
 	return ips[0].String(), nil
-}
-
-func defaultRouteAddress(ctx context.Context) (netip.Addr, error) {
-	var dialer net.Dialer
-
-	conn, err := dialer.DialContext(ctx, "udp", "192.0.2.1:9")
-	if err != nil {
-		return netip.Addr{}, err
-	}
-
-	defer func() { _ = conn.Close() }()
-
-	udp, ok := conn.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		return netip.Addr{}, errors.New("no local UDP address")
-	}
-
-	addr, ok := netip.AddrFromSlice(udp.IP)
-	if !ok {
-		return netip.Addr{}, errors.New("no local UDP address")
-	}
-
-	return addr.Unmap(), nil
 }
 
 // parseHostFlag parses user@host[:port]; IPv6 needs brackets with a port.
@@ -654,9 +600,6 @@ func (r *initRun) loadPending() error {
 		return err
 	}
 
-	if prog.Local != r.local {
-		return output.NewError(output.CodeUsage, "the unfinished init of "+name+" was started with a different --local setting", output.ExitUsage, "")
-	}
 	// First-contact credentials may be passed again on --resume.
 	if v := stringFlag(r.cmd, "identity"); v != "" {
 		boot.Identity = v
@@ -732,15 +675,12 @@ func (r *initRun) planData() initPlanData {
 		PublicAddress: n.PublicAddress,
 		WGAddress:     n.WGAddress,
 		AdminUser:     r.cfg.Server.AdminUser,
-		Local:         r.local,
 		Resume:        flagTrue(r.cmd, "resume"),
 		Done:          done,
 		Steps:         steps.HostStepIDs(),
 		DryRun:        true,
 	}
-	if !r.local {
-		data.Host = r.boot.User + "@" + net.JoinHostPort(r.boot.Host, strconv.Itoa(r.boot.Port))
-	}
+	data.Host = r.boot.User + "@" + net.JoinHostPort(r.boot.Host, strconv.Itoa(r.boot.Port))
 
 	return data
 }
@@ -748,7 +688,7 @@ func (r *initRun) planData() initPlanData {
 func (r *initRun) dryRunResult() error {
 	data := r.planData()
 	message := fmt.Sprintf("Would bootstrap %s as node %s, the master of server %s: steps %s, then move SSH to WireGuard %s and show the secrets handoff.",
-		map[bool]string{true: "this machine", false: data.Host}[r.local], data.Node, data.Server, strings.Join(data.Steps, ", "), data.WGAddress)
+		data.Host, data.Node, data.Server, strings.Join(data.Steps, ", "), data.WGAddress)
 
 	return output.Success(r.cmd, output.Result{Data: data, Message: message, Warnings: r.warnings})
 }
@@ -906,7 +846,7 @@ func (r *initRun) bootstrapHost(ctx context.Context, caller remote.Caller) (node
 		"cluster_toml": string(raw),
 		"node_name":    r.master().Name,
 		"operator":     op,
-		"local":        r.local,
+		"local":        false,
 	}, remote.CallOptions{
 		Secrets:     map[string]string{steps.SecretSudoPassword: r.sec.SudoPassword},
 		Confirm:     r.name,
@@ -932,7 +872,7 @@ func (r *initRun) bootstrapHost(ctx context.Context, caller remote.Caller) (node
 }
 
 func runInitRemote(cmd *cobra.Command) error {
-	r, err := prepareInit(cmd, false)
+	r, err := prepareInit(cmd)
 	if err != nil {
 		return err
 	}
@@ -1880,206 +1820,10 @@ func (r *initRun) writeDocument() (initResult, error) {
 		res.Passphrase = h.passphrase
 		return res, nil
 	}
-	// On the server itself the record belongs on the operator's machine, so
-	// the save action is not offered.
-	if err := h.show(cmd, flagTrue(cmd, "confirm-secrets-stored"), !r.local); err != nil {
+
+	if err := h.show(cmd, flagTrue(cmd, "confirm-secrets-stored"), true); err != nil {
 		return res, err
 	}
 
 	return res, nil
-}
-
-func runInitLocal(cmd *cobra.Command) error {
-	if handled, err := checkInitLocal(cmd); handled || err != nil {
-		return err
-	}
-
-	r, err := prepareInit(cmd, true)
-	if err != nil {
-		return err
-	}
-
-	if dryRun(cmd) {
-		return r.dryRunResult()
-	}
-
-	ctx := commandContext(cmd)
-
-	if err := r.savePending(); err != nil {
-		return err
-	}
-
-	if err := r.generateSecrets(); err != nil {
-		return err
-	}
-
-	if err := r.ensureDatabaseSecrets(); err != nil {
-		return err
-	}
-
-	if err := r.ensureBackupKit(ctx); err != nil {
-		return err
-	}
-
-	caller := remote.Local{Operator: r.sec.OperatorName}
-	if err := r.localHostPhase(ctx, caller); err != nil {
-		return err
-	}
-	// --local cannot prove the tunnel from here, so public SSH stays open and
-	// the first operator command over WireGuard confirms (§8.5).
-	deadline, err := r.localLockdownPhase(ctx, caller)
-	if err != nil {
-		return err
-	}
-	// DNS (acme mode only).
-	if err := r.remoteDNSPhase(ctx); err != nil {
-		return err
-	}
-	// Database phase: steps 7-13 on this server.
-	if err := r.localDatabasePhase(ctx, caller); err != nil {
-		return err
-	}
-
-	if err := r.remoteTLSPhase(ctx, caller); err != nil {
-		return err
-	}
-
-	if err := r.configureInitBackups(ctx, caller); err != nil {
-		return err
-	}
-
-	if err := r.askMasterPassword(cmd, caller); err != nil {
-		return err
-	}
-
-	res, err := r.writeDocument()
-	if err != nil {
-		return err
-	}
-
-	if err := r.confirmSecrets(ctx, caller); err != nil {
-		return err
-	}
-
-	r.firstMasterBundle(ctx, caller)
-
-	if err := workspaces.RemovePending(r.name); err != nil {
-		return err
-	}
-
-	res.LockdownPending = true
-	res.LockdownDeadline = deadline
-	res.LoginCommand = "vaire login"
-	r.fillResult(&res)
-	message := strings.Join([]string{
-		fmt.Sprintf("Server %s is bootstrapped on this machine (%s, WireGuard %s).", r.name, res.PublicAddress, res.WGAddress),
-		"TLS: " + r.tlsSummary() + r.healthSuffix(),
-		"No application databases yet: create one with vaire db create <name>, or point your agent to the CLI (vaire guide agents).",
-		"On your machine run vaire login and paste the transfer bundle from the handoff.",
-		"Then run any remote command, such as vaire plan, within 30 minutes. That confirms SSH over WireGuard and closes public SSH.",
-		"If nobody confirms in time, the SSH change reverts and the first remote command later locks down instead.",
-	}, "\n")
-
-	return r.finish(res, message, append([]string{res.LoginCommand}, res.Next...), fmt.Sprintf("Server %s is bootstrapped on this machine", r.name), []string{
-		"On your machine run vaire login and paste the transfer bundle,",
-		"then any remote command within 30 minutes. That closes public SSH; otherwise the SSH change reverts.",
-	})
-}
-
-// checkInitLocal refuses a local init that cannot work: no root, an
-// unsupported OS, a binary outside its installed path, or an existing node.
-// handled is true when a child re-executed under sudo ran: the parent then
-// exits with err and does nothing else, because the child does the init.
-func checkInitLocal(cmd *cobra.Command) (bool, error) {
-	if handled, err := localenv.Escalate(cmd, "initialise this server"); handled || err != nil {
-		return handled, err
-	}
-
-	osInfo, err := hostinfo.ReadOS()
-	if err != nil || !osInfo.Supported() {
-		return false, output.NewError(output.CodePrecondition, "this server runs "+osInfo.Pretty+", which vaire does not support", output.ExitPrecondition,
-			"Use "+hostinfo.SupportedList+".").WithDetails(map[string]any{"reason": "os_unsupported", "os": osInfo})
-	}
-
-	if self, err := os.Executable(); err == nil {
-		if resolved, err := filepath.EvalSymlinks(self); err == nil && resolved != node.BinaryPath {
-			return false, output.NewError(output.CodePrecondition, "server init --local must run as "+node.BinaryPath, output.ExitPrecondition,
-				"Install vaire with the install script as root (curl -fsSL <base>/install.sh | sudo bash), then run "+node.BinaryPath+" server init --local.").
-				WithDetails(map[string]any{"reason": "binary_not_installed", "running": resolved})
-		}
-	}
-
-	if _, err := os.Stat(config.NodePath); err == nil && !flagTrue(cmd, "resume") {
-		return false, output.NewError(output.CodePrecondition, "this server is already an vaire node ("+config.NodePath+" exists)", output.ExitPrecondition,
-			"Operate it from your machine with vaire login, or continue an unfinished init with --resume.").
-			WithDetails(map[string]any{"reason": "already_a_node"})
-	}
-
-	return false, nil
-}
-
-// localHostPhase runs the host phase on this server once.
-func (r *initRun) localHostPhase(ctx context.Context, caller remote.Caller) error {
-	if r.prog.Done(phaseHost) {
-		return nil
-	}
-
-	r.prog.PublicIPv6 = hostinfo.PublicIPv6(ctx)
-	if err := r.confirmDNSEarly(); err != nil {
-		return err
-	}
-
-	hostRes, err := r.bootstrapHost(ctx, caller)
-	if err != nil {
-		return err
-	}
-
-	r.prog.PublicIPv6 = hostRes.PublicIPv6
-
-	return r.mark(phaseHost)
-}
-
-// localLockdownPhase arms the lockdown without closing public SSH, and
-// returns the deadline by which an operator must confirm.
-func (r *initRun) localLockdownPhase(ctx context.Context, caller remote.Caller) (string, error) {
-	if r.prog.Done(phaseLockdown) {
-		return "", nil
-	}
-
-	r.p.phase("init.lockdown", "started", "arm the lockdown; public SSH stays open until an operator confirms over WireGuard")
-
-	if _, err := r.p.call(ctx, caller, "ssh.lockdown", map[string]any{
-		"timeout_s":   int(localLockdownTimeout.Seconds()),
-		"keep_public": true,
-	}, remote.CallOptions{OnEvent: r.p.event}); err != nil {
-		return "", err
-	}
-
-	deadline := time.Now().Add(localLockdownTimeout).UTC().Format(time.RFC3339)
-	r.p.phase("init.lockdown", "completed", "pending until "+deadline)
-
-	if err := r.mark(phaseLockdown); err != nil {
-		return "", err
-	}
-
-	return deadline, nil
-}
-
-// localDatabasePhase runs database steps 7-13 on this server once.
-func (r *initRun) localDatabasePhase(ctx context.Context, caller remote.Caller) error {
-	if r.prog.Done(phaseDatabase) {
-		return nil
-	}
-
-	r.p.phase("init.database", "started", "run database steps 7-13 on this server")
-
-	res, err := r.callDatabasePhase(ctx, caller)
-	if err != nil {
-		return err
-	}
-
-	r.tlsState, r.dbRestart = res.TLS, res.RestartPerformed
-	r.p.phase("init.database", "completed", "")
-
-	return r.mark(phaseDatabase)
 }

@@ -299,8 +299,7 @@ func errString(err error) string {
 	return secrets.Redact(err.Error())
 }
 
-// Local runs methods in-process through the node dispatcher, for
-// server init --local. The process must be root.
+// Local runs methods in-process through the node dispatcher for tests.
 type Local struct {
 	Operator string
 }

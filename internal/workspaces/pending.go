@@ -50,7 +50,6 @@ type PendingSecrets struct {
 
 // Progress records the completed init phases and what was learned on the way.
 type Progress struct {
-	Local            bool              `json:"local"`
 	SetupOperationID string            `json:"setup_operation_id,omitempty"`
 	Phases           map[string]string `json:"phases"`
 	OS               string            `json:"os,omitempty"`

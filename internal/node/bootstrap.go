@@ -39,9 +39,6 @@ type bootstrapParams struct {
 	ClusterTOML string          `json:"cluster_toml"`
 	NodeName    string          `json:"node_name"`
 	Operator    config.Operator `json:"operator"`
-	// Local reports a `server init --local` run, so the failure hint can name
-	// the matching resume command.
-	Local bool `json:"local,omitempty"`
 	// SkipDoctor skips the doctor gate after the database phase.
 	SkipDoctor bool `json:"skip_doctor,omitempty"`
 	// InstanceID and Epoch are what server init --restore wrote to the
@@ -160,7 +157,7 @@ func bootstrapHost(ctx context.Context, env *Env, p bootstrapParams) (Result, er
 	data, _, err := engine.Apply(ctx, steps.Catalog(), cfg, runtimeFor(env, false), engine.Options{
 		Only:        steps.HostStepIDs(),
 		Report:      env.Report,
-		FailureHint: initFailureHint(cfg.ClusterName, p.Local),
+		FailureHint: initFailureHint(cfg.ClusterName),
 	})
 	if err != nil {
 		return Result{}, err
@@ -419,13 +416,7 @@ func handleConfirmSecrets(context.Context, *Env) (Result, error) {
 }
 
 // initFailureHint is the step_failed hint during server init, where there is
-// no context yet for vaire apply. local names the resume command for the mode
-// that started the init, so a remote init is not told to add --local.
-func initFailureHint(cluster string, local bool) string {
-	command := "vaire server init --resume --name " + cluster
-	if local {
-		command += " --local"
-	}
-
-	return "Fix the cause, then run " + command + ". It resumes at this step."
+// no context yet for vaire apply.
+func initFailureHint(cluster string) string {
+	return "Fix the cause, then run vaire server init --resume --name " + cluster + ". It resumes at this step."
 }

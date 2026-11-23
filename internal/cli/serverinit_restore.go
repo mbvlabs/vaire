@@ -124,11 +124,6 @@ func runInitRestore(cmd *cobra.Command) error {
 // newRestoreRun resolves the workspace and its recovery identity, and loads a
 // pending rebuild.
 func newRestoreRun(cmd *cobra.Command) (*initRun, *restoreRun, *workspaces.BackupCreds, error) {
-	if flagTrue(cmd, "local") {
-		return nil, nil, nil, output.NewError(output.CodeUsage, "--restore runs from your machine, not with --local", output.ExitUsage,
-			"The bundle is decrypted with the recovery identity, which only your machine holds. Run vaire server init --restore --host root@<new-ip> there.")
-	}
-
 	name := stringFlag(cmd, "name")
 	if name == "" {
 		name = stringFlag(cmd, "workspace")

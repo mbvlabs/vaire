@@ -736,7 +736,6 @@ func serverCommands() cmdSpec {
 				flagString("db-full-schedule", "", "systemd OnCalendar for full database backups"),
 				flagString("db-diff-schedule", "", "systemd OnCalendar for differential database backups"),
 				flagString("tls-mode", "", "acme or self-signed"),
-				flagBool("local", "Initialise this machine as the server"),
 				flagBool("restore", "Rebuild this workspace's server on a new VPS from its master bundle (Phase 5)"),
 				flagString("bundle", "", "With --restore: a bundle name or a time (default: the newest in the bucket)"),
 				flagString("bundle-file", "", "With --restore: rebuild from an exported bundle file (- for stdin) instead of the bucket"),
@@ -751,11 +750,10 @@ func serverCommands() cmdSpec {
 				flagBool("discard", "Delete an unfinished init's local state (with --name)"),
 			},
 			meta: CommandMeta{
-				Summary:   "Bootstrap a new server, this machine, or a rebuild from a backup",
+				Summary:   "Bootstrap a new server or rebuild one from a backup",
 				WhenToUse: []string{"Turn a fresh Debian or Ubuntu server into the central command, or rebuild one from a transfer bundle."},
 				Examples: []string{
 					"vaire server init --host root@203.0.113.10 --answers answers.toml --no-input --confirm prod",
-					"vaire server init --local",
 					"vaire server init --discard --name prod",
 					"vaire server init --restore --host root@198.51.100.7 --confirm prod/replace",
 				},
@@ -784,9 +782,8 @@ func serverCommands() cmdSpec {
 					"--reveal-passphrase",
 					"--confirm-secrets-stored",
 				},
-				Remote:         true,
-				ConfirmToken:   "{server}",
-				LinuxOnlyFlags: []string{"--local"},
+				Remote:       true,
+				ConfirmToken: "{server}",
 				ErrorCodes: []string{
 					"input_required", "unsafe_action_requires_confirmation", "validation_failed", "remote_unreachable",
 					"transport_failed", "host_key_mismatch", "node_version_mismatch", "precondition_failed", "step_failed",

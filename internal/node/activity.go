@@ -42,7 +42,7 @@ var activityWriteWait = activityStoreTimeout
 // activityWriterCap bounds the writer goroutines alive in one process. A store
 // call that ignores cancellation pins its goroutine for as long as the
 // filesystem stalls it; without a process-wide bound, repeated in-process runs
-// (vaire server init --local) would add one more on every request.
+// would add one more on every request.
 var (
 	activityWriterCap   int64 = 8
 	activityWritersLive atomic.Int64

@@ -220,29 +220,4 @@ if [ "${VAIRE_INSTALL_ONLY:-0}" = 1 ]; then
   exit 0
 fi
 
-# A supported server release, where vaire server init --local can run.
-supported_server() {
-  [ "${os}" = linux ] && [ -r /etc/os-release ] || return 1
-  # shellcheck disable=SC1091
-  case "$(. /etc/os-release && printf '%s-%s' "${ID:-}" "${VERSION_ID:-}")" in
-    debian-13 | ubuntu-26.04) return 0 ;;
-  esac
-  return 1
-}
-
-# curl | sudo bash feeds this script on stdin, so the question goes to the
-# terminal directly.
-if [ "$(id -u)" -eq 0 ] && supported_server && { : </dev/tty; } 2>/dev/null; then
-  printf '\nInitialise this server now (vaire server init --local)? [y/N] ' >/dev/tty
-  answer=""
-  read -r answer </dev/tty || answer=""
-  case "${answer}" in
-    y | Y | yes | YES)
-      rm -rf "${work_dir}"
-      exec "${dest}" server init --local </dev/tty
-      ;;
-  esac
-  printf '\nNext: vaire server init --local, or vaire --help\n'
-  exit 0
-fi
 printf '\nNext: vaire --help\n'

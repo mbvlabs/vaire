@@ -17,7 +17,7 @@ updater so it can be tested between signed builds before V1.
 
 | Area | Commands |
 | --- | --- |
-| Setup | `vaire server init` (remote over SSH, or `--local` on the server), `--resume` |
+| Setup | `vaire server init --host <user@server>` (from your workstation over SSH), `--resume` |
 | Access | `vaire login`, `vaire workspace list\|show\|use\|remove\|set-address`, `vaire ssh`, `vaire tunnel` |
 | Desired state | `vaire plan`, `vaire apply`, `vaire config show\|get\|set\|edit\|validate` |
 | Databases | `vaire db list\|create\|resize\|drop\|credentials\|copy\|fork\|follow\|unfollow\|protect\|unprotect` |
