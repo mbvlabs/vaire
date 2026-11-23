@@ -128,8 +128,7 @@ func prepareDeviceIntent(login string) (string, error) {
 	if _, err := user.Lookup(login); err == nil {
 		return "", fmt.Errorf("device login already exists without provisioning intent")
 	} else {
-		var unknown user.UnknownUserError
-		if !errors.As(err, &unknown) {
+		if _, ok := errors.AsType[user.UnknownUserError](err); !ok {
 			return "", fmt.Errorf("lookup device login: %w", err)
 		}
 	}
@@ -158,8 +157,7 @@ func prepareDeviceIntent(login string) (string, error) {
 func prepareDeviceAccount(ctx context.Context, login, intent string) (*user.User, error) {
 	account, err := user.Lookup(login)
 	if err != nil { //nolint:nestif // Resume only a not-yet-created account, never a reserved missing one.
-		var unknown user.UnknownUserError
-		if !errors.As(err, &unknown) {
+		if _, ok := errors.AsType[user.UnknownUserError](err); !ok {
 			return nil, fmt.Errorf("lookup device login: %w", err)
 		}
 		// Once a UID is reserved, never replace a deleted account.

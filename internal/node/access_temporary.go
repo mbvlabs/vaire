@@ -222,7 +222,7 @@ func addTemporaryAccessPeer(ctx context.Context, nodeAddress, address, publicKey
 
 	exists := false
 
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue
@@ -290,7 +290,7 @@ func removeTemporaryAccessPeer(ctx context.Context, nodeAddress, address, public
 		return err
 	}
 
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) > 0 && fields[0] == publicKey &&
 			(len(fields) != 2 || fields[1] != address+"/32") {

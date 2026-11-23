@@ -43,8 +43,7 @@ func accessOperator(r config.AccessRegistry, name string) int {
 }
 
 func accessDevice(r config.AccessRegistry, operatorID, label string) int {
-	for i := len(r.Devices) - 1; i >= 0; i-- {
-		d := r.Devices[i]
+	for i, d := range slices.Backward(r.Devices) {
 		if d.OperatorID == operatorID && d.Label == label {
 			return i
 		}
