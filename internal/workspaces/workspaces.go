@@ -46,6 +46,8 @@ type Workspace struct {
 	// Databases is the placement map: database name to node name.
 	Databases map[string]string `toml:"databases" json:"databases"`
 	Operator  Operator          `toml:"operator" json:"operator"`
+	// Managed marks a per-device identity; its private keys are not a recovery kit.
+	Managed bool `toml:"managed,omitempty" json:"managed,omitempty"`
 	// AutoUpgradeNodes installs the operator's build on a node that runs a
 	// different one instead of failing with node_version_mismatch.
 	AutoUpgradeNodes bool `toml:"auto_upgrade_nodes" json:"auto_upgrade_nodes"`
@@ -201,7 +203,7 @@ func List() ([]string, error) {
 	var names []string
 
 	for _, e := range entries {
-		if e.IsDir() && Exists(e.Name()) {
+		if e.IsDir() && NamePattern.MatchString(e.Name()) && Exists(e.Name()) {
 			names = append(names, e.Name())
 		}
 	}
@@ -270,12 +272,22 @@ func Save(c *Workspace) error {
 		return err
 	}
 
+	return saveWorkspaceFile(Path(c.Name, WorkspaceFile), c)
+}
+
+// SaveStagedEnrollment writes the manifest into a private unpublished
+// workspace directory, alongside the already enrolled device keys.
+func SaveStagedEnrollment(dir string, c *Workspace) error {
+	return saveWorkspaceFile(filepath.Join(dir, WorkspaceFile), c)
+}
+
+func saveWorkspaceFile(path string, c *Workspace) error {
 	raw, err := toml.Marshal(c)
 	if err != nil {
 		return err
 	}
 
-	return transport.WriteSecretFile(Path(c.Name, WorkspaceFile), raw)
+	return transport.WriteSecretFile(path, raw)
 }
 
 // WriteFile writes a 0600 file inside workspaces/<name>.

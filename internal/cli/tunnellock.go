@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,23 +48,21 @@ type heldTunnelLock struct {
 	refs int
 }
 
-// lockTunnel takes the workspace's tunnel lock, waiting while another vaire
+// lockTunnelPath takes the tunnel lock, waiting while another vaire
 // process holds it. It reports the wait once through p and gives up when
 // ctx ends. The returned func releases the lock.
-func lockTunnel(ctx context.Context, name string, p *progress) (func(), error) {
+func lockTunnelPath(ctx context.Context, name, path string, p *progress) (func(), error) {
 	tunnelLocks.Lock()
 	defer tunnelLocks.Unlock()
 
-	if h, ok := tunnelLocks.held[name]; ok {
+	if h, ok := tunnelLocks.held[path]; ok {
 		h.refs++
-		return func() { releaseTunnelLock(name) }, nil
+		return func() { releaseTunnelLock(path) }, nil
 	}
 
-	if err := os.MkdirAll(workspaces.Dir(name), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-
-	path := workspaces.Path(name, TunnelLockFile)
 
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
@@ -76,9 +75,9 @@ func lockTunnel(ctx context.Context, name string, p *progress) (func(), error) {
 	}
 
 	writeTunnelHolder(f, p)
-	tunnelLocks.held[name] = &heldTunnelLock{f: f, refs: 1}
+	tunnelLocks.held[path] = &heldTunnelLock{f: f, refs: 1}
 
-	return func() { releaseTunnelLock(name) }, nil
+	return func() { releaseTunnelLock(path) }, nil
 }
 
 // waitTunnelLock waits for the exclusive lock on f, reporting the wait once
@@ -168,11 +167,11 @@ func tryTunnelLock(name, command string) (release func(), held bool, err error) 
 	}, true, nil
 }
 
-func releaseTunnelLock(name string) {
+func releaseTunnelLock(path string) {
 	tunnelLocks.Lock()
 	defer tunnelLocks.Unlock()
 
-	h, ok := tunnelLocks.held[name]
+	h, ok := tunnelLocks.held[path]
 	if !ok {
 		return
 	}
@@ -182,7 +181,7 @@ func releaseTunnelLock(name string) {
 		return
 	}
 
-	delete(tunnelLocks.held, name)
+	delete(tunnelLocks.held, path)
 
 	_ = h.f.Truncate(0)
 	_ = syscall.Flock(int(h.f.Fd()), syscall.LOCK_UN)

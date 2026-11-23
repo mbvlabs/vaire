@@ -80,25 +80,38 @@ func authorizeDeviceCaller(uid, method string) (*rpc.WhoamiReply, error) {
 		return nil, deviceAccessDenied()
 	}
 
-	return registryDeviceIdentity(registry, account.Username, method)
+	return registryDeviceIdentity(registry, account.Username, uid, method)
 }
 
-// Provisioning must never adopt an existing Unix account, must refuse the
-// legacy admin name, and must preserve revoked records. Name lookup alone
-// cannot detect a deleted and recreated account: provisioning also needs a
-// durable local UID binding and safe account lifecycle before enabling access.
-func registryDeviceIdentity(registry config.AccessRegistry, login, method string) (*rpc.WhoamiReply, error) {
+// These are deliberately explicit: new RPCs do not grant device authority.
+// Managed owners may perform supported database operations without inheriting
+// the recovery account's host authority.
+func managedDeviceMethod(role, method string) bool {
+	switch method {
+	case "whoami", "status", "config.get", "db.list", "db.access.show", "ext.list",
+		"tune.show", "tls.status", "backup.list", "restore.status",
+		"activity.list", "activity.show", "activity.health", "protect.status":
+		return role == config.AccessRoleOwner || role == config.AccessRoleMember
+	case "user.add", "user.list", "user.revoke", "device.add", "device.list", "device.revoke",
+		"plan", "db.create", "db.write-access", "auth.status", "auth.setup", "upgrade.install":
+		return role == config.AccessRoleOwner
+	default:
+		return false
+	}
+}
+
+func registryDeviceIdentity(registry config.AccessRegistry, login, uid, method string) (*rpc.WhoamiReply, error) {
 	for _, device := range registry.Devices {
 		if device.UnixLogin != login {
 			continue
 		}
 
-		if device.State != config.DeviceActive || method != "whoami" {
+		if device.State != config.DeviceActive || device.Cleanup || device.UnixUID != uid {
 			return nil, deviceAccessDenied()
 		}
 
 		for _, operator := range registry.Operators {
-			if operator.ID == device.OperatorID {
+			if operator.ID == device.OperatorID && !operator.Revoked && managedDeviceMethod(operator.Role, method) {
 				return &rpc.WhoamiReply{SSHAccount: login, IdentityKind: rpc.IdentityVerifiedDevice,
 					OperatorID: operator.ID, Operator: operator.Name, DeviceID: device.ID, Device: device.Label, Role: operator.Role}, nil
 			}

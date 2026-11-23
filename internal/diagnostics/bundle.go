@@ -658,8 +658,16 @@ func validateEventActor(field string, ev activity.Event) error {
 		return invalid(field+".actor_label", "needs_actor_kind")
 	}
 
-	if ev.ActorVerified && ev.ActorKind != activity.ActorTimer && ev.ActorKind != activity.ActorSystem {
-		return invalid(field+".actor_verified", "cannot_verify_operator")
+	for _, f := range []struct {
+		name, value string
+	}{
+		{"operator_id", ev.OperatorID},
+		{"device_id", ev.DeviceID},
+		{"device_label", ev.DeviceLabel},
+	} {
+		if err := optionalPattern(field+"."+f.name, f.value, labelPattern); err != nil {
+			return err
+		}
 	}
 
 	if err := optionalPattern(field+".node_version", ev.NodeVersion, versionPattern); err != nil {

@@ -45,6 +45,13 @@ func methods() map[string]method {
 			handler: handleSelfcheck,
 		},
 		{name: "whoami", cluster: true, handler: handleWhoami},
+		{name: "access.bootstrap-owner", cluster: true, lock: fixedLock(engine.LockExclusive), handler: handleBootstrapOwner},
+		{name: "user.add", cluster: true, lock: fixedLock(engine.LockExclusive), handler: handleUserAdd},
+		{name: "user.list", cluster: true, lock: fixedLock(engine.LockShared), handler: handleUserList},
+		{name: "user.revoke", cluster: true, lock: fixedLock(engine.LockExclusive), handler: handleUserRevoke},
+		{name: "device.add", cluster: true, lock: fixedLock(engine.LockExclusive), handler: handleDeviceAdd},
+		{name: "device.list", cluster: true, lock: fixedLock(engine.LockShared), handler: handleDeviceList},
+		{name: "device.revoke", cluster: true, lock: fixedLock(engine.LockExclusive), handler: handleDeviceRevoke},
 		{
 			name:    "cluster.bootstrap",
 			lock:    fixedLock(engine.LockExclusive),

@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
@@ -10,8 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/rpc"
 	"golang.org/x/crypto/ssh"
 )
@@ -39,6 +42,51 @@ func TestDispatcherDeniesManagedMethodBeforeHandler(t *testing.T) {
 	}
 }
 
+func TestManagedRecheckAfterLock(t *testing.T) {
+	oldLookup, oldLoad, oldCluster, oldAcquire := lookupDeviceUID, loadDeviceRegistry, loadGuardCluster, serveAcquire
+
+	t.Cleanup(func() {
+		lookupDeviceUID, loadDeviceRegistry, loadGuardCluster, serveAcquire = oldLookup, oldLoad, oldCluster, oldAcquire
+	})
+
+	t.Setenv("SUDO_UID", "123")
+
+	registry := deviceRegistryFixture(t)
+	lookupDeviceUID = func(string) (*user.User, error) { return &user.User{Uid: "123", Username: "vdev-1"}, nil }
+	loadDeviceRegistry = func(string) (config.AccessRegistry, error) { return registry, nil }
+	loadGuardCluster = func() (config.Cluster, error) { return config.Cluster{}, nil }
+
+	identity, err := authorizeDeviceCaller("123", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	locked := false
+	serveAcquire = func(_ context.Context, mode engine.LockMode, _, _ string, _ time.Duration) (engine.Release, error) {
+		locked = mode == engine.LockShared
+		registry.Devices[0].State = config.DeviceRevoked
+
+		return func() {}, nil
+	}
+
+	req := rpc.Request{Method: "status"}
+	env := &Env{DeviceIdentity: identity}
+	out := &eventWriter{w: &bytes.Buffer{}}
+	releases, _, ok := acquireServeLocks(context.Background(), method{}, req, env, nil, out)
+
+	for _, release := range releases {
+		defer release()
+	}
+
+	if !ok || !locked {
+		t.Fatal("managed lockless RPC did not acquire a shared global lock")
+	}
+
+	if _, ok := serveRecheck(context.Background(), method{}, req, env, nil, out); ok {
+		t.Fatal("revoked device passed the locked recheck")
+	}
+}
+
 func deviceRegistryFixture(t *testing.T) config.AccessRegistry {
 	t.Helper()
 
@@ -53,7 +101,7 @@ func deviceRegistryFixture(t *testing.T) config.AccessRegistry {
 	return config.AccessRegistry{
 		Operators: []config.AccessOperator{{ID: "op-1", Name: "alice", Role: config.AccessRoleMember}},
 		Devices: []config.AccessDevice{{ID: "dev-1", OperatorID: "op-1", Label: "laptop", State: config.DeviceActive,
-			UnixLogin: "vdev-1", SSHPublicKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))),
+			UnixLogin: "vdev-1", UnixUID: "123", SSHPublicKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))),
 			WGPublicKey: base64.StdEncoding.EncodeToString(wg), Address: "10.0.0.1", RequestDigest: strings.Repeat("a", 64)}},
 	}
 }
@@ -82,15 +130,42 @@ func TestDeviceAuthorization(t *testing.T) {
 		t.Fatalf("identity = %+v, %v", got, err)
 	}
 
-	for name := range methods() {
-		if name == "whoami" {
-			continue
-		}
-
+	for _, name := range []string{"apply", "sql", "ssh.confirm", "upgrade.install", "user.add", "device.list", "unknown",
+		"db.create", "db.write-access", "auth.setup", "db.drop", "db.resize", "job.list", "job.follow", "metrics.show", "queries.top", "maint.report", "backup.now", "backup.verify"} {
 		if _, err := authorizeDeviceCaller("123", name); err == nil {
-			t.Errorf("allowed %s", name)
+			t.Errorf("member allowed %s", name)
 		}
 	}
+
+	for _, name := range []string{"whoami", "status", "config.get", "db.list", "db.access.show", "ext.list", "tune.show",
+		"tls.status", "backup.list", "restore.status", "activity.list", "activity.show", "activity.health", "protect.status"} {
+		if _, err := authorizeDeviceCaller("123", name); err != nil {
+			t.Errorf("member denied %s: %v", name, err)
+		}
+	}
+
+	registry.Operators[0].Role = config.AccessRoleOwner
+
+	for _, name := range []string{"user.add", "user.list", "device.list", "db.create", "db.write-access", "upgrade.install"} {
+		if _, err := authorizeDeviceCaller("123", name); err != nil {
+			t.Errorf("owner denied %s: %v", name, err)
+		}
+	}
+
+	registry.Operators[0].Revoked = true
+
+	if _, err := authorizeDeviceCaller("123", "whoami"); err == nil {
+		t.Error("allowed revoked operator")
+	}
+
+	registry.Operators[0].Revoked = false
+	registry.Devices[0].UnixUID = "124"
+
+	if _, err := authorizeDeviceCaller("123", "whoami"); err == nil {
+		t.Error("allowed changed Unix UID")
+	}
+
+	registry.Devices[0].UnixUID = "123"
 
 	for _, state := range []string{config.DevicePending, config.DeviceRevoked} {
 		registry.Devices[0].State = state

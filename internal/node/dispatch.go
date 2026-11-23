@@ -252,6 +252,10 @@ func serveCheckMethod(req rpc.Request, m method, known bool, table map[string]me
 		return nil, out.fail(req.Method, err), false
 	}
 
+	if rec != nil {
+		rec.identity = identity
+	}
+
 	if !known || !m.versionExempt {
 		if err := checkVersion(req); err != nil {
 			recordActivityRefusal(context.Background(), rec, req, req.Method, err, "version_mismatch")
@@ -347,6 +351,11 @@ func acquireServeLocks(ctx context.Context, m method, req rpc.Request, env *Env,
 	} else if m.lock != nil {
 		mode = m.lock(req)
 	}
+	// Revocation writers take the global lock exclusively. Hold a shared
+	// envelope even for ordinarily lockless managed RPCs through acceptance.
+	if env.DeviceIdentity != nil && mode == engine.LockNone {
+		mode = engine.LockShared
+	}
 
 	env.LockMode = mode
 	if mode != engine.LockNone {
@@ -388,6 +397,16 @@ func acquireServeLocks(ctx context.Context, m method, req rpc.Request, env *Env,
 }
 
 func serveRecheck(ctx context.Context, m method, req rpc.Request, env *Env, rec *activityRecorder, out *eventWriter) (int, bool) {
+	if env.DeviceIdentity != nil {
+		identity, err := authorizeDeviceCaller(os.Getenv("SUDO_UID"), req.Method)
+		if err != nil || identity == nil || *identity != *env.DeviceIdentity {
+			err = deviceAccessDenied()
+			recordActivityRefusal(ctx, rec, req, req.Method, err, "device_access_denied")
+
+			return out.fail(req.Method, err), false
+		}
+	}
+
 	if !m.cluster || (req.Method != "apply" && !materialisationRefused[req.Method]) ||
 		(m.lock == nil && m.clusterLock == nil && m.lockWithConfig == nil && m.clusterLockWithConfig == nil) {
 		return 0, true

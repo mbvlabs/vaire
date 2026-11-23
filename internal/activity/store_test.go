@@ -27,6 +27,24 @@ func baseEvent() Event {
 	return Event{Source: SourceRPC, Action: "backup.full", Outcome: OutcomeStarted}
 }
 
+func TestStorePreservesVerifiedDeviceIdentity(t *testing.T) {
+	s := testStore(t)
+	ev := baseEvent()
+	ev.ActorKind, ev.ActorLabel, ev.ActorVerified = ActorOperator, "alice", true
+	ev.OperatorID, ev.DeviceID, ev.DeviceLabel = "op-1", "dev-1", "laptop"
+	mustAppend(t, s, ev)
+
+	page := mustQuery(t, s, Query{})
+	if len(page.Events) != 1 {
+		t.Fatalf("events: %+v", page.Events)
+	}
+
+	got := page.Events[0]
+	if !got.ActorVerified || got.ActorLabel != "alice" || got.OperatorID != "op-1" || got.DeviceID != "dev-1" || got.DeviceLabel != "laptop" {
+		t.Fatalf("lost authenticated attribution: %+v", got)
+	}
+}
+
 func TestStoreFiltersUnderscoreDatabaseAcrossPages(t *testing.T) {
 	s := testStore(t)
 	ev := baseEvent()

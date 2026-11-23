@@ -595,6 +595,23 @@ func requireBundleValue[T any](t *testing.T, value any) T {
 	return result
 }
 
+func TestValidatePageAcceptsOnlyCompleteVerifiedDeviceIdentity(t *testing.T) {
+	b := validBundle()
+	ev := &b.Activity.Events[0]
+	ev.ActorVerified = true
+	ev.OperatorID, ev.DeviceID, ev.DeviceLabel = "op-1", "dev-1", "laptop"
+
+	if err := ValidatePage(b.Activity); err != nil {
+		t.Fatal(err)
+	}
+
+	ev.DeviceID = ""
+
+	if err := ValidatePage(b.Activity); err == nil {
+		t.Fatal("accepted a verified operator without a device ID")
+	}
+}
+
 func TestReadRejectsCanariesInKnownFields(t *testing.T) {
 	cases := map[string]func(*Bundle){
 		"sql in action": func(b *Bundle) { b.Activity.Events[0].Action = "select * from users" },

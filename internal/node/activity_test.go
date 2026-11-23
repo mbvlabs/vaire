@@ -26,6 +26,35 @@ const (
 	testJobID       = "01M4X0ME0NBQ95HNNDT213BGHC"
 )
 
+func TestManagedActivityUsesAuthenticatedIdentity(t *testing.T) {
+	store := &fakeActivityStore{}
+	rec, _ := testRecorder(t, store)
+	rec.identity = &rpc.WhoamiReply{IdentityKind: rpc.IdentityVerifiedDevice,
+		OperatorID: "op-1", Operator: "alice", DeviceID: "dev-1", Device: "laptop"}
+	req := rpc.Request{Method: "db.create", Operator: "mallory"}
+
+	scope := newRPCScope(rec, req.Method, req)
+	if err := scope.begin(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := scope.finish(context.Background(), activity.OutcomeSucceeded, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	recordActivityRefusal(context.Background(), rec, req, req.Method, deviceAccessDenied(), "")
+
+	for _, ev := range store.recorded() {
+		if !ev.ActorVerified || ev.ActorLabel != "alice" || ev.OperatorID != "op-1" || ev.DeviceID != "dev-1" || ev.DeviceLabel != "laptop" {
+			t.Fatalf("incorrect attribution: %+v", ev)
+		}
+	}
+
+	if len(store.recorded()) != 3 {
+		t.Fatalf("missing activity events: %+v", store.recorded())
+	}
+}
+
 func TestActivityPreservesUnderscoreDatabase(t *testing.T) {
 	store := &fakeActivityStore{}
 	rec, _ := testRecorder(t, store)
@@ -320,6 +349,11 @@ func TestActivityImportantClassifications(t *testing.T) {
 		{"db.unfollow", rpc.Request{}, true},
 		{"queries.reset", rpc.Request{DryRun: true}, false},
 		{"metrics.rotate", rpc.Request{DryRun: true}, false},
+		{"user.add", rpc.Request{DryRun: true}, false},
+		{"user.add", rpc.Request{}, true},
+		{"device.revoke", rpc.Request{Params: json.RawMessage(`{"user":"alice","label":"laptop"}`)}, false},
+		{"device.revoke", rpc.Request{Params: json.RawMessage(`{"user":"alice","label":"laptop","id":"dev-1"}`)}, true},
+		{"device.revoke", rpc.Request{Params: json.RawMessage(`{`)}, true},
 		// These handlers ignore dry_run and still mutate, so a direct RPC must
 		// not use the flag to skip its checked start.
 		{"db.create", rpc.Request{DryRun: true}, false},
@@ -386,6 +420,28 @@ func TestActivityCheckedStartPolicy(t *testing.T) {
 	}
 
 	rejectf(t, len(warnings) != 1 || warnings[0].Code != activityWarningCode, "read warning = %+v, want one activity warning", warnings)
+}
+
+func TestDeviceRevokePreviewWorksWithoutDurableActivity(t *testing.T) {
+	store := &fakeActivityStore{appendErr: errors.New("activity unavailable")}
+	rec, _ := testRecorder(t, store)
+	m := methods()["device.revoke"]
+
+	for _, tc := range []struct {
+		params  string
+		wantErr bool
+	}{
+		{`{"user":"alice","label":"laptop"}`, false},
+		{`{"user":"alice","label":"laptop","id":"dev-1"}`, true},
+	} {
+		req := rpc.Request{Method: m.name, Params: json.RawMessage(tc.params)}
+		scope := newRPCScope(rec, m.name, req)
+		err := beginActivityScope(t.Context(), scope, activityImportant(m, req), func(output.Event) {})
+
+		if (err != nil) != tc.wantErr {
+			t.Errorf("params %s: error = %v, want error %v", tc.params, err, tc.wantErr)
+		}
+	}
 }
 
 func TestActivityFinishWarnNeverHidesOutcome(t *testing.T) {

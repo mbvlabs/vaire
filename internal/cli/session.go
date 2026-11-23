@@ -316,6 +316,10 @@ func workspaceTunnelConfig(c *workspaces.Workspace, n workspaces.Node) (transpor
 // tunnel daemon holds it, and holds it until the tunnel closes: two devices
 // with one operator key would steal the node's peer from each other.
 func upTunnel(ctx context.Context, workspaceName, privateKey, operatorAddr, nodePub, publicAddr string, port int, nodeWG string, p *progress) (*transport.Tunnel, error) {
+	return upTunnelWithLock(ctx, workspaceName, workspaces.Path(workspaceName, TunnelLockFile), privateKey, operatorAddr, nodePub, publicAddr, port, nodeWG, p)
+}
+
+func upTunnelWithLock(ctx context.Context, workspaceName, lockPath, privateKey, operatorAddr, nodePub, publicAddr string, port int, nodeWG string, p *progress) (*transport.Tunnel, error) {
 	cfg, err := tunnelConfig(privateKey, operatorAddr, nodePub, publicAddr, port, nodeWG)
 	if err != nil {
 		return nil, err
@@ -325,7 +329,7 @@ func upTunnel(ctx context.Context, workspaceName, privateKey, operatorAddr, node
 		cfg.Logf = func(format string, args ...any) { p.note("wireguard: " + fmt.Sprintf(format, args...)) }
 	}
 
-	release, err := lockTunnel(ctx, workspaceName, p)
+	release, err := lockTunnelPath(ctx, workspaceName, lockPath, p)
 	if err != nil {
 		return nil, err
 	}

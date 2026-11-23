@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/crypto/ssh"
@@ -34,21 +36,29 @@ type AccessRegistry struct {
 }
 
 type AccessOperator struct {
-	ID   string `toml:"id"`
-	Name string `toml:"name"`
-	Role string `toml:"role"`
+	ID             string `toml:"id"`
+	Name           string `toml:"name"`
+	Role           string `toml:"role"`
+	Revoked        bool   `toml:"revoked,omitempty"`
+	BootstrapOwner bool   `toml:"bootstrap_owner,omitempty"`
 }
 
 type AccessDevice struct {
-	ID            string `toml:"id"`
-	OperatorID    string `toml:"operator_id"`
-	Label         string `toml:"label"`
-	State         string `toml:"state"`
-	SSHPublicKey  string `toml:"ssh_public_key"`
-	WGPublicKey   string `toml:"wg_public_key"`
-	Address       string `toml:"address"`
-	UnixLogin     string `toml:"unix_login"`
-	RequestDigest string `toml:"request_digest"`
+	ID                 string    `toml:"id"`
+	OperatorID         string    `toml:"operator_id"`
+	Label              string    `toml:"label"`
+	State              string    `toml:"state"`
+	SSHPublicKey       string    `toml:"ssh_public_key"`
+	WGPublicKey        string    `toml:"wg_public_key"`
+	Address            string    `toml:"address"`
+	UnixLogin          string    `toml:"unix_login"`
+	UnixUID            string    `toml:"unix_uid,omitempty"`
+	RequestDigest      string    `toml:"request_digest"`
+	TemporaryAddress   string    `toml:"temporary_address,omitempty"`
+	TemporaryPublicKey string    `toml:"temporary_public_key,omitempty"`
+	ExpiresAt          time.Time `toml:"expires_at,omitempty"`
+	// Cleanup records a peer which must be removed from the live host.
+	Cleanup bool `toml:"cleanup,omitempty"`
 }
 
 var (
@@ -61,6 +71,7 @@ var (
 // addresses, logins and request digests cannot be reused by another device.
 func (r AccessRegistry) Validate() error {
 	ids, names := map[string]bool{}, map[string]bool{}
+	bootstrapOwner := false
 
 	for _, op := range r.Operators {
 		if !accessIDPattern.MatchString(op.ID) || !validAccessLabel(op.Name) {
@@ -71,6 +82,14 @@ func (r AccessRegistry) Validate() error {
 			return fmt.Errorf("operator %q: invalid role", op.ID)
 		}
 
+		if op.BootstrapOwner {
+			if bootstrapOwner || op.Role != AccessRoleOwner {
+				return fmt.Errorf("invalid initial owner")
+			}
+
+			bootstrapOwner = true
+		}
+
 		if ids[op.ID] || names[op.Name] {
 			return fmt.Errorf("duplicate operator ID or name: %q", op.ID)
 		}
@@ -78,65 +97,120 @@ func (r AccessRegistry) Validate() error {
 		ids[op.ID], names[op.Name] = true, true
 	}
 
-	deviceIDs, labels := map[string]bool{}, map[string]bool{}
-	sshKeys, wgKeys := map[string]bool{}, map[string]bool{}
-	addresses, logins, digests := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	return validateAccessDevices(r.Devices, ids)
+}
 
-	for _, d := range r.Devices {
+func validateAccessDevices(devices []AccessDevice, ids map[string]bool) error {
+	seen := make(map[[2]string]bool, len(devices)*9)
+	for _, d := range devices {
 		if !accessIDPattern.MatchString(d.ID) || !ids[d.OperatorID] || !validAccessLabel(d.Label) {
 			return fmt.Errorf("device %q: invalid ID, operator or label", d.ID)
 		}
 
-		key, err := validateAccessDevice(d)
-		if err != nil {
+		if err := validateAccessDevice(d); err != nil {
 			return err
 		}
 
-		label := d.OperatorID + "\x00" + d.Label
-		sshKey := string(key.Marshal())
+		for _, key := range accessUniqueAttributes(d) {
+			if seen[key] {
+				return fmt.Errorf("device %q: duplicate %s", d.ID, key[0])
+			}
 
-		if deviceIDs[d.ID] || labels[label] || sshKeys[sshKey] || wgKeys[d.WGPublicKey] ||
-			addresses[d.Address] || logins[d.UnixLogin] || digests[d.RequestDigest] {
-			return fmt.Errorf("device %q: duplicate identity or attribute", d.ID)
+			seen[key] = true
 		}
-
-		deviceIDs[d.ID], labels[label], sshKeys[sshKey], wgKeys[d.WGPublicKey] = true, true, true, true
-		addresses[d.Address], logins[d.UnixLogin], digests[d.RequestDigest] = true, true, true
 	}
 
 	return nil
 }
 
-func validateAccessDevice(d AccessDevice) (ssh.PublicKey, error) {
+func accessUniqueAttributes(d AccessDevice) [][2]string {
+	keys := [][2]string{{"ID", d.ID}, {"address", d.Address}, {"Unix login", d.UnixLogin}, {"digest", d.RequestDigest}}
+	if d.State != DeviceRevoked {
+		keys = append(keys, [2]string{"device label", d.OperatorID + "\x00" + d.Label})
+	}
+
+	if d.SSHPublicKey != "" {
+		key, _ := parseAccessSSHKey(d.SSHPublicKey)
+		keys = append(keys, [2]string{"SSH key", string(key.Marshal())})
+	}
+
+	if d.WGPublicKey != "" {
+		keys = append(keys, [2]string{"WireGuard key", d.WGPublicKey})
+	}
+
+	if d.UnixUID != "" {
+		keys = append(keys, [2]string{"Unix UID", d.UnixUID})
+	}
+
+	if d.TemporaryAddress != "" {
+		keys = append(keys, [2]string{"address", d.TemporaryAddress}, [2]string{"WireGuard key", d.TemporaryPublicKey})
+	}
+
+	return keys
+}
+
+func validateAccessDevice(d AccessDevice) error {
 	if d.State != DevicePending && d.State != DeviceActive && d.State != DeviceRevoked {
-		return nil, fmt.Errorf("device %q: invalid state", d.ID)
+		return fmt.Errorf("device %q: invalid state", d.ID)
 	}
 
-	key, err := parseAccessSSHKey(d.SSHPublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("device %q: %w", d.ID, err)
+	if err := validateAccessLease(d); err != nil {
+		return err
 	}
 
-	wg, err := base64.StdEncoding.Strict().DecodeString(d.WGPublicKey)
-	if err != nil || len(wg) != 32 || base64.StdEncoding.EncodeToString(wg) != d.WGPublicKey || bytes.Equal(wg, make([]byte, 32)) {
-		return nil, fmt.Errorf("device %q: invalid WireGuard public key", d.ID)
+	if d.State == DeviceActive || (d.State == DevicePending && d.TemporaryAddress == "") ||
+		d.SSHPublicKey != "" || d.WGPublicKey != "" {
+		if _, err := parseAccessSSHKey(d.SSHPublicKey); err != nil {
+			return fmt.Errorf("device %q: %w", d.ID, err)
+		}
+
+		if !ValidAccessWGKey(d.WGPublicKey) {
+			return fmt.Errorf("device %q: invalid WireGuard public key", d.ID)
+		}
 	}
 
 	addr, err := netip.ParseAddr(d.Address)
 	if err != nil || !addr.Is4() || addr.IsUnspecified() || addr.IsMulticast() {
-		return nil, fmt.Errorf("device %q: invalid IPv4 address", d.ID)
+		return fmt.Errorf("device %q: invalid IPv4 address", d.ID)
 	}
 
 	if !unixLoginPattern.MatchString(d.UnixLogin) {
-		return nil, fmt.Errorf("device %q: invalid Unix login", d.ID)
+		return fmt.Errorf("device %q: invalid Unix login", d.ID)
+	}
+
+	if d.UnixUID != "" {
+		uid, err := strconv.ParseUint(d.UnixUID, 10, 32)
+		if err != nil || uid == 0 || strconv.FormatUint(uid, 10) != d.UnixUID {
+			return fmt.Errorf("device %q: invalid Unix UID", d.ID)
+		}
 	}
 
 	digest, err := hex.DecodeString(d.RequestDigest)
 	if err != nil || len(digest) != 32 || hex.EncodeToString(digest) != d.RequestDigest {
-		return nil, fmt.Errorf("device %q: invalid SHA-256 request digest", d.ID)
+		return fmt.Errorf("device %q: invalid SHA-256 request digest", d.ID)
 	}
 
-	return key, nil
+	return nil
+}
+
+func validateAccessLease(d AccessDevice) error {
+	if d.TemporaryAddress == "" && d.TemporaryPublicKey == "" && d.ExpiresAt.IsZero() {
+		return nil
+	}
+
+	temporary, err := netip.ParseAddr(d.TemporaryAddress)
+	if err != nil || !temporary.Is4() || temporary.IsUnspecified() || temporary.IsMulticast() ||
+		d.TemporaryAddress == d.Address || !ValidAccessWGKey(d.TemporaryPublicKey) || d.ExpiresAt.IsZero() {
+		return fmt.Errorf("device %q: invalid enrollment lease", d.ID)
+	}
+
+	return nil
+}
+
+// ValidAccessWGKey accepts a canonical nonzero WireGuard public key.
+func ValidAccessWGKey(key string) bool {
+	wg, err := base64.StdEncoding.Strict().DecodeString(key)
+	return err == nil && len(wg) == 32 && base64.StdEncoding.EncodeToString(wg) == key && !bytes.Equal(wg, make([]byte, 32))
 }
 
 func parseAccessSSHKey(value string) (ssh.PublicKey, error) {

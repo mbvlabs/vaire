@@ -42,6 +42,10 @@ type PendingSecrets struct {
 	Backup *BackupCreds `json:"backup,omitempty"`
 	// Metrics is the /metrics endpoint credential (Phase 4).
 	Metrics *MetricsCreds `json:"metrics,omitempty"`
+	// Owner keys are distinct from the legacy recovery credentials above.
+	OwnerSSHPrivateKey string `json:"owner_ssh_private_key,omitempty"`
+	OwnerWGPrivateKey  string `json:"owner_wg_private_key,omitempty"`
+	MasterPasswordHash string `json:"master_password_hash,omitempty"`
 }
 
 // Progress records the completed init phases and what was learned on the way.

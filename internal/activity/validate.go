@@ -64,8 +64,8 @@ var redactor = secrets.Default
 
 // ValidateEvent enforces the event allowlist. Append calls it before the store
 // assigns Schema, EventID, OccurredAt and Sequence, so those may be empty; any
-// value that is present must be valid. ActorVerified is never assigned here:
-// the store copies it from the event and refuses a claimed operator identity.
+// value that is present must be valid. The node is responsible for binding
+// verified operator identities to authenticated sessions.
 func ValidateEvent(ev Event) error {
 	if ev.Schema != "" && ev.Schema != Schema {
 		return eventError("schema", "is not the supported version")
@@ -153,6 +153,14 @@ func validateActor(ev Event) error {
 		return err
 	}
 
+	for _, field := range []struct{ name, value string }{
+		{"operator_id", ev.OperatorID}, {"device_id", ev.DeviceID}, {"device_label", ev.DeviceLabel},
+	} {
+		if err := checkToken(field.name, field.value, maxTokenLen, false); err != nil {
+			return err
+		}
+	}
+
 	if ev.ActorLabel != "" && ev.ActorKind == "" {
 		return eventError("actor_label", "needs an actor_kind")
 	}
@@ -160,9 +168,15 @@ func validateActor(ev Event) error {
 	if ev.ActorVerified {
 		switch ev.ActorKind {
 		case ActorTimer, ActorSystem:
-		case ActorOperator, "":
-			return eventError("actor_verified", "cannot be claimed for an operator")
+		case ActorOperator:
+			if ev.OperatorID == "" || ev.DeviceID == "" || ev.ActorLabel == "" || ev.DeviceLabel == "" {
+				return eventError("actor_verified", "needs a complete device identity")
+			}
+		default:
+			return eventError("actor_verified", "needs an actor kind")
 		}
+	} else if ev.OperatorID != "" || ev.DeviceID != "" || ev.DeviceLabel != "" {
+		return eventError("actor_verified", "device identity must be verified")
 	}
 
 	return nil
@@ -405,6 +419,9 @@ func sanitizeEvent(ev Event) Event {
 	ev.ReasonCode = redactField(ev.ReasonCode)
 	ev.ActorKind = redactField(ev.ActorKind)
 	ev.ActorLabel = redactField(ev.ActorLabel)
+	ev.OperatorID = redactField(ev.OperatorID)
+	ev.DeviceID = redactField(ev.DeviceID)
+	ev.DeviceLabel = redactField(ev.DeviceLabel)
 	ev.NodeVersion = redactField(ev.NodeVersion)
 
 	return ev

@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -251,13 +252,31 @@ var loadPoolerOperators = func() (config.Operators, error) {
 	return config.LoadOperators(config.OperatorsPath)
 }
 
+var loadPoolerAccess = func() (config.AccessRegistry, error) {
+	raw, err := os.ReadFile(config.AccessDevicesPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return config.AccessRegistry{}, nil
+	}
+
+	if err != nil {
+		return config.AccessRegistry{}, err
+	}
+
+	return config.DecodeAccessRegistry(raw)
+}
+
 func poolerOperators(cfg config.Cluster) ([]string, error) {
 	ops, err := loadPoolerOperators()
 	if err != nil {
 		return nil, err
 	}
 
-	if len(ops.Operators) == 0 {
+	access, err := loadPoolerAccess()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(ops.Operators) == 0 && len(access.Devices) == 0 {
 		return nil, nil
 	}
 
@@ -271,6 +290,40 @@ func poolerOperators(cfg config.Cluster) ([]string, error) {
 		addr, err := netip.ParseAddr(op.WGAddress)
 		if err != nil || !addr.Is4() || !subnet.Contains(addr) {
 			return nil, fmt.Errorf("operator %q has an invalid IPv4 WireGuard address", op.Name)
+		}
+
+		addresses = append(addresses, addr.String())
+	}
+
+	if len(cfg.Nodes) == 1 {
+		devices, err := poolerAccessAddresses(access, subnet)
+		if err != nil {
+			return nil, err
+		}
+
+		addresses = append(addresses, devices...)
+	}
+
+	return addresses, nil
+}
+
+// Temporary enrollment addresses are never database client addresses.
+func poolerAccessAddresses(access config.AccessRegistry, subnet netip.Prefix) ([]string, error) {
+	active := make(map[string]bool, len(access.Operators))
+	for _, op := range access.Operators {
+		active[op.ID] = !op.Revoked
+	}
+
+	var addresses []string
+
+	for _, d := range access.Devices {
+		if d.State != config.DeviceActive || d.UnixUID == "" || !active[d.OperatorID] {
+			continue
+		}
+
+		addr, err := netip.ParseAddr(d.Address)
+		if err != nil || !addr.Is4() || !subnet.Contains(addr) {
+			return nil, fmt.Errorf("device %q has an invalid IPv4 WireGuard address", d.ID)
 		}
 
 		addresses = append(addresses, addr.String())
@@ -642,6 +695,112 @@ func applyPoolerFenceGuarded(ctx context.Context, cfg config.Cluster, rt engine.
 	}
 
 	return reloadPoolers(ctx, rt, report)
+}
+
+// RefreshAccessPoolerHBA updates only the HBA files after an access registry
+// change. It never starts a stopped pooler or changes its routes or userlist.
+// Reload also reads the ini, so refuse a stale ini rather than accidentally
+// publishing routes withheld by an ongoing transition.
+func RefreshAccessPoolerHBA(ctx context.Context, cfg config.Cluster, rt engine.Runtime) error {
+	// With no databases, bootstrap has not applied Vaire's pooler step.
+	// The installed package can still have its stock ini (and service).
+	// Leave it alone; creating the first database renders both HBAs from
+	// the registry before publishing any database routes.
+	if len(cfg.Clusters) == 0 {
+		return nil
+	}
+
+	return poolerExposure(cfg, func() error {
+		return refreshAccessPoolerHBAGuarded(ctx, cfg, rt)
+	})
+}
+
+func refreshAccessPoolerHBAGuarded(ctx context.Context, cfg config.Cluster, rt engine.Runtime) error {
+	recs, err := poolerRecords()
+	if err != nil {
+		return err
+	}
+
+	if err := validateRoutingEligibility(cfg, recs); err != nil {
+		return err
+	}
+
+	operators, err := poolerOperators(cfg)
+	if err != nil {
+		return err
+	}
+
+	files := pgbouncerFilesFrom(cfg.RoutingView(recs.IsAwaiting, ""), rt, recs, operators)
+	units := []string{PgbouncerService, SessionPoolerService}
+	ini := []pgbouncerFile{files[0], files[2]}
+	hba := []pgbouncerFile{files[1], files[3]}
+
+	var present, active [2]bool
+
+	for i, unit := range units {
+		var err error
+
+		present[i], active[i], err = accessPoolerPreflight(ctx, unit, ini[i])
+		if err != nil {
+			return err
+		}
+	}
+
+	for i := range units {
+		if present[i] {
+			if err := writePoolerFiles(hba[i : i+1]); err != nil {
+				return err
+			}
+		}
+	}
+
+	for i, unit := range units {
+		if active[i] {
+			if err := reloadAccessPooler(ctx, unit); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func accessPoolerPreflight(ctx context.Context, unit string, ini pgbouncerFile) (present, active bool, err error) {
+	state, err := poolerServiceState(ctx, unit)
+	if err != nil {
+		return false, false, err
+	}
+
+	switch strings.TrimSpace(state) {
+	case "active":
+		active = true
+	case "inactive", "failed":
+	default:
+		return false, false, fmt.Errorf("%s is in an unexpected service state %q", unit, strings.TrimSpace(state))
+	}
+
+	raw, err := os.ReadFile(ini.path)
+	if errors.Is(err, os.ErrNotExist) && !active {
+		return false, false, nil
+	}
+
+	if err != nil {
+		return false, false, err
+	}
+
+	if string(raw) != ini.content {
+		return false, false, fmt.Errorf("%s differs from safe pooler configuration; run vaire apply before refreshing access", ini.path)
+	}
+
+	return true, active, nil
+}
+
+var poolerServiceState = func(ctx context.Context, unit string) (string, error) {
+	return Probe(ctx, "systemctl", "show", "--property=ActiveState", "--value", unit)
+}
+
+var reloadAccessPooler = func(ctx context.Context, unit string) error {
+	return runCmd(ctx, "systemctl", "reload", unit)
 }
 
 // PublishFollowerRoutes renders both poolers' routes for target while its

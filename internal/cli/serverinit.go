@@ -178,6 +178,10 @@ func prepareInit(cmd *cobra.Command, local bool) (*initRun, error) {
 		return nil, config.ValidationError(err)
 	}
 
+	if !local && len(r.cfg.Nodes) != 1 {
+		return nil, output.NewError(output.CodePrecondition, "automatic owner enrollment requires a single node", output.ExitPrecondition, "")
+	}
+
 	if !resume {
 		if workspaces.Exists(r.name) && !local {
 			return nil, output.NewError(
@@ -676,6 +680,7 @@ func (r *initRun) loadPending() error {
 		}
 
 		r.sec = sec
+		r.masterHash = sec.MasterPasswordHash
 		registerPending(sec)
 	}
 
@@ -686,6 +691,8 @@ func registerPending(sec workspaces.PendingSecrets) {
 	secrets.Add(sec.WGPrivateKey)
 	secrets.Add(sec.SSHPrivateKey)
 	secrets.Add(sec.SudoPassword)
+	secrets.Add(sec.OwnerSSHPrivateKey)
+	secrets.Add(sec.OwnerWGPrivateKey)
 
 	if sec.Database != nil {
 		for _, value := range sec.Database.SecretValues() {
@@ -1011,7 +1018,7 @@ func runInitRemote(cmd *cobra.Command) error {
 		return err
 	}
 
-	doc, res, err := r.writeDocument()
+	res, err := r.writeDocument()
 	if err != nil {
 		return err
 	}
@@ -1019,11 +1026,16 @@ func runInitRemote(cmd *cobra.Command) error {
 	if err := r.confirmSecrets(ctx, rt.node); err != nil {
 		return err
 	}
+
+	setup, keys, err := r.bootstrapOwner(ctx, rt.node)
+	if err != nil {
+		return err
+	}
 	// The first master bundle, uploaded with epoch 1 when there is a bucket.
 	r.firstMasterBundle(ctx, rt.node)
 
 	// 13. Local workspace, then drop the pending state.
-	return r.initInstallWorkspace(doc, lockedAt, &res, n)
+	return r.initInstallWorkspace(setup, keys, lockedAt, &res, n)
 }
 
 // initTransport is the SSH connection to a node over WireGuard, and the
@@ -1067,7 +1079,9 @@ func (r *initRun) remoteTransport(ctx context.Context, n config.NodeSpec, known 
 	// this name would hold the tunnel lock and the node's peer.
 	stopTunnelDaemonQuietly(ctx, r.name)
 
-	tun, err := upTunnel(ctx, r.name, r.sec.WGPrivateKey, config.DefaultFirstOperatorWG, r.prog.WGPublicKey, n.PublicAddress, r.cfg.Transport.ListenPort, n.WGAddress, r.p)
+	lockPath := filepath.Join(workspaces.PendingDir(r.name), TunnelLockFile)
+
+	tun, err := upTunnelWithLock(ctx, r.name, lockPath, r.sec.WGPrivateKey, config.DefaultFirstOperatorWG, r.prog.WGPublicKey, n.PublicAddress, r.cfg.Transport.ListenPort, n.WGAddress, r.p)
 	if err != nil {
 		return nil, err
 	}
@@ -1178,13 +1192,10 @@ func (r *initRun) confirmSecrets(ctx context.Context, caller remote.Caller) erro
 }
 
 // initInstallWorkspace writes the local workspace and drops the pending state.
-func (r *initRun) initInstallWorkspace(doc secretsdoc.Document, lockedAt string, res *initResult, n config.NodeSpec) error {
-	if workspaces.Exists(r.name) {
-		return output.NewError(output.CodePrecondition, "a workspace named "+r.name+" appeared during init", output.ExitPrecondition,
-			"Remove it, then run vaire login and paste the transfer bundle.")
-	}
-
-	if _, err := secretsdoc.Install(doc, r.name, lockedAt); err != nil {
+func (r *initRun) initInstallWorkspace(setup rpc.AccessSetup, keys enrollmentKeys, lockedAt string, res *initResult, n config.NodeSpec) error {
+	creds := workspaces.Credentials{Database: r.sec.Database, Backup: r.sec.Backup,
+		Metrics: r.sec.Metrics, MasterPasswordHash: r.masterHash}
+	if err := r.installOrResumeOwner(setup, keys, creds, lockedAt); err != nil {
 		return err
 	}
 
@@ -1203,7 +1214,7 @@ func (r *initRun) initInstallWorkspace(doc secretsdoc.Document, lockedAt string,
 		fmt.Sprintf("Server %s is ready. Node %s (%s) runs PostgreSQL 18 behind PgBouncer at %s:6432.", r.name, n.Name, n.PublicAddress, r.cfg.MasterHostname()),
 		"TLS: " + r.tlsSummary() + r.healthSuffix(),
 		"No application databases yet: create one with vaire db create <name>, or point your agent to the CLI (vaire guide agents).",
-		"Workspace " + r.name + " is the current workspace on this machine. On another machine run vaire login and paste the transfer bundle.",
+		"Workspace " + r.name + " is the current workspace on this machine. Keep the transfer bundle for recovery.",
 	}, "\n")
 	r.warnings = append(r.warnings, node.NoOffsiteWarning(r.cfg)...)
 
@@ -1777,8 +1788,9 @@ func (r *initRun) setInitialMasterPassword(ctx context.Context, caller remote.Ca
 	}
 
 	r.masterHash = hash
+	r.sec.MasterPasswordHash = hash
 
-	return nil
+	return workspaces.SaveSecrets(r.name, r.sec)
 }
 
 func (r *initRun) document() (secretsdoc.Document, error) {
@@ -1822,14 +1834,14 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 // (§8.2 step 12). Nothing is written unless --secrets-out names a file for the
 // transfer bundle. A resumed init that has not been confirmed shows a new
 // handoff with a new passphrase.
-func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
+func (r *initRun) writeDocument() (initResult, error) {
 	cmd := r.cmd
 	n := r.master()
 	res := initResult{Server: r.name, Node: n.Name, PublicAddress: n.PublicAddress, WGAddress: n.WGAddress, AdminUser: r.cfg.Server.AdminUser}
 
 	doc, err := r.document()
 	if err != nil {
-		return doc, res, err
+		return res, err
 	}
 
 	out := stringFlag(cmd, "secrets-out")
@@ -1843,7 +1855,7 @@ func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
 		}
 
 		if _, err := os.Stat(out); err == nil && r.prog.SecretsOut != out {
-			return doc, res, output.NewError(output.CodePrecondition, out+" already exists", output.ExitPrecondition,
+			return res, output.NewError(output.CodePrecondition, out+" already exists", output.ExitPrecondition,
 				"Move it away, or pass --secrets-out with another path, then re-run with --resume.").WithDetails(map[string]any{"reason": "secrets_out_exists", "path": out})
 		}
 	}
@@ -1852,12 +1864,12 @@ func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
 
 	h, err := newHandoff(r.cmd, doc, out)
 	if err != nil {
-		return doc, res, err
+		return res, err
 	}
 
 	r.prog.SecretsOut = h.path
 	if err := r.mark(phaseDocument); err != nil {
-		return doc, res, err
+		return res, err
 	}
 
 	res.SecretsDocument = h.path
@@ -1866,15 +1878,15 @@ func (r *initRun) writeDocument() (secretsdoc.Document, initResult, error) {
 	if MustNotPrompt(cmd) {
 		// Explicitly requested with --reveal-passphrase: it travels in the envelope.
 		res.Passphrase = h.passphrase
-		return doc, res, nil
+		return res, nil
 	}
 	// On the server itself the record belongs on the operator's machine, so
 	// the save action is not offered.
 	if err := h.show(cmd, flagTrue(cmd, "confirm-secrets-stored"), !r.local); err != nil {
-		return doc, res, err
+		return res, err
 	}
 
-	return doc, res, nil
+	return res, nil
 }
 
 func runInitLocal(cmd *cobra.Command) error {
@@ -1940,7 +1952,7 @@ func runInitLocal(cmd *cobra.Command) error {
 		return err
 	}
 
-	_, res, err := r.writeDocument()
+	res, err := r.writeDocument()
 	if err != nil {
 		return err
 	}

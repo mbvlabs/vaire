@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/release"
 	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/spf13/cobra"
 )
 
@@ -102,6 +105,40 @@ func installConnectedNode(cmd *cobra.Command, p *progress, s *session, target no
 		return err
 	}
 
+	if s.ctx.Managed {
+		if err := verifyOwnerAfterUpgrade(ctx, s); err != nil {
+			return err
+		}
+	}
+
 	return output.Success(cmd, output.Result{Data: result, Message: "Node upgraded to " + target.Version,
 		Warnings: append(s.warnings, reply.Warnings...), Next: []string{"vaire status"}})
+}
+
+func verifyOwnerAfterUpgrade(ctx context.Context, s *session) error {
+	ssh, err := s.dial(ctx)
+	if err != nil {
+		return err
+	}
+	defer ssh.Close()
+
+	client := &remote.Node{SSH: ssh, Operator: s.ctx.Operator.Name}
+
+	reply, err := client.Call(ctx, "whoami", nil, remote.CallOptions{})
+	if err != nil {
+		return err
+	}
+
+	var who rpc.WhoamiReply
+	if err := reply.Decode(&who); err != nil {
+		return err
+	}
+
+	if who.IdentityKind != rpc.IdentityVerifiedDevice || who.Role != config.AccessRoleOwner ||
+		who.SSHAccount != s.ctx.Operator.SSHUser || who.Operator != s.ctx.Operator.Name || who.Server != s.ctx.Server {
+		return output.NewError(output.CodePrecondition, "the upgraded node did not verify the workspace owner", output.ExitPrecondition,
+			"Check the owner connection before making further changes.")
+	}
+
+	return nil
 }

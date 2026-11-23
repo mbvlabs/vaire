@@ -71,12 +71,37 @@
         "duration_ms": { "type": "integer", "minimum": 0, "maximum": 315360000000 },
         "actor_kind": { "enum": ["operator", "timer", "system"] },
         "actor_label": { "$ref": "#/$defs/label" },
+        "operator_id": { "$ref": "#/$defs/label" },
+        "device_id": { "$ref": "#/$defs/label" },
+        "device_label": { "$ref": "#/$defs/label" },
         "actor_verified": { "type": "boolean" },
         "node_version": { "$ref": "#/$defs/label" }
       },
-      "dependentRequired": { "actor_label": ["actor_kind"] },
-      "if": { "required": ["actor_verified"], "properties": { "actor_verified": { "const": true } } },
-      "then": { "required": ["actor_kind"], "properties": { "actor_kind": { "enum": ["timer", "system"] } } }
+      "dependentRequired": {
+        "actor_label": ["actor_kind"],
+        "operator_id": ["device_id", "device_label"],
+        "device_id": ["operator_id", "device_label"],
+        "device_label": ["operator_id", "device_id"]
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "actor_verified": { "const": true } } },
+          "then": {
+            "oneOf": [
+              {
+                "required": ["actor_kind", "actor_label", "operator_id", "device_id", "device_label"],
+                "properties": { "actor_kind": { "const": "operator" } }
+              },
+              {
+                "required": ["actor_kind"],
+                "properties": { "actor_kind": { "enum": ["timer", "system"] } },
+                "not": { "required": ["operator_id"] }
+              }
+            ]
+          },
+          "else": { "not": { "required": ["operator_id"] } }
+        }
+      ]
     },
     "coverage": {
       "type": "object",

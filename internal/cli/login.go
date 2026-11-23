@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/secretsdoc"
 	"github.com/mbvlabs/vaire/internal/transport"
@@ -36,6 +38,10 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	raw, err := loginBundle(cmd, args)
 	if err != nil {
 		return err
+	}
+
+	if bytes.HasPrefix(raw, []byte(rpc.AccessSetupPrefix)) {
+		return loginEnrollment(cmd, strings.TrimSpace(string(raw)))
 	}
 
 	passphrase, err := loginPassphrase(cmd)
@@ -113,16 +119,16 @@ func loginBundle(cmd *cobra.Command, args []string) ([]byte, error) {
 		restore := ui.Suspend()
 		defer restore()
 
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Paste the transfer bundle (from "+secretsdoc.ArmorHeader+" to "+secretsdoc.ArmorFooter+"), or the whole copied handoff:")
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Paste the access setup code or transfer bundle (from "+secretsdoc.ArmorHeader+" to "+secretsdoc.ArmorFooter+"), or the whole copied handoff:")
 
-		raw, err := readBundle(cmd.InOrStdin())
+		raw, err := readLoginPaste(cmd.InOrStdin())
 		if err != nil {
 			return nil, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
 
-		if !secretsdoc.IsArmored(raw) {
-			return nil, output.NewError(output.CodeUsage, "that is not a transfer bundle", output.ExitUsage,
-				"Paste the whole block, including the BEGIN and END lines.")
+		if !secretsdoc.IsArmored(raw) && !bytes.HasPrefix(raw, []byte(rpc.AccessSetupPrefix)) {
+			return nil, output.NewError(output.CodeUsage, "no setup code or transfer bundle found", output.ExitUsage,
+				"Paste the setup code or the whole bundle block, including the BEGIN and END lines.")
 		}
 
 		return raw, nil
@@ -134,6 +140,34 @@ func loginBundle(cmd *cobra.Command, args []string) ([]byte, error) {
 
 		return extractBundle(raw, "in "+src)
 	}
+}
+
+func readLoginPaste(r io.Reader) ([]byte, error) {
+	var b strings.Builder
+
+	sc := bufio.NewScanner(io.LimitReader(r, 4<<20))
+	sc.Buffer(make([]byte, 64*1024), 4<<20)
+
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if b.Len() == 0 {
+			if strings.HasPrefix(line, rpc.AccessSetupPrefix) {
+				return []byte(line), nil
+			}
+
+			if line != secretsdoc.ArmorHeader {
+				continue
+			}
+		}
+
+		b.WriteString(line + "\n")
+
+		if line == secretsdoc.ArmorFooter {
+			return []byte(b.String()), nil
+		}
+	}
+
+	return []byte(b.String()), sc.Err()
 }
 
 // ageBinaryPrefix starts a binary (unarmored) age file.
@@ -230,7 +264,7 @@ func runWorkspaceList(cmd *cobra.Command, _ []string) error {
 
 	message := strings.Join(lines, "\n")
 	if len(rows) == 0 {
-		message = "No workspaces. Create one with vaire login and the transfer bundle."
+		message = "No workspaces. Run vaire login and paste a setup code or recovery bundle."
 	}
 
 	return output.Success(cmd, output.Result{Data: rows, Message: message})

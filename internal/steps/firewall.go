@@ -10,6 +10,7 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/engine"
+	"github.com/mbvlabs/vaire/internal/rpc"
 )
 
 const firewallID = "firewall-v1"
@@ -47,6 +48,7 @@ func configuredRules(cfg config.Cluster) []string {
 		"allow 80/tcp",
 		"allow 443/tcp",
 		RuleWGSSH,
+		fmt.Sprintf("allow in on wg0 to any port %d proto tcp", rpc.AccessEnrollPort),
 	}
 	// Reserve the WireGuard subnet for wg0 even when a public CIDR covers
 	// it. PgBouncer trusts registered peer addresses as private sources.

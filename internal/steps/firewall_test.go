@@ -20,6 +20,7 @@ ufw allow 51820/udp
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw allow in on wg0 to any port 22 proto tcp
+ufw allow in on wg0 to any port 6418 proto tcp
 ufw allow in on wg0 to any port 6432 proto tcp
 ufw allow from 203.0.113.7 to any port 6432 proto tcp
 ufw allow from 198.51.100.0/24 to any port 6432 proto tcp
@@ -38,7 +39,7 @@ func TestConfiguredRulesMatchUFWShowAdded(t *testing.T) {
 	want := configuredRules(cfg)
 
 	have := parseShowAdded(showAdded)
-	if len(have) != 12 {
+	if len(have) != 13 {
 		t.Fatalf("parsed %d rules: %v", len(have), have)
 	}
 
@@ -72,7 +73,7 @@ func TestDefaultRoutesPreserveAddressFamily(t *testing.T) {
 				}
 			}
 
-			if slices.Contains(rules, "allow 6432/tcp") || len(rules) != 10 {
+			if slices.Contains(rules, "allow 6432/tcp") || len(rules) != 11 {
 				t.Errorf("unexpected rules: %v", rules)
 			}
 

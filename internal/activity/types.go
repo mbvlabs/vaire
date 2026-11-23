@@ -77,8 +77,7 @@ const (
 // Outcomes lists the allowed Event.Outcome values.
 var Outcomes = []string{OutcomeStarted, OutcomeSucceeded, OutcomeFailed, OutcomeRefused, OutcomeSkipped, OutcomeUnknown}
 
-// Actor kinds. operator is a claimed label until identities are bound to
-// authenticated sessions, so ActorVerified stays false.
+// Actor kinds.
 const (
 	ActorOperator = "operator"
 	ActorTimer    = "timer"
@@ -134,6 +133,9 @@ type Event struct {
 	// identity by itself.
 	ActorLabel    string `json:"actor_label,omitempty"`
 	ActorVerified bool   `json:"actor_verified"`
+	OperatorID    string `json:"operator_id,omitempty"`
+	DeviceID      string `json:"device_id,omitempty"`
+	DeviceLabel   string `json:"device_label,omitempty"`
 
 	// NodeVersion is the version and commit that emitted the event.
 	NodeVersion string `json:"node_version,omitempty"`

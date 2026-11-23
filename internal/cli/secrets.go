@@ -25,6 +25,10 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	if err := managedHandoffError(c); err != nil {
+		return err
+	}
+
 	hash, err := masterPasswordHash(c.Name)
 	if err != nil {
 		return err
@@ -93,6 +97,10 @@ func showWorkspaceHandoff(cmd *cobra.Command, c *workspaces.Workspace) error {
 
 // workspaceDocument rebuilds the secrets document from a workspace.
 func workspaceDocument(c *workspaces.Workspace) (secretsdoc.Document, error) {
+	if err := managedHandoffError(c); err != nil {
+		return secretsdoc.Document{}, err
+	}
+
 	wgKey, err := workspaces.ReadFile(c.Name, workspaces.WGKeyFile)
 	if err != nil {
 		return secretsdoc.Document{}, workspaceFileError(c.Name, workspaces.WGKeyFile, err)
@@ -133,6 +141,15 @@ func workspaceDocument(c *workspaces.Workspace) (secretsdoc.Document, error) {
 	}
 
 	return doc, nil
+}
+
+func managedHandoffError(c *workspaces.Workspace) error {
+	if c.Managed {
+		return output.NewError(output.CodePrecondition, "managed device keys cannot be exported", output.ExitPrecondition,
+			"Ask an owner to enroll another device instead.")
+	}
+
+	return nil
 }
 
 // rebuildDocument builds a document from the workspace and credentials.

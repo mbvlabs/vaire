@@ -133,11 +133,12 @@ type activityNodeInfo struct {
 // activityRecorder appends typed events with this node's metadata filled in.
 // A nil recorder is disabled and every method is a no-op.
 type activityRecorder struct {
-	store   activityStore
-	storeOK bool
-	node    activityNodeInfo
-	paths   activityPaths
-	now     func() time.Time
+	store    activityStore
+	storeOK  bool
+	node     activityNodeInfo
+	paths    activityPaths
+	now      func() time.Time
+	identity *rpc.WhoamiReply
 
 	writer activityWriter
 
@@ -394,9 +395,6 @@ func (r *activityRecorder) fill(ev *activity.Event) {
 	if ev.NodeVersion == "" {
 		ev.NodeVersion = node.NodeVersion
 	}
-	// The RPC operator field is claimed by the client. It is never proof of
-	// identity, so this stays false even when a label is present.
-	ev.ActorVerified = false
 }
 
 // refreshIdentity fills identity fields that were absent when the recorder
@@ -724,7 +722,7 @@ func (s *activityScope) recordStep(ctx context.Context, ev output.Event, next en
 }
 
 func (s *activityScope) event(outcome, code, reason string, ms int64) activity.Event {
-	return activity.Event{
+	ev := activity.Event{
 		OperationID:     s.operationID,
 		RequestID:       s.requestID,
 		ParentRequestID: s.parentRequestID,
@@ -739,6 +737,27 @@ func (s *activityScope) event(outcome, code, reason string, ms int64) activity.E
 		ActorKind:       s.actorKind,
 		ActorLabel:      s.actorLabel,
 		ActorVerified:   false,
+	}
+	if s.rec != nil {
+		bindActivityIdentity(&ev, s.rec.identity)
+	}
+
+	return ev
+}
+
+func bindActivityIdentity(ev *activity.Event, identity *rpc.WhoamiReply) {
+	if identity == nil || identity.IdentityKind != rpc.IdentityVerifiedDevice {
+		return
+	}
+
+	ev.ActorLabel = activityActorLabel(identity.Operator)
+	ev.OperatorID = safeActivityResource(identity.OperatorID)
+	ev.DeviceID = safeActivityResource(identity.DeviceID)
+	ev.DeviceLabel = activityActorLabel(identity.Device)
+	ev.ActorVerified = ev.ActorLabel != "" && ev.OperatorID != "" && ev.DeviceID != "" && ev.DeviceLabel != ""
+
+	if !ev.ActorVerified {
+		ev.OperatorID, ev.DeviceID, ev.DeviceLabel = "", "", ""
 	}
 }
 
@@ -808,6 +827,7 @@ func recordActivityRefusal(ctx context.Context, rec *activityRecorder, req rpc.R
 		ActorLabel:      activityActorLabel(req.Operator),
 		ActorVerified:   false,
 	}
+	bindActivityIdentity(&ev, rec.identity)
 	_ = rec.append(ctx, ev)
 }
 
@@ -859,6 +879,7 @@ var activityDryRunAware = map[string]bool{
 	"ext.remove":     true,
 	"queries.reset":  true,
 	"metrics.rotate": true,
+	"user.add":       true,
 }
 
 // activityImportant says whether a request must have a checked local start
@@ -871,6 +892,10 @@ func activityImportant(m method, req rpc.Request) bool {
 	}
 
 	switch m.name {
+	case "device.revoke":
+		// Without an ID the handler only resolves the target for confirmation.
+		var p rpc.DeviceRevokeParams
+		return json.Unmarshal(req.Params, &p) != nil || p.ID != ""
 	case "protect.init", "db.write-access":
 		return true
 	case "sql":
@@ -1143,7 +1168,7 @@ var activityKnownReason = map[string]bool{
 	// Step skip reasons.
 	"no_databases": true, "backups_not_configured": true, "follower": true,
 	// Node refusal and outcome reasons.
-	"activity_unavailable": true, "already_a_node": true, "already_placed": true,
+	"activity_unavailable": true, "device_access_denied": true, "already_a_node": true, "already_placed": true,
 	"already_undone": true, "awaiting_recovery": true, "backend_not_found": true,
 	"backup_not_configured": true, "bundle_server_mismatch": true,
 	"backup_credentials_missing": true, "backup_credentials_rotated": true,

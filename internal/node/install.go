@@ -17,8 +17,10 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/buildinfo"
 	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/masterbackup"
 	"github.com/mbvlabs/vaire/internal/release"
+	"github.com/mbvlabs/vaire/internal/rpc"
 )
 
 type BuildID struct {
@@ -108,7 +110,9 @@ func handleUpgradeInstall(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, fencedError()
 	}
 
-	if !env.TrustedHostAdmin {
+	verifiedOwner := env.DeviceIdentity != nil && env.DeviceIdentity.IdentityKind == rpc.IdentityVerifiedDevice &&
+		env.DeviceIdentity.Role == config.AccessRoleOwner
+	if !env.TrustedHostAdmin && !verifiedOwner {
 		cfg, err := loadGuardCluster()
 		if err != nil {
 			return Result{}, err

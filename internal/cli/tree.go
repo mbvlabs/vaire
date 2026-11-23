@@ -190,7 +190,7 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary:          "Create a local workspace from a transfer bundle",
-				WhenToUse:        []string{"Open a server on a machine that has the transfer bundle and its passphrase from the secrets handoff.", "The file or stdin may hold the bundle alone or the whole copied handoff; vaire uses the armored block inside it. The passphrase is never read from the file."},
+				WhenToUse:        []string{"Run vaire login and paste the one-time setup code from a workspace owner.", "For recovery, paste a transfer bundle or pass it as a file or on stdin. A file or stdin may contain the whole handoff; vaire uses the armored block and asks for the passphrase separately."},
 				Examples:         []string{"vaire login", "vaire login bundle.txt --passphrase-file pass.txt", "vaire login handoff.md --passphrase-file pass.txt", "vaire login - --passphrase-file pass.txt < bundle.txt"},
 				Mutating:         true,
 				SkipDryRunCheck:  true,
@@ -257,6 +257,8 @@ func phase1Commands() []cmdSpec {
 			},
 		},
 		configCommands(),
+		userCommands(),
+		deviceCommands(),
 		{
 			use: "whoami",
 			run: runWhoami,
@@ -1549,6 +1551,8 @@ func nodeCommands() cmdSpec {
 		},
 		children: []cmdSpec{
 			nodeAccessSSHCommand(),
+			nodeAccessEnrollCommand(),
+			nodeAccessExpireCommand(),
 			{
 				use: "upgrade",
 				run: runNodeUpgrade,

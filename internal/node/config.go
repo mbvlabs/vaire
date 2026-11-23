@@ -32,7 +32,7 @@ var configSetHostname = syncNodeHostname
 var configSetPlan = engine.Plan
 var nodeConfigStore = func() state.Store { return configSetStore() }
 
-func handleConfigGet(context.Context, *Env) (Result, error) {
+func handleConfigGet(_ context.Context, env *Env) (Result, error) {
 	store := state.FileStore{}
 
 	raw, err := os.ReadFile(state.Path)
@@ -47,6 +47,20 @@ func handleConfigGet(context.Context, *Env) (Result, error) {
 	revision, err := store.Revision()
 	if err != nil {
 		return Result{}, err
+	}
+
+	if env != nil && env.DeviceIdentity != nil {
+		// The managed wire contract is the typed desired state, never raw
+		// contents or comments potentially written by a host administrator.
+		cfg, err := config.ParseCluster(raw)
+		if err != nil {
+			return Result{}, output.NewError(output.CodeConfig, "the node's desired state is invalid", output.ExitConfig, "")
+		}
+
+		raw, err = cfg.Encode()
+		if err != nil {
+			return Result{}, err
+		}
 	}
 
 	return Result{Data: map[string]string{"toml": string(raw), "revision": revision}}, nil

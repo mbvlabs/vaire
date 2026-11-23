@@ -74,6 +74,21 @@ func NodeHostname(cfg config.Cluster) string {
 }
 
 func renderWG(cfg config.Cluster) (wgRender, error) {
+	var access config.AccessRegistry
+
+	raw, err := os.ReadFile(config.AccessDevicesPath)
+	if err == nil {
+		access, err = config.DecodeAccessRegistry(raw)
+	}
+
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return wgRender{}, err
+	}
+
+	return renderWGWithAccess(cfg, access)
+}
+
+func renderWGWithAccess(cfg config.Cluster, access config.AccessRegistry) (wgRender, error) {
 	node, err := thisNode(cfg)
 	if err != nil {
 		return wgRender{}, err
@@ -96,7 +111,31 @@ func renderWG(cfg config.Cluster) (wgRender, error) {
 		r.Peers = append(r.Peers, wgPeer{Name: op.Name, PublicKey: op.WGPublicKey, AllowedIPs: op.WGAddress + "/32"})
 	}
 
+	if len(cfg.Nodes) == 1 {
+		for _, d := range access.Devices {
+			if d.State == config.DeviceActive && d.UnixUID != "" {
+				r.Peers = append(r.Peers, wgPeer{Name: d.ID, PublicKey: d.WGPublicKey, AllowedIPs: d.Address + "/32"})
+			}
+		}
+	}
+
 	return r, nil
+}
+
+// SaveAccessWG writes the boot configuration without syncing the live
+// interface: a full sync would drop unrelated pending enrollment peers.
+func SaveAccessWG(cfg config.Cluster, access config.AccessRegistry) error {
+	r, err := renderWGWithAccess(cfg, access)
+	if err != nil {
+		return err
+	}
+
+	key, err := readWGPrivateKey()
+	if err != nil {
+		return err
+	}
+
+	return writeFile(WGConfigPath, r.config(key), WGPrivateKeyMode)
 }
 
 func (r wgRender) config(privateKey string) string {

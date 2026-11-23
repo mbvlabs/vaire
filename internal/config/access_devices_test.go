@@ -67,7 +67,6 @@ func TestAccessRegistryRejectsCollisions(t *testing.T) {
 	base := AccessRegistry{Operators: []AccessOperator{{ID: "op-1", Name: "alice", Role: AccessRoleOwner}}, Devices: []AccessDevice{first}}
 	tests := map[string]func(*AccessDevice){
 		"id":                         func(d *AccessDevice) { d.ID = first.ID },
-		"label":                      func(d *AccessDevice) { d.Label = first.Label },
 		"ssh with different comment": func(d *AccessDevice) { d.SSHPublicKey = first.SSHPublicKey + " another-comment" },
 		"wireguard":                  func(d *AccessDevice) { d.WGPublicKey = first.WGPublicKey },
 		"address":                    func(d *AccessDevice) { d.Address = first.Address },
@@ -99,6 +98,28 @@ func TestAccessRegistryRejectsCollisions(t *testing.T) {
 		if err := r.AddOperator(op); err == nil || !reflect.DeepEqual(r, base) {
 			t.Fatal("duplicate operator accepted or registry changed")
 		}
+	}
+}
+
+func TestAccessRegistryLabelReuseRequiresRevocation(t *testing.T) {
+	first, replacement := accessTestDevice(1), accessTestDevice(2)
+	replacement.Label = first.Label
+
+	r := AccessRegistry{
+		Operators: []AccessOperator{{ID: "op-1", Name: "alice", Role: AccessRoleMember}},
+		Devices:   []AccessDevice{first},
+	}
+	if err := r.AddDevice(replacement); err == nil {
+		t.Fatal("replaced a pending device")
+	}
+
+	r.Devices[0].State = DeviceRevoked
+	if err := r.AddDevice(replacement); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(r.Devices) != 2 || r.Devices[0].ID == r.Devices[1].ID {
+		t.Fatal("lost the original device identity")
 	}
 }
 
