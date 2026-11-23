@@ -129,6 +129,7 @@ func TestMachineOperatorFlowsThroughBootstrapAndHandoff(t *testing.T) {
 
 	r.prog.WGPublicKey = "node-wireguard-public-key"
 	r.prog.SSHHostKeys = []string{"node-ssh-host-key"}
+	r.sec.RecoveryCode = "recovery-code"
 
 	doc, err := r.document()
 	if err != nil {
@@ -183,7 +184,7 @@ func TestRestoreKeepsWorkspaceMachineOperator(t *testing.T) {
 	}
 
 	r := &initRun{
-		name: "prod", prog: &workspaces.Progress{Phases: map[string]string{}},
+		name: "prod", cfg: config.DefaultCluster(), prog: &workspaces.Progress{Phases: map[string]string{}},
 		restore: &restoreRun{ctx: &workspaces.Workspace{Name: "prod", Operator: workspaces.Operator{Name: name}}},
 	}
 	if err := r.restoreSecrets(); err != nil {

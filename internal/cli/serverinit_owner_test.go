@@ -123,7 +123,7 @@ func TestOwnerInstallResumeAndRecoverySeparation(t *testing.T) {
 
 	keys := enrollmentKeys{SSH: string(ownerSSH), WG: ownerWG}
 	r := &initRun{name: "prod", sec: workspaces.PendingSecrets{OperatorName: "owner", SSHPrivateKey: string(legacySSH),
-		WGPrivateKey: "legacy-wg", OwnerSSHPrivateKey: keys.SSH, OwnerWGPrivateKey: keys.WG},
+		WGPrivateKey: "legacy-wg", OwnerSSHPrivateKey: keys.SSH, OwnerWGPrivateKey: keys.WG, RecoveryCode: "recovery-code"},
 		cfg:  config.Cluster{Nodes: []config.NodeSpec{{Name: "db", Role: "master", PublicAddress: "192.0.2.1", WGAddress: "10.0.0.1"}}},
 		prog: &workspaces.Progress{WGPublicKey: "node-key", SSHHostKeys: []string{host}}}
 
@@ -132,8 +132,8 @@ func TestOwnerInstallResumeAndRecoverySeparation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if doc.Operator.SSHPrivateKey != string(legacySSH) || doc.Operator.WGPrivateKey != "legacy-wg" {
-		t.Fatal("handoff did not retain legacy recovery credentials")
+	if doc.RecoveryCode != "recovery-code" || doc.Operator.SSHPrivateKey != "" || doc.Operator.WGPrivateKey != "" || doc.Operator.SudoPassword != "" {
+		t.Fatal("handoff must contain the recovery code but no reusable login")
 	}
 
 	s := rpc.AccessSetup{ID: "device", Server: "prod", Node: "db", User: "owner", UnixLogin: "device-user",

@@ -120,10 +120,13 @@ vaire console app                # interactive usql session
 vaire console app --write        # run DDL as the database owner
 ```
 
-On another machine, `vaire login` and paste the transfer bundle from the handoff.
-Fresh setups generate a `machine-<id>` registration. Importing the same bundle
-on another computer shares that registration and its keys; it does not enroll a
-new machine.
+Setup enrolls the machine running `vaire server init` as the first verified owner
+device. To add someone, run `vaire user add alice` and
+`vaire device add alice laptop`. On the other machine, run `vaire login` and
+paste the one-time setup code. Each device keeps its own keys.
+
+Keep the encrypted recovery kit and its passphrase somewhere you can reach
+without your owner device. It is for recovering access, not adding users.
 
 ## Cloudflare setup
 
@@ -249,7 +252,7 @@ For an external PostgreSQL source, `vaire db copy` imports a snapshot into a new
 - **Disk space and the page cache are shared.** A database that fills the disk affects its neighbours.
 - **Density costs.** Each cluster carries its own processes (about 19 MiB idle) and buffers; a 1 GiB VPS isn't a sensible home for several databases.
 - **One server is a single point of failure.** Followers run on the same VPS for read-only workloads and migration rehearsals. They do not provide failover.
-- **Recovering a lost server.** The server backs its own state up after every change: an age-encrypted master bundle in the bucket under `<prefix>/master/` (`vaire server backup list`). When the server is lost, power the old VPS off or destroy it, create a new one, and run `vaire server init --restore --host root@<new-ip>` from your machine: the new server takes over the old one's WireGuard key, SSH host keys and certificate, so your workspace keeps working; then `vaire db recover --all` brings each database back from its stanza. Move the `db1.<domain>` record to the new IP, or use a provider IP that moves between servers (a Hetzner Primary IP, a floating IP) so nothing changes in DNS; a short TTL on that record shortens the wait for clients. Without a bucket, keep copies with `vaire server backup export`; the server comes back from one with `--bundle-file`, but the databases' data doesn't: configure a bucket for production.
+- **Recovering a lost server.** The server backs its own state up after every change: an age-encrypted master bundle in the bucket under `<prefix>/master/` (`vaire server backup list`). Power off or destroy the old VPS, create a new one, and run `vaire server init --restore --host root@<new-ip>` from your machine. Restore enrolls a new verified owner device and issues a new recovery kit. Then run `vaire db recover --all` to bring each database back from its stanza. Move the `db1.<domain>` record to the new IP if needed. Without a bucket, keep copies with `vaire server backup export`; the server comes back from one with `--bundle-file`, but the databases' data doesn't.
 
 ## Security design
 
@@ -339,8 +342,8 @@ Default privileges grant access to new tables created by the owner in `public`: 
   - every secret in plain text, grouped for a password manager;
   - an ASCII-armored `age` transfer bundle (scrypt), with a generated passphrase.
 - You type `stored` to confirm you've saved it, and vaire offers to clear the screen. Nothing is written to disk unless you ask with `--secrets-out`.
-- `vaire login` on any machine takes the bundle and passphrase and sets up a **workspace**: credentials under `~/.config/vaire/workspaces/<name>/`, files 0600.
-- Later full-document reveals (`vaire secrets export` and replacement handoffs) require a master password or authenticator code at a terminal. Set either with `vaire auth setup`. This is a command gate, not encryption of workspace files at rest.
+- If you lose owner access, give the recovery kit and its passphrase to `vaire login` on a new machine. It enrolls a verified owner device with new keys and consumes the recovery code. Run `vaire secrets export` from the recovered workspace to make a replacement kit.
+- Exporting a recovery kit requires a master password or authenticator code. Set either with `vaire auth setup`. This protects the export command, not the workspace files at rest.
 - Releases are signed with cosign. The node updater accepts only forward, signed tagged releases from Vaire’s release service. It never installs a binary or accepts a download URL supplied by the operator.
 
 ### Approving public access
@@ -360,8 +363,7 @@ The master password set during `server init` is already registered on the
 node. If you skip it, use `vaire auth setup` later to choose a master password
 or TOTP. No root console or setup code is needed. Until a factor is set,
 changes that require approval are refused.
-The master password is not the SSH recovery password. Setting up a factor
-does not turn on database protection.
+Setting up a factor does not turn on database protection.
 
 Use interactive `vaire config set` or `vaire config edit` to review and approve
 a change that widens public database access or HTTPS metrics. For example,

@@ -636,6 +636,9 @@ func registerPending(sec workspaces.PendingSecrets) {
 	secrets.Add(sec.SudoPassword)
 	secrets.Add(sec.OwnerSSHPrivateKey)
 	secrets.Add(sec.OwnerWGPrivateKey)
+	secrets.Add(sec.RecoveryToken)
+	secrets.Add(sec.RecoveryWGKey)
+	secrets.Add(sec.RecoveryCode)
 
 	if sec.Database != nil {
 		for _, value := range sec.Database.SecretValues() {
@@ -846,7 +849,6 @@ func (r *initRun) bootstrapHost(ctx context.Context, caller remote.Caller) (node
 		"cluster_toml": string(raw),
 		"node_name":    r.master().Name,
 		"operator":     op,
-		"local":        false,
 	}, remote.CallOptions{
 		Secrets:     map[string]string{steps.SecretSudoPassword: r.sec.SudoPassword},
 		Confirm:     r.name,
@@ -888,6 +890,10 @@ func runInitRemote(cmd *cobra.Command) error {
 	publicSSH := net.JoinHostPort(n.PublicAddress, strconv.Itoa(r.boot.Port))
 	if err := r.savePending(); err != nil {
 		return err
+	}
+
+	if r.prog.OwnerSetup != nil {
+		return r.resumeOwnerSetup(ctx)
 	}
 
 	// 1. Local preflight: the target answers on SSH (§20.1).
@@ -953,8 +959,21 @@ func runInitRemote(cmd *cobra.Command) error {
 		return err
 	}
 
+	return r.finishRemoteInit(ctx, rt.node, lockedAt)
+}
+
+func (r *initRun) finishRemoteInit(ctx context.Context, caller remote.Caller, lockedAt string) error {
 	// 12. Secrets handoff, then the node records the confirmation.
-	if err := r.askMasterPassword(cmd, rt.node); err != nil {
+	if err := r.askMasterPassword(ctx, caller); err != nil {
+		return err
+	}
+
+	setup, keys, err := r.bootstrapOwner(ctx, caller)
+	if err != nil {
+		return err
+	}
+
+	if err := r.issueRecovery(ctx, caller); err != nil {
 		return err
 	}
 
@@ -963,19 +982,32 @@ func runInitRemote(cmd *cobra.Command) error {
 		return err
 	}
 
-	if err := r.confirmSecrets(ctx, rt.node); err != nil {
+	if err := r.confirmSecrets(ctx, caller); err != nil {
+		return err
+	}
+	// Continue on the verified owner connection before retiring setup keys.
+	if err := r.completeSetupAccess(ctx, setup, keys); err != nil {
 		return err
 	}
 
-	setup, keys, err := r.bootstrapOwner(ctx, rt.node)
+	// 13. Local workspace, then drop the pending state.
+	return r.initInstallWorkspace(setup, keys, lockedAt, &res, r.master())
+}
+
+func (r *initRun) resumeOwnerSetup(ctx context.Context) error {
+	setup := *r.prog.OwnerSetup
+	keys := enrollmentKeys{SSH: r.sec.OwnerSSHPrivateKey, WG: r.sec.OwnerWGPrivateKey}
+
+	res, err := r.writeDocument()
 	if err != nil {
 		return err
 	}
-	// The first master bundle, uploaded with epoch 1 when there is a bucket.
-	r.firstMasterBundle(ctx, rt.node)
 
-	// 13. Local workspace, then drop the pending state.
-	return r.initInstallWorkspace(setup, keys, lockedAt, &res, n)
+	if err := r.completeSetupAccess(ctx, setup, keys); err != nil {
+		return err
+	}
+
+	return r.initInstallWorkspace(setup, keys, r.prog.Phases[phaseLockdown], &res, r.master())
 }
 
 // initTransport is the SSH connection to a node over WireGuard, and the
@@ -1671,7 +1703,8 @@ func (r *initRun) lockdownFailed(ctx context.Context, armedAt time.Time, publicS
 // askMasterPassword sets up the node verifier before saving the local hash
 // for secrets export. If setup is interrupted, the same password can be used
 // on resume to verify the factor already enrolled on the node.
-func (r *initRun) askMasterPassword(cmd *cobra.Command, caller remote.Caller) error {
+func (r *initRun) askMasterPassword(ctx context.Context, caller remote.Caller) error {
+	cmd := r.cmd
 	if MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
 		return nil
 	}
@@ -1702,7 +1735,7 @@ func (r *initRun) askMasterPassword(cmd *cobra.Command, caller remote.Caller) er
 				continue
 			}
 
-			if err := r.setInitialMasterPassword(commandContext(cmd), caller, pw, hash); err != nil {
+			if err := r.setInitialMasterPassword(ctx, caller, pw, hash); err != nil {
 				return err
 			}
 
@@ -1739,6 +1772,10 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 		return secretsdoc.Document{}, errors.New("the node identity is missing from the pending init; re-run with --resume")
 	}
 
+	if r.sec.RecoveryCode == "" {
+		return secretsdoc.Document{}, errors.New("the recovery code is missing from the pending init; re-run with --resume")
+	}
+
 	return secretsdoc.Document{
 		Schema:       secretsdoc.Schema,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
@@ -1754,19 +1791,13 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 			WGPublicKey:   r.prog.WGPublicKey,
 			SSHHostKeys:   r.prog.SSHHostKeys,
 		}},
-		Operator: secretsdoc.Operator{
-			Name:          r.sec.OperatorName,
-			WGAddress:     config.DefaultFirstOperatorWG,
-			WGPrivateKey:  r.sec.WGPrivateKey,
-			SSHUser:       r.cfg.Server.AdminUser,
-			SSHPrivateKey: r.sec.SSHPrivateKey,
-			SudoPassword:  r.sec.SudoPassword,
-		},
+		Operator:       secretsdoc.Operator{Name: r.sec.OperatorName},
+		RecoveryCode:   r.sec.RecoveryCode,
 		Database:       r.sec.Database,
 		Backup:         r.sec.Backup,
 		Metrics:        metricsDocument(r.sec.Metrics, r.cfg.Hostname(n.Name), r.cfg.Metrics.PathPrefix),
 		MasterPassword: r.masterHash,
-		BreakGlass:     secretsdoc.BreakGlass(r.name, r.cfg.Server.AdminUser, n.PublicAddress),
+		BreakGlass:     "If WireGuard is unavailable, open the provider console and log in as root to repair it. Otherwise rebuild from backups with vaire server init --restore.",
 	}, nil
 }
 

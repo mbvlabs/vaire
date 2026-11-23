@@ -207,6 +207,15 @@ func restoreFiles(b masterbackup.Bundle, cfg config.Cluster, clusterTOML string,
 		switch {
 		case f.Path == masterbackup.ClusterPath:
 			f.Data = []byte(clusterTOML)
+		case f.Path == masterbackup.OperatorsPath:
+			// Legacy operator keys in a backup are not credentials for the
+			// replacement host. Host bootstrap installs its own temporary peer.
+			data, err := (config.Operators{}).Encode()
+			if err != nil {
+				return nil, nil, err
+			}
+
+			f.Data = data
 		case f.Path == masterbackup.RecordsPath:
 			haveRecords = true
 

@@ -46,6 +46,8 @@ func methods() map[string]method {
 		},
 		{name: "whoami", cluster: true, handler: handleWhoami},
 		{name: "access.bootstrap-owner", cluster: true, lock: fixedLock(engine.LockExclusive), handler: handleBootstrapOwner},
+		{name: "access.recovery-issue", cluster: true, lock: fixedLock(engine.LockExclusive), handler: handleRecoveryIssue},
+		{name: "access.complete-setup", cluster: true, lock: fixedLock(engine.LockExclusive), handler: handleCompleteSetupAccess},
 		{name: "user.add", cluster: true, lock: fixedLock(engine.LockExclusive), handler: handleUserAdd},
 		{name: "user.list", cluster: true, lock: fixedLock(engine.LockShared), handler: handleUserList},
 		{name: "user.revoke", cluster: true, lock: fixedLock(engine.LockExclusive), handler: handleUserRevoke},

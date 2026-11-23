@@ -92,8 +92,9 @@ func managedDeviceMethod(role, method string) bool {
 		"tune.show", "tls.status", "backup.list", "restore.status",
 		"activity.list", "activity.show", "activity.health", "protect.status":
 		return role == config.AccessRoleOwner || role == config.AccessRoleMember
-	case "user.add", "user.list", "user.revoke", "device.add", "device.list", "device.revoke",
-		"plan", "db.create", "db.write-access", "auth.status", "auth.setup", "upgrade.install":
+	case "user.add", "user.list", "user.revoke", "device.add", "device.list", "device.revoke", "access.recovery-issue", "access.complete-setup",
+		"plan", "db.create", "db.recover", "db.write-access", "auth.status", "auth.setup",
+		"master-backup.now", "master-backup.list", "master-backup.get", "upgrade.install":
 		return role == config.AccessRoleOwner
 	default:
 		return false

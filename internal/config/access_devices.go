@@ -57,6 +57,7 @@ type AccessDevice struct {
 	TemporaryAddress   string    `toml:"temporary_address,omitempty"`
 	TemporaryPublicKey string    `toml:"temporary_public_key,omitempty"`
 	ExpiresAt          time.Time `toml:"expires_at,omitempty"`
+	Recovery           bool      `toml:"recovery,omitempty"`
 	// Cleanup records a peer which must be removed from the live host.
 	Cleanup bool `toml:"cleanup,omitempty"`
 }
@@ -97,7 +98,28 @@ func (r AccessRegistry) Validate() error {
 		ids[op.ID], names[op.Name] = true, true
 	}
 
+	if err := validateRecoveryOwners(r); err != nil {
+		return err
+	}
+
 	return validateAccessDevices(r.Devices, ids)
+}
+
+func validateRecoveryOwners(r AccessRegistry) error {
+	for _, d := range r.Devices {
+		if d.Recovery {
+			owner := false
+			for _, op := range r.Operators {
+				owner = owner || (op.ID == d.OperatorID && op.Role == AccessRoleOwner)
+			}
+
+			if !owner {
+				return fmt.Errorf("device %q: recovery requires an owner", d.ID)
+			}
+		}
+	}
+
+	return nil
 }
 
 func validateAccessDevices(devices []AccessDevice, ids map[string]bool) error {
@@ -200,7 +222,7 @@ func validateAccessLease(d AccessDevice) error {
 
 	temporary, err := netip.ParseAddr(d.TemporaryAddress)
 	if err != nil || !temporary.Is4() || temporary.IsUnspecified() || temporary.IsMulticast() ||
-		d.TemporaryAddress == d.Address || !ValidAccessWGKey(d.TemporaryPublicKey) || d.ExpiresAt.IsZero() {
+		d.TemporaryAddress == d.Address || !ValidAccessWGKey(d.TemporaryPublicKey) || (d.ExpiresAt.IsZero() != d.Recovery) {
 		return fmt.Errorf("device %q: invalid enrollment lease", d.ID)
 	}
 

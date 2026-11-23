@@ -61,6 +61,34 @@ func TestAccessRegistryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRecoveryLeaseRequiresOwnerAndNoExpiry(t *testing.T) {
+	d := accessTestDevice(1)
+	d.SSHPublicKey, d.WGPublicKey = "", ""
+	d.Recovery = true
+	d.TemporaryAddress = "10.0.0.100"
+	d.TemporaryPublicKey = base64.StdEncoding.EncodeToString(append([]byte{3}, make([]byte, 31)...))
+	r := AccessRegistry{Operators: []AccessOperator{{ID: "op-1", Name: "alice", Role: AccessRoleOwner}}, Devices: []AccessDevice{d}}
+
+	raw, err := r.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := DecodeAccessRegistry(raw); err != nil {
+		t.Fatal(err)
+	}
+
+	r.Operators[0].Role = AccessRoleMember
+	if err := r.Validate(); err == nil {
+		t.Fatal("member recovery accepted")
+	}
+
+	r.Operators[0].Role, r.Devices[0].Recovery = AccessRoleOwner, false
+	if err := r.Validate(); err == nil {
+		t.Fatal("non-recovery lease without expiry accepted")
+	}
+}
+
 func TestAccessRegistryRejectsCollisions(t *testing.T) {
 	first := accessTestDevice(1)
 	first.State = DeviceRevoked

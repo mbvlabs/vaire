@@ -121,17 +121,9 @@ func TestOpenFetched(t *testing.T) {
 	side := masterbackup.NewSidecar("n", m, sealed)
 	f := fetchedBundle{Name: "n", Cipher: sealed, Sidecar: &side, Older: "older"}
 
-	b, err := openFetched(f, id.String(), "prod")
+	_, err = openFetched(f, id.String(), "prod")
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	if err := operatorInBundle(b, "op-1"); err != nil {
-		t.Errorf("op-1 is in the bundle: %v", err)
-	}
-
-	if err := operatorInBundle(b, "op-2"); err == nil {
-		t.Error("op-2 isn't in the bundle")
 	}
 
 	var ce *output.CLIError

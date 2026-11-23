@@ -3,16 +3,118 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"reflect"
 	"strings"
 
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/mbvlabs/vaire/internal/workspaces"
 	"golang.org/x/crypto/ssh"
 )
+
+func (r *initRun) completeSetupAccess(ctx context.Context, setup rpc.AccessSetup, keys enrollmentKeys) error {
+	if r.prog.OwnerSetup == nil {
+		r.prog.OwnerSetup = &setup
+		if err := r.mark("retiring_setup_access"); err != nil {
+			return err
+		}
+	}
+
+	return withEnrollmentNode(ctx, setup, keys, func(caller *remote.Node) error {
+		if err := verifyEnrollmentIdentity(ctx, caller, setup); err != nil {
+			return err
+		}
+
+		if _, err := r.p.call(ctx, caller, "access.complete-setup", nil,
+			remote.CallOptions{OperationID: r.prog.SetupOperationID, OnEvent: r.p.event}); err != nil {
+			return err
+		}
+
+		if r.restore != nil {
+			return r.restoreFirstBundle(ctx, newPhaseTimer(r.restore.state), caller)
+		}
+
+		r.firstMasterBundle(ctx, caller)
+
+		return nil
+	})
+}
+
+func (r *initRun) issueRecovery(ctx context.Context, caller remote.Caller) error {
+	if r.sec.RecoveryCode != "" {
+		return nil
+	}
+
+	if r.sec.RecoveryToken == "" {
+		params, err := newRecoveryRequest(r.sec.OperatorName)
+		if err != nil {
+			return err
+		}
+
+		r.sec.RecoveryToken, r.sec.RecoveryWGKey = params.Token, params.TemporaryPrivateKey
+		registerPending(r.sec)
+
+		if err := workspaces.SaveSecrets(r.name, r.sec); err != nil {
+			return err
+		}
+	}
+
+	params := rpc.AccessRecoveryIssueParams{
+		User: r.sec.OperatorName, Token: r.sec.RecoveryToken, TemporaryPrivateKey: r.sec.RecoveryWGKey,
+	}
+
+	reply, err := r.p.call(ctx, caller, "access.recovery-issue", params,
+		remote.CallOptions{OperationID: r.prog.SetupOperationID, OnEvent: r.p.event, Secrets: params.Secrets()})
+	if err != nil {
+		return err
+	}
+
+	var device rpc.Device
+	if err := reply.Decode(&device); err != nil {
+		return err
+	}
+
+	setup, err := rpc.DecodeAccessSetup(device.SetupCode)
+	if err != nil {
+		return err
+	}
+
+	if setup.Mode != rpc.AccessSetupRecovery || setup.Role != "owner" || setup.User != r.sec.OperatorName ||
+		setup.Server != r.name || setup.Node != r.master().Name || setup.Token != r.sec.RecoveryToken ||
+		setup.TemporaryPrivateKey != r.sec.RecoveryWGKey || setup.NodeWGPublicKey != r.prog.WGPublicKey {
+		return fmt.Errorf("node returned a mismatched recovery code")
+	}
+
+	r.sec.RecoveryCode = device.SetupCode
+	secrets.Add(device.SetupCode)
+
+	return workspaces.SaveSecrets(r.name, r.sec)
+}
+
+func newRecoveryRequest(operator string) (rpc.AccessRecoveryIssueParams, error) {
+	params := rpc.AccessRecoveryIssueParams{User: operator}
+
+	key, _, err := transport.GenerateWGKey()
+	if err != nil {
+		return params, err
+	}
+
+	var token [32]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return params, err
+	}
+
+	params.Token, params.TemporaryPrivateKey = base64.RawURLEncoding.EncodeToString(token[:]), key
+	secrets.Add(params.Token)
+	secrets.Add(key)
+
+	return params, nil
+}
 
 // bootstrapOwner persists the new device keys before making the idempotent
 // RPC. Neither key is included in the legacy recovery handoff.

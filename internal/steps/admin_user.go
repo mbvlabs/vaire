@@ -2,7 +2,6 @@ package steps
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/user"
 	"path/filepath"
@@ -47,10 +46,6 @@ func renderAdminUser(cfg config.Cluster) (adminUserRender, error) {
 		return adminUserRender{}, err
 	}
 
-	if len(ops.Operators) == 0 {
-		return adminUserRender{}, errors.New("operators.toml lists no operator; refusing to install an empty authorized_keys")
-	}
-
 	var keys strings.Builder
 	keys.WriteString("# managed by vaire: operator keys from " + config.OperatorsPath + "\n")
 
@@ -63,6 +58,18 @@ func renderAdminUser(cfg config.Cluster) (adminUserRender, error) {
 		AuthorizedKeys: keys.String(),
 		Sudoers:        adminSudoers(cfg.Server.AdminUser),
 	}, nil
+}
+
+// ClearBootstrapSSH removes setup keys without changing the console recovery account.
+func ClearBootstrapSSH(ctx context.Context, cfg config.Cluster, rt engine.Runtime, report engine.Reporter) error {
+	rt.SecretValues = nil
+
+	_, err := (adminUser{}).apply(ctx, adminUserRender{
+		User: cfg.Server.AdminUser, Sudoers: adminSudoers(cfg.Server.AdminUser),
+		AuthorizedKeys: "# managed by vaire: operator keys from " + config.OperatorsPath + "\n",
+	}, rt, report)
+
+	return err
 }
 
 func adminSudoers(user string) string {
@@ -143,6 +150,10 @@ func (s adminUser) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 		return engine.ApplyResult{}, err
 	}
 
+	return s.apply(ctx, r, rt, report)
+}
+
+func (s adminUser) apply(ctx context.Context, r adminUserRender, rt engine.Runtime, report engine.Reporter) (engine.ApplyResult, error) {
 	env := map[string]string{
 		"ADMIN_USER":      r.User,
 		"AUTHORIZED_KEYS": r.AuthorizedKeys,
@@ -153,7 +164,7 @@ func (s adminUser) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 		env["SUDO_PASSWORD"] = pw
 	}
 
-	err = rt.Shell.Run(ctx, s.ID(), Script("admin-user"), env, report)
+	err := rt.Shell.Run(ctx, s.ID(), Script("admin-user"), env, report)
 
 	return engine.ApplyResult{Restart: engine.RestartNone}, err
 }

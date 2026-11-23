@@ -3,9 +3,13 @@ package cli
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,11 +21,11 @@ import (
 	"github.com/mbvlabs/vaire/internal/masterbackup"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/steps"
 	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/mbvlabs/vaire/internal/workspaces"
-	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
@@ -60,6 +64,8 @@ func (rr *restoreRun) addressChanged() bool {
 
 // restoreResult is the rebuild's result.
 type restoreResult struct {
+	SecretsDocument  string                `json:"secrets_document,omitempty"`
+	Passphrase       string                `json:"passphrase,omitempty"`
 	Server           string                `json:"server"`
 	Bundle           string                `json:"bundle"`
 	From             string                `json:"from"`
@@ -92,6 +98,14 @@ func runInitRestore(cmd *cobra.Command) error {
 
 	if dryRun(cmd) {
 		return r.restoreDryRun()
+	}
+
+	if err := requireStructuredHandoff(cmd, "secrets-out", "server init --restore", "confirm-secrets-stored"); err != nil {
+		return err
+	}
+
+	if r.prog.Done(phaseWorkspaceUpdate) {
+		return r.restoreFinish(ctx)
 	}
 
 	if err := r.restoreConfirm(kit); err != nil {
@@ -267,6 +281,17 @@ func (r *initRun) restoreResumePending(name string) error {
 	r.cfg, r.boot, r.prog = cfg, boot, prog
 
 	r.restore.state = prog.Restore
+	if prog.Done(phaseSecrets) {
+		sec, err := workspaces.LoadSecrets(name)
+		if err != nil {
+			return err
+		}
+
+		r.sec = sec
+		r.masterHash = sec.MasterPasswordHash
+		registerPending(sec)
+	}
+
 	if v := stringFlag(r.cmd, "identity"); v != "" {
 		r.boot.Identity = v
 	}
@@ -319,10 +344,6 @@ func (r *initRun) restoreFetch(ctx context.Context, kit *workspaces.BackupCreds)
 		return output.NewError(output.CodeBundleCorrupt, "the bundle has no cluster.toml", output.ExitSecrets, "")
 	}
 
-	if err := operatorInBundle(b, rr.ctx.Operator.Name); err != nil {
-		return err
-	}
-
 	rr.fetched, rr.bundle = f, b
 	if f.Name == "" {
 		// A file whose name isn't the bundle's: its manifest names it.
@@ -332,29 +353,6 @@ func (r *initRun) restoreFetch(ctx context.Context, kit *workspaces.BackupCreds)
 	rr.state.Bundle, rr.state.From = f.Name, f.From
 
 	return nil
-}
-
-// operatorInBundle refuses a bundle whose operator registry lacks this
-// workspace's operator: the rebuilt server wouldn't let it in.
-func operatorInBundle(b masterbackup.Bundle, operator string) error {
-	f, ok := b.File(masterbackup.OperatorsPath)
-	if !ok {
-		return nil
-	}
-
-	var ops config.Operators
-	if err := toml.Unmarshal(f.Data, &ops); err != nil {
-		return output.NewError(output.CodeBundleCorrupt, "the bundle's operators.toml does not parse: "+err.Error(), output.ExitSecrets, "")
-	}
-
-	for _, op := range ops.Operators {
-		if op.Name == operator {
-			return nil
-		}
-	}
-
-	return output.NewError(output.CodePrecondition, "the bundle's operators don't include this workspace's operator "+operator, output.ExitPrecondition,
-		"Use the workspace of an operator the server knew, or an older bundle with --bundle.").WithDetails(map[string]any{"reason": "operator_not_in_bundle"})
 }
 
 // restoreConfig is the bundle's cluster.toml with the new public address.
@@ -452,18 +450,22 @@ func (r *initRun) restoreConfirm(kit *workspaces.BackupCreds) error {
 // checkOldMaster refuses while the old master still answers over WireGuard.
 func (r *initRun) checkOldMaster(ctx context.Context) error {
 	rr := r.restore
-	if flagTrue(r.cmd, "old-master-unreachable") || !rr.addressChanged() || rr.state.OldAddress == "" {
+	if flagTrue(r.cmd, "old-master-unreachable") {
 		return nil
 	}
 
 	old, ok := rr.ctx.Master()
-	if !ok {
-		return nil
+	if !ok || !rr.addressChanged() || rr.state.OldAddress == "" {
+		return oldMasterCheckUnavailable()
 	}
 
 	wgKey, err := workspaces.ReadFile(rr.ctx.Name, workspaces.WGKeyFile)
 	if err != nil {
-		return workspaceFileError(rr.ctx.Name, workspaces.WGKeyFile, err)
+		return oldMasterCheckUnavailable()
+	}
+
+	if _, err := transport.WGPublicKey(strings.TrimSpace(string(wgKey))); err != nil {
+		return oldMasterCheckUnavailable()
 	}
 
 	stopTunnelDaemonQuietly(ctx, rr.ctx.Name)
@@ -476,7 +478,7 @@ func (r *initRun) checkOldMaster(ctx context.Context) error {
 
 	tun, err := upTunnel(probeCtx, rr.ctx.Name, strings.TrimSpace(string(wgKey)), rr.ctx.Operator.WGAddress, old.WGPublicKey, old.PublicAddress, old.ListenPort, old.WGAddress, nil)
 	if err != nil {
-		return nil //nolint:nilerr // no tunnel: the old master doesn't answer.
+		return oldMasterCheckUnavailable()
 	}
 	defer tun.Close()
 
@@ -490,6 +492,12 @@ func (r *initRun) checkOldMaster(ctx context.Context) error {
 	return output.NewError(output.CodePrecondition, "the old master "+old.PublicAddress+" still answers over WireGuard", output.ExitPrecondition,
 		"Power it off or destroy it first, then run the rebuild again. If it only looks alive, pass --old-master-unreachable.").
 		WithDetails(map[string]any{"reason": "old_master_alive", "address": old.PublicAddress})
+}
+
+func oldMasterCheckUnavailable() error {
+	return output.NewError(output.CodePrecondition, "cannot check whether the old master is reachable", output.ExitPrecondition,
+		"Power off or destroy the old master, then pass --old-master-unreachable.").
+		WithDetails(map[string]any{"reason": "old_master_check_unavailable"})
 }
 
 // canFence reports whether a rebuild can fence the old master: the epoch
@@ -564,33 +572,40 @@ func (r *initRun) fence(ctx context.Context, kit *workspaces.BackupCreds) error 
 	return nil
 }
 
-// restoreSecrets fills the pending secrets from the workspace: the operator's
-// keys, the sudo password and the service credentials, which the steps
-// re-send (D11).
+// restoreSecrets creates a temporary transport identity and persists it before
+// contacting the new host. The workspace device keys are never sent to it.
 func (r *initRun) restoreSecrets() error {
 	rr := r.restore
 
-	wgKey, err := workspaces.ReadFile(rr.ctx.Name, workspaces.WGKeyFile)
-	if err != nil {
-		return workspaceFileError(rr.ctx.Name, workspaces.WGKeyFile, err)
-	}
-
-	sshKey, err := workspaces.ReadFile(rr.ctx.Name, workspaces.SSHKeyFile)
-	if err != nil {
-		return workspaceFileError(rr.ctx.Name, workspaces.SSHKeyFile, err)
-	}
-
-	creds, err := workspaces.LoadCredentials(rr.ctx.Name)
+	subnet, err := netip.ParsePrefix(r.cfg.Transport.Subnet)
 	if err != nil {
 		return err
 	}
 
-	r.sec = workspaces.PendingSecrets{
-		OperatorName: rr.ctx.Operator.Name, WGPrivateKey: strings.TrimSpace(string(wgKey)), SSHPrivateKey: string(sshKey),
-		SudoPassword: creds.SudoPassword, Database: creds.Database, Backup: creds.Backup, Metrics: creds.Metrics,
+	var reserved []netip.Addr
+
+	for _, n := range r.cfg.Nodes {
+		addr, err := netip.ParseAddr(n.WGAddress)
+		if err != nil {
+			return err
+		}
+
+		reserved = append(reserved, addr)
 	}
-	registerPending(r.sec)
-	r.prog.Mark(phaseSecrets)
+
+	addr, err := config.NextAccessAddress(subnet, reserved)
+	if err != nil {
+		return err
+	}
+	// operator() uses this address for the bootstrap peer. This is separate
+	// from the original address used by checkOldMaster above.
+	rr.ctx.Operator.WGAddress = addr.String()
+
+	if !r.prog.Done(phaseSecrets) {
+		if err := r.saveRestoreSecrets(); err != nil {
+			return err
+		}
+	}
 
 	if err := r.ensureDatabaseSecrets(); err != nil {
 		return err
@@ -598,14 +613,42 @@ func (r *initRun) restoreSecrets() error {
 
 	addRecoveryKit(r.dbSecrets, r.sec.Backup)
 
-	if r.sec.Database != nil && creds.Database != nil && len(r.sec.Database.Services) != len(creds.Database.Services) {
-		r.warnings = append(r.warnings, output.Warning{Code: "secrets_document_stale", Message: "service credentials were missing from this workspace and were generated; run vaire secrets export"})
-	}
-	// Generated credentials (a workspace from before a phase) go back into
-	// the workspace too, not only the pending state.
-	creds.Database, creds.Metrics = r.sec.Database, r.sec.Metrics
+	return nil
+}
 
-	return workspaces.SaveCredentials(rr.ctx.Name, creds)
+func (r *initRun) saveRestoreSecrets() error {
+	creds, err := workspaces.LoadCredentials(r.restore.ctx.Name)
+	if err != nil {
+		return err
+	}
+
+	wg, _, err := transport.GenerateWGKey()
+	if err != nil {
+		return err
+	}
+
+	key, _, err := transport.GenerateSSHKey("vaire-restore-bootstrap")
+	if err != nil {
+		return err
+	}
+
+	sudo := creds.SudoPassword
+	if sudo == "" {
+		sudo, err = secrets.Base62(24)
+		if err != nil {
+			return err
+		}
+	}
+
+	r.sec = workspaces.PendingSecrets{OperatorName: r.restore.ctx.Operator.Name, WGPrivateKey: wg, SSHPrivateKey: string(key),
+		SudoPassword: sudo, Database: creds.Database, Backup: creds.Backup, Metrics: creds.Metrics, MasterPasswordHash: creds.MasterPasswordHash}
+	registerPending(r.sec)
+
+	if err := workspaces.SaveSecrets(r.name, r.sec); err != nil {
+		return err
+	}
+
+	return r.mark(phaseSecrets)
 }
 
 // place is called by firstContact once the binary is installed: it sends
@@ -719,7 +762,7 @@ func (r *initRun) restoreRemote(ctx context.Context, timer *phaseTimer) error {
 		return err
 	}
 
-	// WireGuard with the workspace's own keys: the server has the old key.
+	// The pending keys are a temporary bootstrap transport, not the owner.
 	stopTunnelDaemonQuietly(ctx, r.name)
 
 	tun, err := upTunnel(ctx, r.name, r.sec.WGPrivateKey, rr.ctx.Operator.WGAddress, r.prog.WGPublicKey, n.PublicAddress, r.cfg.Transport.ListenPort, n.WGAddress, r.p)
@@ -746,11 +789,21 @@ func (r *initRun) restoreRemote(ctx context.Context, timer *phaseTimer) error {
 		return err
 	}
 
-	if err := r.restoreFirstBundle(ctx, timer, rt.node); err != nil {
+	setup, keys, err := r.bootstrapOwner(ctx, rt.node)
+	if err != nil {
 		return err
 	}
 
-	if err := r.restoreWorkspacePhase(); err != nil {
+	if err := r.issueRecovery(ctx, rt.node); err != nil {
+		return err
+	}
+
+	handoff, err := r.writeDocument()
+	if err != nil {
+		return err
+	}
+
+	if err := r.saveRestoreOwner(setup); err != nil {
 		return err
 	}
 
@@ -758,7 +811,15 @@ func (r *initRun) restoreRemote(ctx context.Context, timer *phaseTimer) error {
 		return err
 	}
 
-	return r.restoreResult(cmd, rr)
+	if err := r.restoreWorkspacePhase(setup, keys); err != nil {
+		return err
+	}
+
+	if err := r.completeSetupAccess(ctx, setup, keys); err != nil {
+		return err
+	}
+
+	return r.restoreResult(cmd, rr, handoff)
 }
 
 // restoreHostPhase pins the host key and installs the binary over public SSH.
@@ -796,7 +857,7 @@ func (t *restoreTransport) close() {
 // restoreConnect opens SSH to the rebuilt server over WireGuard, trusting
 // only host keys pinned for the old server.
 func (r *initRun) restoreConnect(ctx context.Context, tun *transport.Tunnel, n config.NodeSpec) (*restoreTransport, error) {
-	known, err := transport.LoadKnownHosts(workspaces.Path(r.name, workspaces.KnownHostsFile))
+	known, err := transport.LoadKnownHosts(workspaces.PendingKnownHosts(r.name))
 	if err != nil {
 		return nil, err
 	}
@@ -898,29 +959,164 @@ func (r *initRun) restoreFirstBundle(ctx context.Context, timer *phaseTimer, wgN
 }
 
 // restoreWorkspacePhase points the workspace at the rebuilt server once.
-func (r *initRun) restoreWorkspacePhase() error {
+func (r *initRun) restoreWorkspacePhase(setup rpc.AccessSetup, keys enrollmentKeys) error {
 	if r.prog.Done(phaseWorkspaceUpdate) {
 		return nil
 	}
 
-	if err := r.updateWorkspace(); err != nil {
+	if err := r.replaceRestoreWorkspace(setup, keys); err != nil {
 		return err
 	}
 
 	return r.mark(phaseWorkspaceUpdate)
 }
 
-// restoreSecretsPhase hands the rebuilt server its secrets document once,
-// showing the new handoff when the address changed.
+const restoreOwnerFile = "restore-owner.json"
+
+func (r *initRun) saveRestoreOwner(setup rpc.AccessSetup) error {
+	raw, err := json.Marshal(setup)
+	if err != nil {
+		return err
+	}
+
+	return transport.WriteSecretFile(filepath.Join(workspaces.PendingDir(r.name), restoreOwnerFile), raw)
+}
+
+// replaceRestoreWorkspace exchanges two complete directories atomically. A
+// crash leaves either the old workspace or the verified owner workspace in
+// place; the pending directory holds the other until the next resume.
+func (r *initRun) replaceRestoreWorkspace(setup rpc.AccessSetup, keys enrollmentKeys) error {
+	target := workspaces.Dir(r.name)
+	stage := filepath.Join(workspaces.PendingDir(r.name), "restore-workspace")
+
+	c, err := workspaces.Load(r.name)
+	if err != nil {
+		return err
+	}
+
+	if c.Server != setup.Server || c.Operator.Name != setup.User {
+		return fmt.Errorf("workspace %s no longer matches the restore owner", r.name)
+	}
+
+	if c.Managed && c.Operator.SSHUser == setup.UnixLogin && c.Operator.WGAddress == setup.Address {
+		if err := r.checkInstalledRestoreOwner(c, setup, keys); err != nil {
+			return err
+		}
+
+		r.restore.ctx = c
+
+		return os.RemoveAll(stage)
+	}
+
+	if err := os.RemoveAll(stage); err != nil {
+		return err
+	}
+
+	if err := os.Mkdir(stage, 0o700); err != nil {
+		return err
+	}
+
+	creds := workspaces.Credentials{Database: r.sec.Database, Backup: r.sec.Backup,
+		Metrics: r.sec.Metrics, MasterPasswordHash: r.sec.MasterPasswordHash}
+	if err := writeEnrollmentFiles(stage, setup, keys, &creds); err != nil {
+		return err
+	}
+
+	c.Managed = true
+	c.Operator = workspaces.Operator{Name: setup.User, SSHUser: setup.UnixLogin, WGAddress: setup.Address}
+
+	for i := range c.Nodes {
+		if c.Nodes[i].Name == setup.Node {
+			c.Nodes[i].PublicAddress, c.Nodes[i].WGPublicKey = setup.NodePublicAddress, setup.NodeWGPublicKey
+			c.Nodes[i].WGAddress, c.Nodes[i].ListenPort = setup.NodeAddress, setup.WGPort
+		}
+	}
+
+	c.LockdownConfirmedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := workspaces.SaveStagedEnrollment(stage, c); err != nil {
+		return err
+	}
+	// Keep the same lock inode across the exchange while this process still
+	// owns the bootstrap tunnel; otherwise another command could acquire a
+	// different lock file and race it.
+	if err := os.Link(filepath.Join(target, TunnelLockFile), filepath.Join(stage, TunnelLockFile)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	if err := swapWorkspaceDirs(stage, target); err != nil {
+		return fmt.Errorf("exchange restored workspace: %w", err)
+	}
+
+	r.restore.ctx = c
+
+	return os.RemoveAll(stage)
+}
+
+func (r *initRun) checkInstalledRestoreOwner(c *workspaces.Workspace, setup rpc.AccessSetup, keys enrollmentKeys) error {
+	n, ok := c.Master()
+	if !ok || n.Name != setup.Node || n.PublicAddress != setup.NodePublicAddress ||
+		n.WGAddress != setup.NodeAddress || n.WGPublicKey != setup.NodeWGPublicKey || n.ListenPort != setup.WGPort {
+		return fmt.Errorf("installed restore owner node does not match pending setup")
+	}
+
+	sshKey, err := workspaces.ReadFile(r.name, workspaces.SSHKeyFile)
+	if err != nil {
+		return err
+	}
+
+	wgKey, err := workspaces.ReadFile(r.name, workspaces.WGKeyFile)
+	if err != nil {
+		return err
+	}
+
+	if string(sshKey) != keys.SSH || strings.TrimSpace(string(wgKey)) != keys.WG {
+		return fmt.Errorf("installed restore owner keys do not match pending keys")
+	}
+
+	return nil
+}
+
+// A crash after retirement must not require the retired transport again.
+func (r *initRun) restoreFinish(ctx context.Context) error {
+	raw, err := os.ReadFile(filepath.Join(workspaces.PendingDir(r.name), restoreOwnerFile))
+	if err != nil {
+		return err
+	}
+
+	var setup rpc.AccessSetup
+	if err := json.Unmarshal(raw, &setup); err != nil {
+		return err
+	}
+
+	keys := enrollmentKeys{SSH: r.sec.OwnerSSHPrivateKey, WG: r.sec.OwnerWGPrivateKey}
+	if err := r.validateOwnerSetup(setup); err != nil {
+		return err
+	}
+
+	if err := r.replaceRestoreWorkspace(setup, keys); err != nil {
+		return err
+	}
+
+	if err := verifyOwnerEnrollment(ctx, setup, keys); err != nil {
+		return err
+	}
+
+	handoff, err := r.writeDocument()
+	if err != nil {
+		return err
+	}
+
+	if err := r.completeSetupAccess(ctx, setup, keys); err != nil {
+		return err
+	}
+
+	return r.restoreResult(r.cmd, r.restore, handoff)
+}
+
+// restoreSecretsPhase confirms the rebuilt server's recovery kit once.
 func (r *initRun) restoreSecretsPhase(ctx context.Context, wgNode *remote.Node) error {
 	if r.prog.Done(phaseSecretsDone) {
 		return nil
-	}
-
-	if r.restore.addressChanged() {
-		if err := r.restoreHandoff(); err != nil {
-			return err
-		}
 	}
 
 	if _, err := r.p.call(ctx, wgNode, "cluster.confirm-secrets", nil, remote.CallOptions{OnEvent: r.p.event}); err != nil {
@@ -931,8 +1127,10 @@ func (r *initRun) restoreSecretsPhase(ctx context.Context, wgNode *remote.Node) 
 }
 
 // restoreResult is the rebuild's success result.
-func (r *initRun) restoreResult(cmd *cobra.Command, rr *restoreRun) error {
+func (r *initRun) restoreResult(cmd *cobra.Command, rr *restoreRun, handoff initResult) error {
 	res := r.restoreResultData()
+	res.SecretsDocument, res.Passphrase = handoff.SecretsDocument, handoff.Passphrase
+
 	if err := workspaces.RemovePending(r.name); err != nil {
 		return err
 	}
@@ -944,60 +1142,13 @@ func (r *initRun) restoreResult(cmd *cobra.Command, rr *restoreRun) error {
 
 	msg := []string{
 		fmt.Sprintf("Server %s is rebuilt on %s from master bundle %s.", r.name, rr.state.NewAddress, rr.state.Bundle),
-		"Your workspace works as before. " + awaiting,
+		"Your workspace has a verified owner device. " + awaiting,
 	}
 	if rr.addressChanged() && r.cfg.TLS.Mode == "acme" {
 		msg = append(msg, "Clients reconnect once "+r.cfg.MasterHostname()+" resolves to "+rr.state.NewAddress+".")
 	}
 
 	return output.Success(cmd, output.Result{Data: res, Message: strings.Join(msg, "\n"), Warnings: r.warnings, Next: res.Next})
-}
-
-// updateWorkspace points the workspace at the new address.
-func (r *initRun) updateWorkspace() error {
-	rr := r.restore
-
-	c, err := workspaces.Load(rr.ctx.Name)
-	if err != nil {
-		return err
-	}
-
-	for i := range c.Nodes {
-		if c.Nodes[i].Role == workspaces.RoleMaster || len(c.Nodes) == 1 {
-			if c.Nodes[i].PublicAddress != rr.state.NewAddress {
-				r.warnings = append(r.warnings, output.Warning{Code: "workspace_endpoint_updated",
-					Message: "workspace " + c.Name + " now reaches the server at " + rr.state.NewAddress + " (was " + c.Nodes[i].PublicAddress + ")"})
-			}
-
-			c.Nodes[i].PublicAddress = rr.state.NewAddress
-			if k := r.prog.WGPublicKey; k != "" && k != c.Nodes[i].WGPublicKey {
-				// A bundle without the WireGuard key made a new one.
-				r.warnings = append(r.warnings, output.Warning{Code: "workspace_wg_key_updated",
-					Message: "the rebuilt server has a new WireGuard key; workspace " + c.Name + " follows it, other machines need vaire secrets export and vaire login"})
-				c.Nodes[i].WGPublicKey = k
-			}
-		}
-	}
-
-	c.LockdownConfirmedAt = time.Now().UTC().Format(time.RFC3339)
-	rr.ctx = c
-
-	return workspaces.Save(c)
-}
-
-// restoreHandoff shows a new secrets handoff: the address and the
-// break-glass text changed.
-func (r *initRun) restoreHandoff() error {
-	if MustNotPrompt(r.cmd) {
-		r.warnings = append(r.warnings, output.Warning{Code: "secrets_document_stale",
-			Message: "the server's address changed; run vaire secrets export at a terminal and store the new handoff"})
-
-		return nil
-	}
-
-	err := showWorkspaceHandoff(r.cmd, r.restore.ctx)
-
-	return err
 }
 
 func (r *initRun) restoreResultData() restoreResult {

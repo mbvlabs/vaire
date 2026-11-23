@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,6 +96,81 @@ func TestAccessRedemptionBindsSourceTokenAndKeys(t *testing.T) {
 	d.Cleanup = false
 	if err := validateAccessRedemption(d, d.TemporaryAddress, p, now); err == nil {
 		t.Fatal("redeemed lease accepted after peer cleanup")
+	}
+}
+
+func TestRecoveryRedemptionDoesNotExpireAndPinsWinningKeys(t *testing.T) {
+	p := rpc.AccessRedeemParams{Token: "recovery-token", SSHPublicKey: "ssh", WGPublicKey: "wg"}
+	digest := sha256.Sum256([]byte(p.Token))
+
+	d := config.AccessDevice{Recovery: true, State: config.DevicePending, TemporaryAddress: "10.0.0.4", RequestDigest: hex.EncodeToString(digest[:])}
+	if err := validateAccessRedemption(d, d.TemporaryAddress, p, time.Now().AddDate(20, 0, 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	d.SSHPublicKey, d.WGPublicKey = p.SSHPublicKey, p.WGPublicKey
+	if err := validateAccessRedemption(d, d.TemporaryAddress, p, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	other := p
+	other.WGPublicKey = "other"
+
+	if err := validateAccessRedemption(d, d.TemporaryAddress, other, time.Now()); err == nil {
+		t.Fatal("recovery accepted different keys after first attempt")
+	}
+
+	d.State, d.Cleanup = config.DeviceActive, false
+	if err := validateAccessRedemption(d, d.TemporaryAddress, p, time.Now()); err == nil {
+		t.Fatal("recovery accepted after completed redemption")
+	}
+
+	d.State = config.DeviceRevoked
+	if err := validateAccessRedemption(d, d.TemporaryAddress, p, time.Now()); err == nil {
+		t.Fatal("revoked recovery accepted")
+	}
+}
+
+func TestRecoveryLeaseRestorationAfterRebootAndSync(t *testing.T) {
+	now := time.Now()
+	if !accessLeaseUsable(config.AccessDevice{Recovery: true}, now.AddDate(10, 0, 0)) {
+		t.Fatal("unused recovery peer would not be restored")
+	}
+
+	if accessLeaseUsable(config.AccessDevice{ExpiresAt: now.Add(-time.Second)}, now) {
+		t.Fatal("expired invite would be restored")
+	}
+
+	old := temporaryAccessCommand
+
+	t.Cleanup(func() { temporaryAccessCommand = old })
+
+	var calls []string
+
+	temporaryAccessCommand = func(_ context.Context, name string, args ...string) (string, error) {
+		call := name + " " + strings.Join(args, " ")
+		calls = append(calls, call)
+
+		if strings.Contains(call, " -C ") {
+			return "", errors.New("guard missing")
+		}
+
+		return "", nil
+	}
+	r := config.AccessRegistry{Devices: []config.AccessDevice{{
+		Recovery: true, State: config.DevicePending, TemporaryAddress: "10.0.0.2", TemporaryPublicKey: temporaryTestKey,
+	}}}
+	// Both a reboot and a syncconf can leave wg0 without the temporary peer.
+	for _, event := range []string{"reboot", "wireguard sync"} {
+		calls = nil
+
+		if err := expireAccessDevices(t.Context(), config.Cluster{}, r, config.NodeSpec{WGAddress: "10.0.0.1"}); err != nil {
+			t.Fatal(err)
+		}
+
+		if len(calls) != 10 || !strings.HasPrefix(calls[9], "wg set wg0 peer ") {
+			t.Fatalf("%s did not restore guarded peer: %v", event, calls)
+		}
 	}
 }
 

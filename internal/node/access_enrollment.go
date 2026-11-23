@@ -511,7 +511,7 @@ func validateAccessRedemption(d config.AccessDevice, source string, p rpc.Access
 	digest := sha256.Sum256([]byte(p.Token))
 	if d.State == config.DeviceRevoked || (d.State == config.DeviceActive && !d.Cleanup) ||
 		d.TemporaryAddress == "" || source != d.TemporaryAddress ||
-		!now.Before(d.ExpiresAt) || subtle.ConstantTimeCompare([]byte(d.RequestDigest), []byte(hex.EncodeToString(digest[:]))) != 1 {
+		(!d.Recovery && !now.Before(d.ExpiresAt)) || subtle.ConstantTimeCompare([]byte(d.RequestDigest), []byte(hex.EncodeToString(digest[:]))) != 1 {
 		return deviceAccessDenied()
 	}
 
@@ -646,12 +646,16 @@ func ExpireAccess(ctx context.Context) error {
 		return err
 	}
 
+	return expireAccessDevices(ctx, cfg, r, n)
+}
+
+func expireAccessDevices(ctx context.Context, cfg config.Cluster, r config.AccessRegistry, n config.NodeSpec) error {
 	var failures error
 
 	for i := range r.Devices {
 		d := &r.Devices[i]
-		if d.State == config.DevicePending && !d.ExpiresAt.IsZero() {
-			if time.Now().Before(d.ExpiresAt) {
+		if d.State == config.DevicePending && d.TemporaryAddress != "" {
+			if accessLeaseUsable(*d, time.Now()) {
 				failures = errors.Join(failures, addTemporaryAccessPeer(ctx, n.WGAddress, d.TemporaryAddress, d.TemporaryPublicKey))
 				continue
 			}
@@ -667,4 +671,8 @@ func ExpireAccess(ctx context.Context) error {
 	}
 
 	return failures
+}
+
+func accessLeaseUsable(d config.AccessDevice, now time.Time) bool {
+	return d.Recovery || now.Before(d.ExpiresAt)
 }

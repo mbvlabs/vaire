@@ -237,6 +237,12 @@ func redeemAndVerify(ctx context.Context, redeem func(context.Context, func()) e
 }
 
 func verifyEnrollment(ctx context.Context, setup rpc.AccessSetup, keys enrollmentKeys) error {
+	return withEnrollmentNode(ctx, setup, keys, func(node *remote.Node) error {
+		return verifyEnrollmentIdentity(ctx, node, setup)
+	})
+}
+
+func withEnrollmentNode(ctx context.Context, setup rpc.AccessSetup, keys enrollmentKeys, use func(*remote.Node) error) error {
 	tun, err := enrollmentTunnel(setup, keys.WG, setup.Address)
 	if err != nil {
 		return err
@@ -268,8 +274,10 @@ func verifyEnrollment(ctx context.Context, setup rpc.AccessSetup, keys enrollmen
 	}
 	defer client.Close()
 
-	node := &remote.Node{SSH: client, Operator: setup.User}
+	return use(&remote.Node{SSH: client, Operator: setup.User})
+}
 
+func verifyEnrollmentIdentity(ctx context.Context, node *remote.Node, setup rpc.AccessSetup) error {
 	reply, err := node.Call(ctx, "whoami", nil, remote.CallOptions{})
 	if err != nil {
 		return err
@@ -296,6 +304,10 @@ func verifyOwnerEnrollment(ctx context.Context, setup rpc.AccessSetup, keys enro
 }
 
 func loginEnrollment(cmd *cobra.Command, code string) error {
+	return loginEnrollmentWithCredentials(cmd, code, nil)
+}
+
+func loginEnrollmentWithCredentials(cmd *cobra.Command, code string, credentials *workspaces.Credentials) error {
 	secrets.Add(code)
 
 	setup, err := rpc.DecodeAccessSetup(code)
@@ -305,6 +317,10 @@ func loginEnrollment(cmd *cobra.Command, code string) error {
 
 	if strings.TrimSpace(setup.Token) == "" {
 		return fmt.Errorf("invalid Vaire setup code")
+	}
+
+	if credentials != nil && (setup.Mode != rpc.AccessSetupRecovery || setup.Role != "owner") {
+		return fmt.Errorf("the recovery bundle does not enroll an owner")
 	}
 
 	secrets.Add(setup.TemporaryPrivateKey)
@@ -342,7 +358,7 @@ func loginEnrollment(cmd *cobra.Command, code string) error {
 
 	verified := resumed && verify() == nil
 	if !verified {
-		if time.Now().After(setup.ExpiresAt) {
+		if !setup.ExpiresAt.IsZero() && time.Now().After(setup.ExpiresAt) {
 			return fmt.Errorf("access setup code has expired; request a new code")
 		}
 
@@ -358,7 +374,7 @@ func loginEnrollment(cmd *cobra.Command, code string) error {
 		}
 	}
 
-	if err := installEnrollment(name, setup, keys); err != nil {
+	if err := installEnrollment(name, setup, keys, credentials); err != nil {
 		return err
 	}
 
@@ -369,8 +385,8 @@ func loginEnrollment(cmd *cobra.Command, code string) error {
 		Message: fmt.Sprintf("Connected to %s / %s as %s / %s.", name, setup.Node, setup.User, setup.Label)})
 }
 
-func installEnrollment(name string, setup rpc.AccessSetup, keys enrollmentKeys) error {
-	return saveEnrollmentWorkspace(name, setup, keys, nil, "")
+func installEnrollment(name string, setup rpc.AccessSetup, keys enrollmentKeys, credentials *workspaces.Credentials) error {
+	return saveEnrollmentWorkspace(name, setup, keys, credentials, "")
 }
 
 func installOwnerEnrollment(name string, setup rpc.AccessSetup, keys enrollmentKeys, credentials workspaces.Credentials, lockedAt string) error {

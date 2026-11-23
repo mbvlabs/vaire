@@ -99,10 +99,6 @@ func renderWGWithAccess(cfg config.Cluster, access config.AccessRegistry) (wgRen
 		return wgRender{}, err
 	}
 
-	if len(ops.Operators) == 0 {
-		return wgRender{}, errors.New("operators.toml lists no operator peer")
-	}
-
 	r := wgRender{
 		Address:    node.WGAddress + "/" + strconv.Itoa(cfg.WGPrefixLen()),
 		ListenPort: cfg.Transport.ListenPort,

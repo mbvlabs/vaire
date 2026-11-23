@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -46,6 +47,9 @@ type PendingSecrets struct {
 	OwnerSSHPrivateKey string `json:"owner_ssh_private_key,omitempty"`
 	OwnerWGPrivateKey  string `json:"owner_wg_private_key,omitempty"`
 	MasterPasswordHash string `json:"master_password_hash,omitempty"`
+	RecoveryToken      string `json:"recovery_token,omitempty"`
+	RecoveryWGKey      string `json:"recovery_wg_key,omitempty"`
+	RecoveryCode       string `json:"recovery_code,omitempty"`
 }
 
 // Progress records the completed init phases and what was learned on the way.
@@ -58,6 +62,7 @@ type Progress struct {
 	SSHHostKeys      []string          `json:"ssh_host_keys,omitempty"`
 	SecretsOut       string            `json:"secrets_out,omitempty"`
 	PublicIPv6       string            `json:"public_ipv6,omitempty"`
+	OwnerSetup       *rpc.AccessSetup  `json:"owner_setup,omitempty"`
 	// Restore is set for server init --restore (Phase 5).
 	Restore *RestoreProgress `json:"restore,omitempty"`
 }

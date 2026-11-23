@@ -109,7 +109,7 @@ func TestEnrollmentRejectsMissingBearerBeforeSavingKeys(t *testing.T) {
 	}
 }
 
-func TestManagedSecretsExportBlocked(t *testing.T) {
+func TestManagedSecretsExportRequiresUnlockAndDoesNotExportDeviceKeys(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv(workspaces.EnvWorkspace, "")
 
@@ -129,7 +129,7 @@ func TestManagedSecretsExportBlocked(t *testing.T) {
 	root.SetErr(&out)
 	root.SetArgs([]string{"secrets", "export", "-w", "prod", "--json"})
 
-	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed device keys cannot be exported") {
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "needs the master password") {
 		t.Fatalf("managed export: %v, output %s", err, &out)
 	}
 }
@@ -195,7 +195,7 @@ func TestInstallEnrollmentNeverOverwrites(t *testing.T) {
 		NodePublicAddress: "192.0.2.1", NodeWGPublicKey: wgPub, HostPublicKey: hostPub, WGPort: 51820, ExpiresAt: time.Now().Add(time.Hour)}
 
 	keys := enrollmentKeys{SSH: string(sshKey), WG: wg}
-	if err := installEnrollment("prod", setup, keys); err != nil {
+	if err := installEnrollment("prod", setup, keys, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -204,7 +204,7 @@ func TestInstallEnrollmentNeverOverwrites(t *testing.T) {
 		t.Fatalf("workspace: %+v, %v", c, err)
 	}
 
-	if err := installEnrollment("prod", setup, keys); err == nil {
+	if err := installEnrollment("prod", setup, keys, nil); err == nil {
 		t.Fatal("overwrote workspace")
 	}
 

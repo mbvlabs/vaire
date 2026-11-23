@@ -36,6 +36,7 @@ type Document struct {
 	Server       Server    `json:"server"`
 	Nodes        []Node    `json:"nodes"`
 	Operator     Operator  `json:"operator"`
+	RecoveryCode string    `json:"recovery_code,omitempty"`
 	Database     *Database `json:"database,omitempty"`
 	Backup       *Backup   `json:"backup,omitempty"`
 	Metrics      *Metrics  `json:"metrics,omitempty"`
@@ -143,7 +144,7 @@ func (m *Metrics) creds() *workspaces.MetricsCreds {
 // SecretValues returns every secret in the document, for the redaction
 // registry.
 func (d Document) SecretValues() []string {
-	out := []string{d.Operator.WGPrivateKey, d.Operator.SSHPrivateKey, d.Operator.SudoPassword}
+	out := []string{d.Operator.WGPrivateKey, d.Operator.SSHPrivateKey, d.Operator.SudoPassword, d.RecoveryCode}
 	if d.Database != nil {
 		out = append(out, d.Database.SecretValues()...)
 	}
@@ -157,6 +158,11 @@ func (d Document) SecretValues() []string {
 	}
 
 	return out
+}
+
+// RecoveryCredentials are the non-device credentials needed after owner recovery.
+func (d Document) RecoveryCredentials() workspaces.Credentials {
+	return workspaces.Credentials{Database: d.Database, Backup: d.Backup, Metrics: d.Metrics.creds(), MasterPasswordHash: d.MasterPassword}
 }
 
 // Encrypt returns the age file for doc, encrypted to passphrase.

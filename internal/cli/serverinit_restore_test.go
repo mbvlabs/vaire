@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -10,9 +13,119 @@ import (
 	"github.com/mbvlabs/vaire/internal/catalog"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/masterbackup"
+	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
+
+func TestRestoreTemporaryTransportAndWorkspaceExchange(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	ws := &workspaces.Workspace{Name: "prod", Server: "prod", Managed: true,
+		Operator:  workspaces.Operator{Name: "owner", SSHUser: "old-device", WGAddress: "10.42.0.9"},
+		Nodes:     []workspaces.Node{{Name: "db", Role: workspaces.RoleMaster, PublicAddress: "192.0.2.1", WGAddress: "10.42.0.1"}},
+		Databases: map[string]string{"app": "db"}, TunnelPersist: "3m"}
+	if err := workspaces.Save(ws); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := workspaces.SaveCredentials("prod", workspaces.Credentials{}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{workspaces.SSHKeyFile, workspaces.WGKeyFile} {
+		if err := transport.WriteSecretFile(workspaces.Path("prod", name), []byte("old-device-key")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := config.DefaultCluster()
+	cfg.ClusterName = "prod"
+
+	cfg.Nodes = []config.NodeSpec{{Name: "db", Role: config.RoleMaster, WGAddress: "10.42.0.1"}}
+
+	cmd := &cobra.Command{}
+
+	r := &initRun{name: "prod", cmd: cmd, cfg: cfg, prog: &workspaces.Progress{}, restore: &restoreRun{ctx: ws}}
+	if err := r.restoreSecrets(); err != nil {
+		t.Fatal(err)
+	}
+
+	if r.sec.SSHPrivateKey == "old-device-key" || r.sec.WGPrivateKey == "old-device-key" ||
+		ws.Operator.WGAddress != "10.42.0.2" {
+		t.Fatal("temporary transport was not independently generated")
+	}
+
+	first := r.sec
+	if err := r.restoreSecrets(); err != nil {
+		t.Fatal(err)
+	}
+
+	if r.sec.SSHPrivateKey != first.SSHPrivateKey || r.sec.WGPrivateKey != first.WGPrivateKey {
+		t.Fatal("resume regenerated temporary transport")
+	}
+
+	ownerSSH, hostPub, err := transport.GenerateSSHKey("test-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerWG, _, err := transport.GenerateWGKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keys := enrollmentKeys{SSH: string(ownerSSH), WG: ownerWG}
+
+	setup := rpc.AccessSetup{Server: "prod", Node: "db", User: "owner", UnixLogin: "new-device",
+		Address: "10.42.0.3", NodeAddress: "10.42.0.1", NodePublicAddress: "192.0.2.2",
+		NodeWGPublicKey: "node-key", HostPublicKey: hostPub, WGPort: 51820}
+	if err := r.replaceRestoreWorkspace(setup, keys); err != nil {
+		t.Fatal(err)
+	}
+
+	saved, err := workspaces.Load("prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if saved.Operator.SSHUser != setup.UnixLogin || saved.Operator.WGAddress != setup.Address ||
+		saved.Nodes[0].PublicAddress != setup.NodePublicAddress || saved.Databases["app"] != "db" || saved.TunnelPersist != "3m" {
+		t.Fatalf("workspace not replaced correctly: %+v", saved)
+	}
+
+	if err := r.replaceRestoreWorkspace(setup, keys); err != nil {
+		t.Fatalf("workspace replacement is not resumable: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(workspaces.PendingDir("prod"), "restore-workspace")); !os.IsNotExist(err) {
+		t.Fatalf("old workspace remains in pending: %v", err)
+	}
+}
+
+func TestRestoreOldMasterMissingKeyRequiresOverride(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("old-master-unreachable", false, "")
+
+	r := &initRun{cmd: cmd, restore: &restoreRun{
+		ctx:   &workspaces.Workspace{Name: "prod", Nodes: []workspaces.Node{{Role: workspaces.RoleMaster, PublicAddress: "192.0.2.1"}}},
+		state: &workspaces.RestoreProgress{OldAddress: "192.0.2.1", NewAddress: "192.0.2.2"},
+	}}
+	if err := r.checkOldMaster(context.Background()); err == nil || !strings.Contains(err.Error(), "old master") {
+		t.Fatalf("missing key did not fail closed: %v", err)
+	}
+
+	if err := cmd.Flags().Set("old-master-unreachable", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.checkOldMaster(context.Background()); err != nil {
+		t.Fatalf("explicit override failed: %v", err)
+	}
+}
 
 func TestRestoreResumePendingReadsSavedAnswers(t *testing.T) {
 	for _, identity := range []string{"", "/test/replacement-key"} {
@@ -67,6 +180,39 @@ func TestRestoreResumePendingReadsSavedAnswers(t *testing.T) {
 				t.Fatalf("resume changed bootstrap or recovery identity: %+v %+v", resumed.boot, resumed.prog)
 			}
 		})
+	}
+}
+
+func TestRestoreResumeLoadsPendingOwnerKeys(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	cfg := config.DefaultCluster()
+	cfg.ClusterName = "prod"
+
+	r := &initRun{name: "prod", cfg: cfg, prog: &workspaces.Progress{
+		Phases:  map[string]string{phaseSecrets: "done"},
+		Restore: &workspaces.RestoreProgress{},
+	}}
+	if err := r.savePending(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := workspaces.PendingSecrets{OwnerSSHPrivateKey: "test-owner-ssh", OwnerWGPrivateKey: "test-owner-wg"}
+	if err := workspaces.SaveSecrets("prod", want); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("resume", true, "")
+	cmd.Flags().String("identity", "", "")
+
+	resumed := &initRun{name: "prod", cmd: cmd, restore: &restoreRun{}}
+	if err := resumed.restoreLoadPending(); err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(resumed.sec, want) {
+		t.Fatal("resume did not retain the pending owner identity")
 	}
 }
 

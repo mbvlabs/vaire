@@ -22,15 +22,8 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-type loginData struct {
-	Workspace string             `json:"workspace"`
-	Current   bool               `json:"current"`
-	Path      string             `json:"path"`
-	Document  secretsdoc.Summary `json:"document"`
-}
-
-// runLogin decrypts a transfer bundle (armored or binary age) and creates a
-// local workspace (§10.1). The bundle comes from a file, from stdin with -, or
+// runLogin redeems a device setup code or decrypts an owner recovery kit.
+// The kit comes from a file, from stdin with -, or
 // is pasted at a prompt when no argument is given. A file, stdin or paste may
 // hold the whole copied handoff; only its armored block is used. The bundle is
 // read and checked before the passphrase is asked for.
@@ -64,31 +57,14 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		secrets.Add(v)
 	}
 
-	name := stringFlag(cmd, "name")
-	if name == "" {
-		name = doc.Server.Name
+	if doc.RecoveryCode == "" {
+		return output.NewError(output.CodePrecondition, "the bundle has no owner recovery code", output.ExitPrecondition,
+			"Use a device setup code or a Vaire owner recovery kit.")
 	}
 
-	ctx, err := secretsdoc.Install(doc, name, "")
-	if err != nil {
-		return err
-	}
+	creds := doc.RecoveryCredentials()
 
-	current, _ := workspaces.Current()
-	summary := secretsdoc.Summarize(doc)
-
-	message := fmt.Sprintf("Created workspace %s for %s.", ctx.Name, summary)
-	if current == ctx.Name {
-		message += " It is the current workspace."
-	} else {
-		message += " Switch to it with vaire workspace use " + ctx.Name + "."
-	}
-
-	return output.Success(cmd, output.Result{
-		Data:    loginData{Workspace: ctx.Name, Current: current == ctx.Name, Path: workspaces.Dir(ctx.Name), Document: summary},
-		Message: message,
-		Next:    []string{"vaire plan"},
-	})
+	return loginEnrollmentWithCredentials(cmd, doc.RecoveryCode, &creds)
 }
 
 // loginBundle reads the bundle from the argument, stdin (-), or a paste.

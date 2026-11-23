@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"fmt"
 	"net"
 	"time"
 
 	"github.com/mbvlabs/vaire/internal/buildinfo"
 	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/secretsdoc"
 	"github.com/mbvlabs/vaire/internal/transport"
@@ -25,21 +28,12 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	if err := managedHandoffError(c); err != nil {
-		return err
-	}
-
 	hash, err := masterPasswordHash(c.Name)
 	if err != nil {
 		return err
 	}
 
 	if err := secretGateUnlock(cmd, hash, nil, nil, "vaire secrets export"); err != nil {
-		return err
-	}
-
-	doc, err := workspaceDocument(c)
-	if err != nil {
 		return err
 	}
 
@@ -50,6 +44,11 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 	out := stringFlag(cmd, "out")
 	if dryRun(cmd) {
 		return output.Success(cmd, output.Result{Data: map[string]string{"out": out}, Message: "dry run: would build a new secrets handoff"})
+	}
+
+	doc, err := secretsExportDocument(cmd, c)
+	if err != nil {
+		return err
 	}
 
 	h, err := newHandoff(cmd, doc, out)
@@ -76,7 +75,75 @@ func runSecretsExport(cmd *cobra.Command, _ []string) error {
 		res["saved"] = h.saved
 	}
 
-	return output.Success(cmd, output.Result{Data: res, Message: "New secrets handoff shown. The previous bundle still opens with its own passphrase."})
+	message := "New secrets handoff shown. The previous bundle still opens with its own passphrase."
+	if doc.RecoveryCode != "" {
+		message = "New recovery kit shown. Store it securely; the previous recovery code is no longer valid."
+	}
+
+	return output.Success(cmd, output.Result{Data: res, Message: message})
+}
+
+func secretsExportDocument(cmd *cobra.Command, c *workspaces.Workspace) (secretsdoc.Document, error) {
+	if !c.Managed {
+		return workspaceDocument(c)
+	}
+
+	creds, err := workspaces.LoadCredentials(c.Name)
+	if err != nil {
+		return secretsdoc.Document{}, err
+	}
+
+	known, err := transport.LoadKnownHosts(workspaces.Path(c.Name, workspaces.KnownHostsFile))
+	if err != nil {
+		return secretsdoc.Document{}, err
+	}
+
+	doc, err := rebuildDocument(c, "", "", creds, known)
+	if err != nil {
+		return doc, err
+	}
+
+	doc.Operator = secretsdoc.Operator{Name: c.Operator.Name}
+	doc.BreakGlass = ""
+
+	p := newProgress(cmd)
+
+	s, err := openSession(cmd, p)
+	if err != nil {
+		return doc, err
+	}
+	defer s.Close()
+
+	params, err := newRecoveryRequest(c.Operator.Name)
+	if err != nil {
+		return doc, err
+	}
+
+	reply, err := p.call(commandContext(cmd), s.node, "access.recovery-issue", params, remote.CallOptions{Secrets: params.Secrets()})
+	if err != nil {
+		return doc, err
+	}
+
+	var device rpc.Device
+	if err := reply.Decode(&device); err != nil {
+		return doc, err
+	}
+
+	secrets.Add(device.SetupCode)
+
+	setup, err := rpc.DecodeAccessSetup(device.SetupCode)
+	if err != nil {
+		return doc, err
+	}
+
+	if setup.Mode != rpc.AccessSetupRecovery || setup.Role != "owner" || setup.Server != c.Server ||
+		setup.User != c.Operator.Name || setup.Token != params.Token || setup.TemporaryPrivateKey != params.TemporaryPrivateKey {
+		return doc, fmt.Errorf("node returned a mismatched recovery code")
+	}
+
+	doc.RecoveryCode = device.SetupCode
+
+	return doc, nil
 }
 
 // showWorkspaceHandoff shows a new handoff for c in a terminal, for commands

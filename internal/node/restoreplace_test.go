@@ -52,6 +52,7 @@ func TestRestoreFiles(t *testing.T) {
 	priv, pub := hostKeyPair(t)
 	b := masterbackup.Bundle{Files: []masterbackup.File{
 		masterbackup.NewFile(masterbackup.ClusterPath, "root", "root", 0o640, []byte("old\n")),
+		masterbackup.NewFile(masterbackup.OperatorsPath, "root", "root", 0o640, []byte("[[operators]]\nname = 'old-shared-login'\n")),
 		masterbackup.NewFile(masterbackup.RecordsPath, "root", "root", 0o600, recRaw),
 		masterbackup.NewFile(masterbackup.ProtectPath, "root", "root", 0o600, protect),
 		masterbackup.NewFile("/etc/ssh/ssh_host_ed25519_key", "root", "root", 0o600, priv),
@@ -67,6 +68,10 @@ func TestRestoreFiles(t *testing.T) {
 
 	if string(byPath[masterbackup.ClusterPath].Data) != "new\n" {
 		t.Error("cluster.toml isn't the operator's")
+	}
+
+	if strings.Contains(string(byPath[masterbackup.OperatorsPath].Data), "old-shared-login") {
+		t.Fatal("restored reusable operator authority")
 	}
 
 	var got backup.Records
@@ -99,7 +104,7 @@ func TestRestoreFiles(t *testing.T) {
 		t.Errorf("protect state %+v", st)
 	}
 
-	b.Files[3].Data = []byte("not a key")
+	b.Files[4].Data = []byte("not a key")
 	if _, _, err := restoreFiles(b, cfg, "new\n", time.Now()); err == nil || !strings.Contains(err.Error(), "private key") {
 		t.Errorf("a bad host key was placed: %v", err)
 	}
