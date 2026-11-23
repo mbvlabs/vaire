@@ -569,7 +569,7 @@ func phase1Commands() []cmdSpec {
 			},
 			meta: CommandMeta{
 				Summary:          "Install a signed release of the operator CLI",
-				WhenToUse:        []string{"Update the local CLI. A trusted host administrator updates existing nodes separately."},
+				WhenToUse:        []string{"Update the local CLI, then use vaire node upgrade for a supported node."},
 				Examples:         []string{"vaire upgrade", "vaire upgrade --version 1.2.0 --dry-run"},
 				Mutating:         true,
 				SupportsDryRun:   true,
@@ -583,7 +583,7 @@ func phase1Commands() []cmdSpec {
 					"precondition_failed",
 					"input_required",
 				},
-				Next: []string{"vaire version"},
+				Next: []string{"vaire version", "vaire node upgrade"},
 			},
 		},
 		{
@@ -1551,21 +1551,17 @@ func nodeCommands() cmdSpec {
 			nodeAccessSSHCommand(),
 			{
 				use: "upgrade",
-				run: notImplemented,
-				flags: []fl{
-					flagString("version", "", "Version to install on the node"),
-					flagBool("rollback", "Restore the previous binary"),
-				},
-				meta: CommandMeta{ //nolint:gosec // ConfirmToken is a confirmation phrase, not a credential
-					Summary:          "Upgrade or roll back the node binary from the operator",
-					WhenToUse:        []string{"Install a node release, or roll back with --rollback and a confirm token."},
-					Examples:         []string{"vaire node upgrade", "vaire node upgrade --rollback --confirm prod/rollback"},
+				run: runNodeUpgrade,
+				meta: CommandMeta{
+					Summary:          "Upgrade a supported node to match the signed operator CLI",
+					WhenToUse:        []string{"After upgrading the workstation, update the selected workspace's node over SSH and WireGuard. RC1 and older nodes do not support this path."},
+					Examples:         []string{"vaire node upgrade", "vaire -w prod node upgrade --yes"},
 					Mutating:         true,
-					DestructiveFlags: []string{"--rollback"},
-					SupportsDryRun:   true,
+					Prompts:          true,
+					InteractiveFlags: []string{"--yes"},
+					SkipDryRunCheck:  true,
+					SkipDryRunReason: "changes only the installed node binary after signature and version verification",
 					Remote:           true,
-					ConfirmToken:     "{server}/rollback",
-					NeedsRestart:     "maybe",
 					Audience:         "operator",
 				},
 			},

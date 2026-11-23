@@ -119,12 +119,17 @@ func planUpgrade(cmd *cobra.Command, opts upgradeOptions) (release.Manifest, upg
 // re-executed under sudo renders its own result, so when one ran the parent
 // stops with its error and prints nothing.
 func applyUpgrade(cmd *cobra.Command, opts upgradeOptions, manifest release.Manifest, plan upgrade.Plan, data upgradeData, warnings []output.Warning) error {
+	next := []string{"vaire version"}
+	if !opts.skipNodes && (manifest.Channel == release.ChannelRC || manifest.Channel == release.ChannelStable) {
+		next = append(next, "vaire node upgrade")
+	}
+
 	if !plan.Changed {
 		return output.Success(cmd, output.Result{
 			Data:     data,
 			Warnings: warnings,
 			Message:  "already on " + plan.From.Version,
-			Next:     []string{"vaire version"},
+			Next:     next,
 		})
 	}
 
@@ -165,7 +170,7 @@ func applyUpgrade(cmd *cobra.Command, opts upgradeOptions, manifest release.Mani
 		Data:     data,
 		Warnings: warnings,
 		Message:  strings.Join(lines, "\n"),
-		Next:     []string{"vaire version"},
+		Next:     next,
 	})
 }
 
@@ -261,7 +266,7 @@ func installUpgrade(cmd *cobra.Command, manifest release.Manifest, target string
 func nodesWarning() output.Warning {
 	return output.Warning{
 		Code:    "nodes_not_upgraded",
-		Message: "nodes are not upgraded: have a trusted host administrator install the matching signed build",
+		Message: "this command upgrades only the CLI; run vaire node upgrade for a supported node",
 	}
 }
 

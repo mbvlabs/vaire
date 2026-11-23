@@ -94,6 +94,11 @@ func timeoutFlag(cmd *cobra.Command) time.Duration {
 // it, runs the version handshake, and confirms a pending SSH lockdown the
 // first time this workspace reaches the node (§8.5).
 func openSession(cmd *cobra.Command, p *progress) (*session, error) {
+	return openNodeSession(cmd, p, true)
+}
+
+// A node upgrade must reach the old binary before the normal version check.
+func openNodeSession(cmd *cobra.Command, p *progress, checkVersion bool) (*session, error) {
 	c, err := workspaces.Resolve(stringFlag(cmd, "workspace"))
 	if err != nil {
 		return nil, err
@@ -144,7 +149,7 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	if err != nil {
 		s.Close()
 
-		again, healed, retryErr := retryHealedSession(cmd, p, c, nodeSpec, err)
+		again, healed, retryErr := retryHealedSession(cmd, p, c, nodeSpec, err, checkVersion)
 		if healed {
 			return again, retryErr
 		}
@@ -155,6 +160,10 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 	s.node = &remote.Node{SSH: client, Operator: c.Operator.Name}
 	if p.opts.Verbose {
 		s.node.Stderr = os.Stderr
+	}
+
+	if !checkVersion {
+		return s, nil
 	}
 
 	if err := s.handshake(ctx, cmd, c, nodeSpec, p); err != nil {
@@ -174,7 +183,7 @@ func openSession(cmd *cobra.Command, p *progress) (*session, error) {
 
 // retryHealedSession heals a workspace whose master moved to a new address and
 // opens the session again, once. healed is false when no retry happened.
-func retryHealedSession(cmd *cobra.Command, p *progress, c *workspaces.Workspace, nodeSpec workspaces.Node, dialErr error) (*session, bool, error) {
+func retryHealedSession(cmd *cobra.Command, p *progress, c *workspaces.Workspace, nodeSpec workspaces.Node, dialErr error, checkVersion bool) (*session, bool, error) {
 	// A rebuilt master on a new address (Phase 5): heal the workspace from
 	// DNS once and try again.
 	if endpointHealed(cmd) {
@@ -190,7 +199,7 @@ func retryHealedSession(cmd *cobra.Command, p *progress, c *workspaces.Workspace
 
 	markEndpointHealed(cmd)
 
-	again, err := openSession(cmd, p)
+	again, err := openNodeSession(cmd, p, checkVersion)
 	if err != nil {
 		return nil, true, err
 	}

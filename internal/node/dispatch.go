@@ -82,7 +82,7 @@ func always(rpc.Request) bool { return true }
 
 // fencedReads are methods with a run log that still answer on a fenced
 // node: they change nothing a newer master owns.
-var fencedReads = map[string]bool{"ssh.confirm": true, "upgrade.install": true}
+var fencedReads = map[string]bool{"ssh.confirm": true}
 
 // fencedRefuses reports whether a fenced node refuses req: every method
 // that takes the node lock exclusive or writes a run log, apart from

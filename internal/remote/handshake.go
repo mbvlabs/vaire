@@ -120,10 +120,15 @@ func versionMismatch(got, want node.BuildID, installed bool) *output.CLIError {
 		message = "vaire is not installed on the node"
 	}
 
+	hint := "Use vaire node upgrade for a supported node, or run the matching CLI."
+	if !installed {
+		hint = "Use vaire server init to bootstrap a fresh node."
+	}
+
 	return output.NewError(
 		output.CodeNodeVersionMismatch,
 		message,
 		output.ExitVersion,
-		"Have a trusted administrator install the matching vaire binary on the node.",
+		hint,
 	).WithDetails(map[string]any{"node": got, "client": want, "installed": installed})
 }

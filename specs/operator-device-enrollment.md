@@ -1,6 +1,6 @@
 # Operator and device enrollment
 
-**Status:** Targeted for RC2 on one VPS. Bootstrap ownership, rootless access management, and the admin-first flow over a temporary WireGuard peer are agreed.
+**Status:** Planned for one VPS. RC2 ships the identity groundwork, not enrollment. Bootstrap ownership, rootless access management, and the admin-first flow over a temporary WireGuard peer are agreed.
 
 ## Outcome
 
@@ -79,11 +79,11 @@ One code cannot enroll two machines. This is not hardware binding: someone who d
 - Issuance identifies the intended workspace, user, and device label. Non-owners cannot grant or revoke access, including by calling the server directly. Separately enrolled devices for the same user can operate simultaneously with distinct identities.
 - `whoami --json` reports the verified operator, device, workspace, and responding node. If the node is unreachable, the command fails rather than claiming the local profile is verified. Activity records distinguish the two devices making managed changes; client-supplied labels cannot impersonate another actor. Revocation does not erase historical attribution.
 - Revoking one device removes its management access, including any open management session or tunnel. The other device keeps working. Revoking the operator removes access for all that operator's devices. The last owner cannot accidentally remove their own remaining access. Revocation does not undo actions already accepted or revoke PostgreSQL credentials obtained separately.
-- A supported single-node upgrade from the RC baseline preserves working owner access. A legacy handoff imported on two machines still represents one shared identity; migration must not claim to distinguish those machines. Re-enroll each device to get distinct identities. Preserve bundle import for recovery/compatibility, not as the way to add operators.
+- A supported single-node upgrade preserves working owner access. A legacy handoff imported on two machines still represents one shared identity; migration must not claim to distinguish those machines. Re-enroll each device to get distinct identities. Preserve bundle import for recovery/compatibility, not as the way to add operators.
 - On a disposable VPS, verify owner upgrade, enrollment, attribution, revocation with an active tunnel, and the surviving device. No fleet or HA setup is required.
 
 ## Release and decisions
 
-Target this for RC2 on both `master` and `1.x`. Land it on `master` first and bring the same change to `1.x` by fast-forward where possible, or backport if the branches have diverged. Validate the supported RC1-to-RC2 upgrade on `1.x` before tagging RC2; do not retag RC1.
+Land changes on `master` first and bring them to `1.x` by fast-forward where possible, or backport if the branches have diverged. RC2 is fresh-install only; RC1-to-RC2 upgrade is not supported. Validate workstation-driven node upgrades between supported signed builds before V1.
 
 Review the redemption path and the non-owner command set before implementation. Technical design must show what authenticated identity the node can trust, how it enforces owner permissions without granting host administration, how open sessions are revoked, and how legacy owner access and recovery survive migration.

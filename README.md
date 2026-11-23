@@ -6,12 +6,12 @@ Run PostgreSQL 18 on your own VPS with one CLI for setup, operations, and recove
 
 `vaire` provisions a fresh Debian 13 or Ubuntu 26.04 server. Each database gets its own PostgreSQL cluster, resource limits, and, when backups are configured, a separate backup and restore history. Operators manage the server over SSH inside WireGuard; applications connect with standard PostgreSQL clients through PgBouncer. There is no server control daemon or public management API.
 
-> **Beta:** Use a fresh server dedicated to Vaire. The current stack uses PgBouncer and Vaire-managed nginx; it does not migrate existing Caddy installs. Multi-node management and in-place extension removal are not supported.
+> **Release candidate:** Use a fresh server dedicated to Vaire. The current stack uses PgBouncer and Vaire-managed nginx; it does not migrate existing Caddy installs. Multi-node management and in-place extension removal are not supported.
 
-**Upgrade policy:** Alpha and beta builds are not a compatibility baseline.
-`1.0.0-beta.2` is planned as a fresh install, not an in-place upgrade from
-`1.0.0-beta.1`. Supported in-place upgrade paths start with the release
-candidates and will be listed in the release notes.
+**Upgrade policy:** `1.0.0-rc.2` requires a fresh install. An in-place upgrade
+from RC1, alpha, beta, or rolling edge builds is not supported. The first
+supported long-term upgrade baseline will be `1.0.0`; RC2 includes the node
+updater so it can be tested between signed builds before V1.
 
 ## What works today
 
@@ -81,6 +81,21 @@ curl -fsSL https://vaire.mbvlabs.com/1.x/install.sh | bash
 
 The corresponding `vaire upgrade --channel` values are `edge`, `rc`, `stable`,
 and `stable-1.x`.
+
+### Upgrade a node from your workstation
+
+On a node that already supports signed upgrades (starting with RC2 for testing),
+install the newer tagged release on your workstation, then update the node:
+
+```sh
+vaire upgrade --channel rc --skip-nodes
+vaire -w prod node upgrade
+vaire -w prod status
+```
+
+The node fetches and verifies the exact release matching your CLI. This does
+not update PostgreSQL packages. Rolling edge builds and downgrades are not
+accepted by the node updater.
 
 ## Quick start
 
@@ -326,7 +341,7 @@ Default privileges grant access to new tables created by the owner in `public`: 
 - You type `stored` to confirm you've saved it, and vaire offers to clear the screen. Nothing is written to disk unless you ask with `--secrets-out`.
 - `vaire login` on any machine takes the bundle and passphrase and sets up a **workspace**: credentials under `~/.config/vaire/workspaces/<name>/`, files 0600.
 - Later full-document reveals (`vaire secrets export` and replacement handoffs) require a master password or authenticator code at a terminal. Set either with `vaire auth setup`. This is a command gate, not encryption of workspace files at rest.
-- Releases are signed with cosign. Use `vaire upgrade --skip-nodes` for the CLI. Node binary replacement is a separate, trusted host-administrator operation; operator RPC cannot install or downgrade it.
+- Releases are signed with cosign. The node updater accepts only forward, signed tagged releases from Vaire’s release service. It never installs a binary or accepts a download URL supplied by the operator.
 
 ### Approving public access
 
