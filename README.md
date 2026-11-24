@@ -379,6 +379,9 @@ your verified devices. Another operator can't use your code to approve their
 requests. Revoking one device doesn't reset the authenticator, and `vaire recover`
 doesn't reset it either.
 
+Verified owners can enroll their first authenticator without the master password,
+even if the server has one.
+
 The master password set during `server init` is already registered on the
 node. If you skip it, use `vaire auth setup` later to choose a master password
 or TOTP. No root console or setup code is needed. Until a factor is set,

@@ -114,17 +114,20 @@ var fetchWriteProtectStatus = fetchProtectStatus
 // node enforces it whatever the client does. A write to a follower is refused
 // here, before it asks for a code or acts as an owner role: a follower takes
 // no writes.
-func sessionLogin(cmd *cobra.Command, s *session, p *progress, db string, write bool) (user, password string, err error) {
-	user, password, err = adminCredentials(s.ctx)
-	if err != nil || !write {
-		return user, password, err
+func sessionLogin(cmd *cobra.Command, s *session, p *progress, db string, write bool) (string, string, error) {
+	if !write {
+		return adminCredentials(s.ctx)
 	}
 
 	status := func() (protectStatusData, error) { return fetchWriteProtectStatus(cmd, s, p) }
 
 	code, err := protectedWriteCode(cmd, db, "writing to it", refuseFollowerWrite(status, db), p.note)
-	if err != nil || code == nil {
-		return user, password, err
+	if err != nil {
+		return "", "", err
+	}
+
+	if code == nil {
+		return adminCredentials(s.ctx)
 	}
 	// The CLI makes the write role's password and sends it as a secret:
 	// the node redacts every secret from its result, so it cannot hand one
@@ -149,7 +152,7 @@ func sessionLogin(cmd *cobra.Command, s *session, p *progress, db string, write 
 
 	if !access.Protected {
 		// The protection was lifted meanwhile: vaire_admin writes again.
-		return user, password, nil
+		return adminCredentials(s.ctx)
 	}
 
 	return access.User, writePassword, nil

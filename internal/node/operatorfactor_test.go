@@ -102,34 +102,61 @@ func TestOperatorIdentityIsVerifiedAndImmutableIDKeyed(t *testing.T) {
 	}
 }
 
-func TestFirstOperatorEnrollmentRequiresSharedPassword(t *testing.T) {
+func TestFirstOperatorEnrollmentWithSharedPassword(t *testing.T) {
 	ctx := context.Background()
-	g := exposureFactorGuard{dir: filepath.Join(t.TempDir(), "factors"), now: time.Now}
+	clock := &testClock{t: time.Unix(1800000000, 0)}
+	installWriteApproval(t, clock)
 
 	const pw = "a long enough approval password"
 
-	if err := g.locked(ctx, func() error {
-		st := exposureFactorState{}
-		if err := enrollExposurePassword(&st, pw); err != nil {
-			return err
-		}
-
-		return g.save(st)
-	}); err != nil {
+	password := &Env{Req: rpc.Request{Params: []byte(`{"mode":"password"}`), Secrets: map[string]string{"new_password": pw}}}
+	if _, err := handleAuthSetup(ctx, password); err != nil {
 		t.Fatal(err)
 	}
 
-	authorize := func(password string) error {
-		return g.forOperator(ctx, "new-operator", func(g exposureFactorGuard, st *exposureFactorState) error {
-			return g.authorizeSetup(st, password, "")
-		})
-	}
-	if err := authorize(""); err == nil {
-		t.Fatal("missing password accepted")
+	secret, err := totp.NewSecret()
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if err := authorize(pw); err != nil {
+	env := &Env{DeviceIdentity: writeIdentity(), Req: rpc.Request{Params: []byte(`{"mode":"totp"}`), Secrets: map[string]string{
+		"new_totp_secret": secret, "new_totp_code": "invalid",
+	}}}
+	if _, err := handleAuthSetup(ctx, env); err == nil {
+		t.Fatal("accepted invalid confirmation without shared password")
+	}
+
+	env.Req.Secrets["new_totp_code"] = codeFor(t, secret, clock.t, 0)
+	if _, err := handleAuthSetup(ctx, env); err != nil {
+		t.Fatalf("first enrollment without shared password: %v", err)
+	}
+
+	replacement, err := totp.NewSecret()
+	if err != nil {
 		t.Fatal(err)
+	}
+
+	env.Req.Secrets = map[string]string{"new_totp_secret": replacement, "new_totp_code": codeFor(t, replacement, clock.t, 0)}
+	if _, err := handleAuthSetup(ctx, env); err == nil {
+		t.Fatal("rotated authenticator without existing proof")
+	}
+
+	clock.t = clock.t.Add(totp.Period)
+	env.Req.Secrets["new_totp_code"] = codeFor(t, replacement, clock.t, 0)
+
+	env.Req.Secrets["exposure_totp"] = codeFor(t, secret, clock.t, 0)
+	if _, err := handleAuthSetup(ctx, env); err != nil {
+		t.Fatalf("rotation with current authenticator: %v", err)
+	}
+
+	secret, err = totp.NewSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env.Req.Secrets = map[string]string{"new_totp_secret": secret, "new_totp_code": codeFor(t, secret, clock.t, 0), "exposure_password": pw}
+	if _, err := handleAuthSetup(ctx, env); err != nil {
+		t.Fatalf("rotation with shared password: %v", err)
 	}
 }
 

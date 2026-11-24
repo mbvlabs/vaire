@@ -8,6 +8,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/workspaces"
+	"github.com/spf13/cobra"
 )
 
 func statusOf(protected ...string) func() (protectStatusData, error) {
@@ -102,5 +103,24 @@ func TestSessionLoginReadNeedsNoCode(t *testing.T) {
 	user, password, err := sessionLogin(commandAt(t, "sql", "--output", "json"), s, nil, "app", false)
 	if err != nil || user != "vaire_admin" || password != "admin-pw" {
 		t.Fatalf("read login: %s %s %v", user, password, err)
+	}
+}
+
+func TestProtectedWriteReachesApprovalWithoutAdminCredentials(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	old := fetchWriteProtectStatus
+
+	t.Cleanup(func() { fetchWriteProtectStatus = old })
+
+	fetchWriteProtectStatus = func(*cobra.Command, *session, *progress) (protectStatusData, error) {
+		return statusOf("app")()
+	}
+
+	s := &session{ctx: &workspaces.Workspace{Name: "thelab"}}
+	_, _, err := sessionLogin(commandAt(t, "sql", "--no-input"), s, &progress{}, "app", true)
+
+	if e := cliErrorOf(t, err); e.Code != output.CodeDatabaseProtected || reasonOf(e) != "write_requires_human" {
+		t.Fatalf("expected approval prompt requirement before admin lookup, got %v", e)
 	}
 }

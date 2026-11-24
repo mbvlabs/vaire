@@ -178,6 +178,10 @@ func runAuthSetup(cmd *cobra.Command, _ []string) error {
 }
 
 func authSetupProof(cmd *cobra.Command, status node.ExposureFactorStatus, mode string) (map[string]string, error) {
+	if mode == "totp" && !status.TOTP {
+		return map[string]string{}, nil
+	}
+
 	if mode == "password" && status.Password {
 		status.TOTP = false
 	}

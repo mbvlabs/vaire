@@ -52,8 +52,12 @@ func handleAuthSetup(ctx context.Context, env *Env) (Result, error) {
 			code = ""
 		}
 
-		if err := g.authorizeSetup(st, s["exposure_password"], code); err != nil {
-			return err
+		// A verified operator may enroll their own first authenticator without
+		// knowing the shared password. Recheck under the lock for rotations.
+		if p.Mode != "totp" || st.Secret != "" {
+			if err := g.authorizeSetup(st, s["exposure_password"], code); err != nil {
+				return err
+			}
 		}
 
 		if p.Mode == "password" {
