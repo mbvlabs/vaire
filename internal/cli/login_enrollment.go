@@ -323,6 +323,10 @@ func loginEnrollmentWithCredentials(cmd *cobra.Command, code string, credentials
 		return fmt.Errorf("the recovery bundle does not enroll an owner")
 	}
 
+	if credentials == nil && setup.Mode == rpc.AccessSetupRecovery {
+		return fmt.Errorf("use vaire recover with the encrypted owner recovery kit")
+	}
+
 	secrets.Add(setup.TemporaryPrivateKey)
 	secrets.Add(setup.Token)
 

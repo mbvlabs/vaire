@@ -22,19 +22,33 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// runLogin redeems a device setup code or decrypts an owner recovery kit.
-// The kit comes from a file, from stdin with -, or
-// is pasted at a prompt when no argument is given. A file, stdin or paste may
-// hold the whole copied handoff; only its armored block is used. The bundle is
-// read and checked before the passphrase is asked for.
-func runLogin(cmd *cobra.Command, args []string) error {
-	raw, err := loginBundle(cmd, args)
+func runLogin(cmd *cobra.Command, _ []string) error {
+	restore := ui.Suspend()
+	defer restore()
+
+	if !MustNotPrompt(cmd) {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Paste your one-time device setup code:")
+	}
+
+	line, err := readFirstLine(io.LimitReader(cmd.InOrStdin(), 8192+int64(len(rpc.AccessSetupPrefix))+2))
 	if err != nil {
 		return err
 	}
 
-	if bytes.HasPrefix(raw, []byte(rpc.AccessSetupPrefix)) {
-		return loginEnrollment(cmd, strings.TrimSpace(string(raw)))
+	code := strings.TrimSpace(line)
+	if !strings.HasPrefix(code, rpc.AccessSetupPrefix) {
+		return output.NewError(output.CodeUsage, "expected a one-time device setup code", output.ExitUsage,
+			"Use vaire recover for an owner recovery kit.")
+	}
+
+	return loginEnrollment(cmd, code)
+}
+
+// runRecover opens an encrypted kit before enrolling a replacement owner.
+func runRecover(cmd *cobra.Command, args []string) error {
+	raw, err := recoveryBundle(cmd, args)
+	if err != nil {
+		return err
 	}
 
 	passphrase, err := loginPassphrase(cmd)
@@ -44,7 +58,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 
 	secrets.Add(passphrase)
 	// age's scrypt work factor makes this take about a second.
-	stop := waitOn(cmd, "decrypting the transfer bundle")
+	stop := waitOn(cmd, "decrypting the recovery kit")
 	doc, err := secretsdoc.Decrypt(raw, passphrase)
 
 	stop()
@@ -67,8 +81,8 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	return loginEnrollmentWithCredentials(cmd, doc.RecoveryCode, &creds)
 }
 
-// loginBundle reads the bundle from the argument, stdin (-), or a paste.
-func loginBundle(cmd *cobra.Command, args []string) ([]byte, error) {
+// recoveryBundle reads the kit from a file, stdin (-), or a terminal paste.
+func recoveryBundle(cmd *cobra.Command, args []string) ([]byte, error) {
 	src := ""
 	if len(args) == 1 {
 		src = args[0]
@@ -88,37 +102,37 @@ func loginBundle(cmd *cobra.Command, args []string) ([]byte, error) {
 
 		return extractBundle(raw, "on stdin")
 	case "":
-		if err := RequireFlag(cmd, false, "<bundle-file>", "login"); err != nil {
+		if err := RequireFlag(cmd, false, "<kit-file>", "recover"); err != nil {
 			return nil, err
 		}
 
 		restore := ui.Suspend()
 		defer restore()
 
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Paste the access setup code or transfer bundle (from "+secretsdoc.ArmorHeader+" to "+secretsdoc.ArmorFooter+"), or the whole copied handoff:")
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Paste the encrypted block from your owner recovery kit:")
 
-		raw, err := readLoginPaste(cmd.InOrStdin())
+		raw, err := readRecoveryPaste(cmd.InOrStdin())
 		if err != nil {
 			return nil, output.WrapError(output.CodeUsage, err, output.ExitUsage, "")
 		}
 
-		if !secretsdoc.IsArmored(raw) && !bytes.HasPrefix(raw, []byte(rpc.AccessSetupPrefix)) {
-			return nil, output.NewError(output.CodeUsage, "no setup code or transfer bundle found", output.ExitUsage,
-				"Paste the setup code or the whole bundle block, including the BEGIN and END lines.")
+		if !secretsdoc.IsArmored(raw) {
+			return nil, output.NewError(output.CodeUsage, "no recovery kit found", output.ExitUsage,
+				"Paste the full encrypted block from your recovery kit.")
 		}
 
 		return raw, nil
 	default:
 		raw, err := os.ReadFile(src)
 		if err != nil {
-			return nil, output.WrapError(output.CodeUsage, err, output.ExitUsage, "Pass the path of a transfer bundle, - for stdin, or nothing to paste it.")
+			return nil, output.WrapError(output.CodeUsage, err, output.ExitUsage, "Pass the path to the recovery kit, - for stdin, or nothing to paste it.")
 		}
 
 		return extractBundle(raw, "in "+src)
 	}
 }
 
-func readLoginPaste(r io.Reader) ([]byte, error) {
+func readRecoveryPaste(r io.Reader) ([]byte, error) {
 	var b strings.Builder
 
 	sc := bufio.NewScanner(io.LimitReader(r, 4<<20))
@@ -126,14 +140,8 @@ func readLoginPaste(r io.Reader) ([]byte, error) {
 
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
-		if b.Len() == 0 {
-			if strings.HasPrefix(line, rpc.AccessSetupPrefix) {
-				return []byte(line), nil
-			}
-
-			if line != secretsdoc.ArmorHeader {
-				continue
-			}
+		if b.Len() == 0 && line != secretsdoc.ArmorHeader {
+			continue
 		}
 
 		b.WriteString(line + "\n")
@@ -164,8 +172,8 @@ func extractBundle(raw []byte, where string) ([]byte, error) {
 	}
 
 	if !secretsdoc.IsArmored(block) {
-		return nil, output.NewError(output.CodeUsage, "no transfer bundle found "+where, output.ExitUsage,
-			"Pass the bundle file vaire printed, or the whole copied handoff with its "+secretsdoc.ArmorHeader+" block. Or run vaire login with no argument and paste it.")
+		return nil, output.NewError(output.CodeUsage, "no recovery kit found "+where, output.ExitUsage,
+			"Pass the encrypted kit file, or run vaire recover and paste the full encrypted block.")
 	}
 
 	return block, nil
@@ -188,7 +196,7 @@ func loginPassphrase(cmd *cobra.Command) (string, error) {
 		return strings.TrimSpace(line), err
 	}
 
-	if err := RequireFlag(cmd, false, "--passphrase-stdin", "login"); err != nil {
+	if err := RequireFlag(cmd, false, "--passphrase-stdin", "recover"); err != nil {
 		return "", err
 	}
 
@@ -240,7 +248,7 @@ func runWorkspaceList(cmd *cobra.Command, _ []string) error {
 
 	message := strings.Join(lines, "\n")
 	if len(rows) == 0 {
-		message = "No workspaces. Run vaire login and paste a setup code or recovery bundle."
+		message = "No workspaces. Use vaire login with a setup code, or vaire recover with an owner recovery kit."
 	}
 
 	return output.Success(cmd, output.Result{Data: rows, Message: message})
@@ -337,5 +345,5 @@ func runWorkspaceRemove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	return output.OK(cmd, map[string]any{"removed": name}, "Removed workspace "+name+". Its transfer bundle still opens the server.")
+	return output.OK(cmd, map[string]any{"removed": name}, "Removed local workspace "+name+".")
 }

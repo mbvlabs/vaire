@@ -134,16 +134,27 @@ func TestManagedSecretsExportRequiresUnlockAndDoesNotExportDeviceKeys(t *testing
 	}
 }
 
-func TestReadLoginPaste(t *testing.T) {
-	code := rpc.AccessSetupPrefix + "example"
+func TestReadRecoveryPaste(t *testing.T) {
 	for _, tc := range []struct{ input, want string }{
-		{"handoff\n" + code + "\n", code},
+		{"handoff\n" + rpc.AccessSetupPrefix + "example\n", ""},
 		{"handoff\n" + secretsdoc.ArmorHeader + "\nbody\n" + secretsdoc.ArmorFooter + "\n", secretsdoc.ArmorHeader + "\nbody\n" + secretsdoc.ArmorFooter + "\n"},
 	} {
-		got, err := readLoginPaste(strings.NewReader(tc.input))
+		got, err := readRecoveryPaste(strings.NewReader(tc.input))
 		if err != nil || string(got) != tc.want {
 			t.Fatalf("got %q, %v; want %q", got, err, tc.want)
 		}
+	}
+}
+
+func TestLoginRejectsRecoveryKit(t *testing.T) {
+	root := NewRoot()
+	root.SetArgs([]string{"login"})
+	root.SetIn(strings.NewReader(secretsdoc.ArmorHeader + "\n"))
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "expected a one-time device setup code") {
+		t.Fatalf("login accepted a recovery kit: %v", err)
 	}
 }
 

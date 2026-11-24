@@ -34,11 +34,12 @@ type Bootstrap struct {
 // PendingSecrets are generated on the operator before first contact. The
 // database and service passwords are added once the answers are known (D7).
 type PendingSecrets struct {
-	OperatorName  string         `json:"operator_name"`
-	WGPrivateKey  string         `json:"wg_private_key"`
-	SSHPrivateKey string         `json:"ssh_private_key"`
-	SudoPassword  string         `json:"sudo_password"`
-	Database      *DatabaseCreds `json:"database,omitempty"`
+	OperatorName     string         `json:"operator_name"`
+	SetupDeviceLabel string         `json:"setup_device_label,omitempty"`
+	WGPrivateKey     string         `json:"wg_private_key"`
+	SSHPrivateKey    string         `json:"ssh_private_key"`
+	SudoPassword     string         `json:"sudo_password"`
+	Database         *DatabaseCreds `json:"database,omitempty"`
 	// Backup is the recovery kit when init configures backups.
 	Backup *BackupCreds `json:"backup,omitempty"`
 	// Metrics is the /metrics endpoint credential (Phase 4).

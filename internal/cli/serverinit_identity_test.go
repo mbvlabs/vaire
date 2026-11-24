@@ -45,13 +45,13 @@ func TestFreshInitGeneratesPersistentMachineOperator(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	name := first.sec.OperatorName
-	if !machineOperatorNamePattern.MatchString(name) {
-		t.Fatalf("fresh init operator name %q is not machine- plus 12 lowercase Crockford base32 characters", name)
+	name := first.sec.SetupDeviceLabel
+	if first.sec.OperatorName != "prod" || !machineOperatorNamePattern.MatchString(name) {
+		t.Fatalf("unexpected operator %q or device label %q", first.sec.OperatorName, name)
 	}
 
 	saved, err := workspaces.LoadSecrets("prod")
-	if err != nil || saved.OperatorName != name || saved.WGPrivateKey != first.sec.WGPrivateKey || saved.SSHPrivateKey != first.sec.SSHPrivateKey {
+	if err != nil || saved.OperatorName != "prod" || saved.SetupDeviceLabel != name || saved.WGPrivateKey != first.sec.WGPrivateKey || saved.SSHPrivateKey != first.sec.SSHPrivateKey {
 		t.Fatalf("the generated operator identity or keys were not persisted: %v", err)
 	}
 
@@ -63,8 +63,8 @@ func TestFreshInitGeneratesPersistentMachineOperator(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if resumed.sec.OperatorName != name || resumed.sec.SSHPrivateKey != first.sec.SSHPrivateKey {
-		t.Fatalf("resume changed the operator identity: %q -> %q", name, resumed.sec.OperatorName)
+	if resumed.sec.OperatorName != "prod" || resumed.sec.SetupDeviceLabel != name || resumed.sec.SSHPrivateKey != first.sec.SSHPrivateKey {
+		t.Fatalf("resume changed the setup device label: %q -> %q", name, resumed.sec.SetupDeviceLabel)
 	}
 
 	second := machineOperatorTestRun(t, "staging")
@@ -72,8 +72,8 @@ func TestFreshInitGeneratesPersistentMachineOperator(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if second.sec.OperatorName == name {
-		t.Fatalf("two fresh inits generated the same operator name %q", name)
+	if second.sec.SetupDeviceLabel == name || second.sec.OperatorName != "staging" {
+		t.Fatalf("unexpected second operator %q or device label %q", second.sec.OperatorName, second.sec.SetupDeviceLabel)
 	}
 }
 
@@ -156,7 +156,7 @@ func TestMachineOperatorFlowsThroughBootstrapAndHandoff(t *testing.T) {
 func TestRestoreKeepsWorkspaceMachineOperator(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	name, err := newMachineOperatorName()
+	name, err := newMachineDeviceLabel()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,8 +195,21 @@ func TestRestoreKeepsWorkspaceMachineOperator(t *testing.T) {
 		t.Fatalf("restore changed the operator identity: %q -> %q", name, r.sec.OperatorName)
 	}
 
+	if err := r.ensureSetupDeviceLabel(); err != nil {
+		t.Fatal(err)
+	}
+
+	label := r.sec.SetupDeviceLabel
+	if !machineOperatorNamePattern.MatchString(label) || label == name {
+		t.Fatalf("restore did not create a distinct device label: %q", label)
+	}
+
+	if err := r.ensureSetupDeviceLabel(); err != nil || r.sec.SetupDeviceLabel != label {
+		t.Fatalf("restore changed its pending device label: %v", err)
+	}
+
 	saved, err := workspaces.LoadSecrets("prod")
-	if err != nil || saved.OperatorName != name {
-		t.Fatalf("restore did not persist the workspace operator: %v", err)
+	if err != nil || saved.OperatorName != name || saved.SetupDeviceLabel != label {
+		t.Fatalf("restore did not persist the workspace operator and device: %v", err)
 	}
 }

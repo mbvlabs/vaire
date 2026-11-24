@@ -26,7 +26,7 @@ func recoveryKit(name string) (*workspaces.BackupCreds, error) {
 
 	if creds.Backup == nil || creds.Backup.AccessKeyID == "" {
 		return nil, output.NewError(output.CodeInputRequired, "this workspace has no recovery kit", output.ExitInput,
-			"Run vaire backup setup, or log in from a transfer bundle that carries the recovery kit (vaire login).").
+			"Run vaire backup setup, or use an owner workspace with the backup credentials.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
 

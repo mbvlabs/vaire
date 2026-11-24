@@ -14,8 +14,6 @@ import (
 	"github.com/mbvlabs/vaire/internal/rpc"
 )
 
-const setupDeviceLabel = "setup-device"
-
 // handleBootstrapOwner is bound to the bootstrap/recovery authority, never
 // an already enrolled device. The first successful request pins the key pair.
 func handleBootstrapOwner(ctx context.Context, env *Env) (Result, error) {
@@ -136,11 +134,11 @@ func bootstrapOwnerDevice(cfg config.Cluster, r *config.AccessRegistry, legacy c
 		return -1, accessInvalid(err.Error())
 	}
 
-	digest := sha256.Sum256([]byte("bootstrap-owner\x00" + p.SSHPublicKey + "\x00" + p.WGPublicKey))
+	digest := bootstrapDeviceDigest(p.SSHPublicKey, p.WGPublicKey)
 	d := config.AccessDevice{
-		ID: devID, OperatorID: opID, Label: setupDeviceLabel, State: config.DevicePending,
+		ID: devID, OperatorID: opID, Label: p.Label, State: config.DevicePending,
 		SSHPublicKey: p.SSHPublicKey, WGPublicKey: p.WGPublicKey, Address: address.String(),
-		UnixLogin: "vdev-" + strings.TrimPrefix(devID, "dev-"), RequestDigest: hex.EncodeToString(digest[:]),
+		UnixLogin: "vdev-" + strings.TrimPrefix(devID, "dev-"), RequestDigest: digest,
 	}
 
 	if d.UnixLogin == cfg.Server.AdminUser {
@@ -160,11 +158,17 @@ func resumeBootstrapOwner(r config.AccessRegistry, op config.AccessOperator, p r
 	}
 
 	for i, d := range r.Devices {
-		if d.OperatorID == op.ID && d.Label == setupDeviceLabel && d.TemporaryAddress == "" &&
+		if d.OperatorID == op.ID && d.Label == p.Label && d.TemporaryAddress == "" &&
+			d.RequestDigest == bootstrapDeviceDigest(d.SSHPublicKey, d.WGPublicKey) &&
 			d.State != config.DeviceRevoked && d.SSHPublicKey == p.SSHPublicKey && d.WGPublicKey == p.WGPublicKey {
 			return i, nil
 		}
 	}
 
 	return -1, deviceAccessDenied()
+}
+
+func bootstrapDeviceDigest(sshKey, wgKey string) string {
+	digest := sha256.Sum256([]byte("bootstrap-owner\x00" + sshKey + "\x00" + wgKey))
+	return hex.EncodeToString(digest[:])
 }

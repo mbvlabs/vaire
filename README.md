@@ -342,7 +342,7 @@ Default privileges grant access to new tables created by the owner in `public`: 
   - every secret in plain text, grouped for a password manager;
   - an ASCII-armored `age` transfer bundle (scrypt), with a generated passphrase.
 - You type `stored` to confirm you've saved it, and vaire offers to clear the screen. Nothing is written to disk unless you ask with `--secrets-out`.
-- If you lose owner access, give the recovery kit and its passphrase to `vaire login` on a new machine. It enrolls a verified owner device with new keys and consumes the recovery code. Run `vaire secrets export` from the recovered workspace to make a replacement kit.
+- If you lose owner access, use `vaire recover` with the encrypted kit and its passphrase. It enrolls a verified owner device with new keys and consumes the recovery code. Run `vaire secrets export` from the recovered workspace to make a replacement kit.
 - Exporting a recovery kit requires a master password or authenticator code. Set either with `vaire auth setup`. This protects the export command, not the workspace files at rest.
 - Releases are signed with cosign. The node updater accepts only forward, signed tagged releases from Vaire’s release service. It never installs a binary or accepts a download URL supplied by the operator.
 

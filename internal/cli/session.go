@@ -135,7 +135,13 @@ func openNodeSession(cmd *cobra.Command, p *progress, checkVersion bool) (*sessi
 	defer p.wait("connecting to " + nodeLabel(c, nodeSpec))()
 
 	ctx := commandContext(cmd)
-	if err := s.openDialer(ctx, cmd, wgCfg, p); err != nil {
+	// Bound the initial connection, including shared-daemon attachment and
+	// its WireGuard dial. The shared dialer's own budget can be longer than
+	// the command's connection timeout.
+	connectCtx, cancelConnect := context.WithTimeout(ctx, timeoutFlag(cmd))
+	defer cancelConnect()
+
+	if err := s.openDialer(connectCtx, cmd, wgCfg, p); err != nil {
 		return nil, err
 	}
 
@@ -145,7 +151,10 @@ func openNodeSession(cmd *cobra.Command, p *progress, checkVersion bool) (*sessi
 		return transport.DialSSH(ctx, s.dialer, target, sshOpts)
 	}
 
-	client, err := s.dial(ctx)
+	client, err := s.dial(connectCtx)
+
+	cancelConnect()
+
 	if err != nil {
 		s.Close()
 
@@ -235,7 +244,7 @@ func nodeLabel(c *workspaces.Workspace, n workspaces.Node) string {
 
 func workspaceFileError(name, file string, err error) error {
 	return output.WrapError(output.CodeConfig, fmt.Errorf("read %s: %w", workspaces.Path(name, file), err), output.ExitConfig,
-		"Recreate the workspace with vaire login <secrets.age>.")
+		"Enroll again with vaire login or recover owner access with vaire recover.")
 }
 
 func (s *session) confirmLockdown(ctx context.Context, p *progress) error {
@@ -599,7 +608,7 @@ func applyRecoveryKit(cmd *cobra.Command, s *session, p *progress, secretValues 
 func addRecoveryKitUnlessIncomplete(secretValues map[string]string, kit *workspaces.BackupCreds, backupConfigured bool) error {
 	if backupConfigured && (kit == nil || !kit.HasBucket()) {
 		return output.NewError(output.CodeInputRequired, "backups are on, but this machine's workspace has no recovery kit", output.ExitInput,
-			"Log in from a current transfer bundle (vaire login), which carries the recovery kit, then retry.").
+			"Use an owner workspace that holds the backup credentials, then retry.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
 

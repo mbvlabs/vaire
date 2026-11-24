@@ -115,7 +115,7 @@ func (h *handoff) show(cmd *cobra.Command, skipStored, canSave bool) error {
 	h.showHeader(term)
 
 	for {
-		choice, err := chooseOption(cmd, "Secrets handoff", handoffOptions(canSave, h.saved))
+		choice, err := chooseOption(cmd, h.title(), handoffOptions(canSave, h.saved))
 		if err != nil {
 			return err
 		}
@@ -144,6 +144,14 @@ func (h *handoff) show(cmd *cobra.Command, skipStored, canSave bool) error {
 	return nil
 }
 
+func (h *handoff) title() string {
+	if h.doc.RecoveryCode != "" {
+		return "Owner recovery kit"
+	}
+
+	return "Secrets handoff"
+}
+
 // handoffTerminal is the terminal a handoff is presented on.
 type handoffTerminal struct {
 	w    io.Writer
@@ -168,16 +176,22 @@ func (t handoffTerminal) note(s string) {
 // transfer bundle was saved.
 func (h *handoff) showHeader(term handoffTerminal) {
 	if term.rich {
-		term.line("\n" + ui.Header("Secrets handoff", 72))
+		term.line("\n" + ui.Header(h.title(), 72))
 	} else {
-		term.line("\n== Secrets handoff ==")
+		term.line("\n== " + h.title() + " ==")
 	}
 
-	term.line("The cluster's master record: the operator's keys, the sudo password and the database passwords.")
-	term.line("vaire keeps no copy and doesn't show it again. Store it in your password manager.")
+	if h.doc.RecoveryCode != "" {
+		term.line("If you lose owner access, run vaire recover and paste this kit.")
+		term.line("It enrolls one new owner device. It does not contain your device's private keys.")
+		term.line("Save the encrypted kit and its passphrase somewhere you can reach without this machine.")
+	} else {
+		term.line("Store this secrets record in your password manager.")
+	}
+
 	term.line("")
 
-	label := "Bundle passphrase"
+	label := "Passphrase"
 	if term.rich {
 		label = ui.Dim(label)
 	}
@@ -185,7 +199,7 @@ func (h *handoff) showHeader(term handoffTerminal) {
 	term.line(label + "  " + h.passphrase)
 
 	if h.path != "" {
-		term.note("The transfer bundle was saved to " + h.path + ". Keep the passphrase apart from it.")
+		term.note(h.title() + " saved to " + h.path + ". Keep the passphrase separate.")
 	}
 
 	term.line("")
@@ -207,7 +221,7 @@ func (h *handoff) showChoice(cmd *cobra.Command, term handoffTerminal, choice st
 	switch choice {
 	case "copy":
 		_, _ = fmt.Fprint(term.w, osc52(h.record()))
-		term.note("Copied to your clipboard: every value, the transfer bundle and its passphrase. Paste it into your password manager. Nothing pasted? Pick Show everything on screen.")
+		term.note("Copied the full record, including the encrypted file and its passphrase. Paste it into your password manager. Nothing pasted? Pick Show everything on screen.")
 	case "print":
 		// For terminals that block OSC 52, such as tmux without
 		// set-clipboard on.
@@ -220,7 +234,7 @@ func (h *handoff) showChoice(cmd *cobra.Command, term handoffTerminal, choice st
 			return
 		}
 
-		term.note("Saved everything to " + h.saved + " (plain text, readable only by you): every value, the transfer bundle and its passphrase.")
+		term.note("Saved the full record to " + h.saved + " (plain text, including the encrypted file and its passphrase).")
 	}
 }
 
@@ -283,7 +297,7 @@ func (h handoff) record() string {
 	}
 
 	b.WriteString("\n## Transfer bundle\n")
-	b.WriteString("On another machine run vaire login and paste this block.\n")
+	b.WriteString("To recover owner access, run vaire recover and paste this block.\n")
 	b.WriteString("Passphrase: " + h.passphrase + "\n")
 	b.Write(h.bundle)
 

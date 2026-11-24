@@ -145,7 +145,7 @@ func newRestoreRun(cmd *cobra.Command) (*initRun, *restoreRun, *workspaces.Backu
 
 	c, err := workspaces.Resolve(name)
 	if err != nil {
-		return nil, nil, nil, withHint(err, "server init --restore rebuilds the server of an existing workspace. With only the secrets document, run vaire login first.")
+		return nil, nil, nil, withHint(err, "server init --restore rebuilds the server of an existing workspace.")
 	}
 
 	r := &initRun{cmd: cmd, p: newProgress(cmd), name: c.Name}

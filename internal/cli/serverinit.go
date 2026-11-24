@@ -56,12 +56,12 @@ const (
 	revertGrace     = 15 * time.Second
 )
 
-// machineOperatorPrefix marks the operator identity generated for a fresh
+// machineDevicePrefix marks the device label generated for a fresh
 // init. The suffix is lowercase Crockford base32: digits and letters without
 // i, l, o or u, so it stays readable when copied by hand.
-const machineOperatorPrefix = "machine-"
+const machineDevicePrefix = "machine-"
 
-const machineOperatorAlphabet = "0123456789abcdefghjkmnpqrstvwxyz"
+const machineDeviceAlphabet = "0123456789abcdefghjkmnpqrstvwxyz"
 
 // tlsWaitTimeout bounds the wait for a real certificate (D10).
 const tlsWaitTimeout = 120 * time.Second
@@ -719,22 +719,22 @@ func (r *initRun) mark(phase string) error {
 	return workspaces.SaveProgress(r.name, r.prog)
 }
 
-// newMachineOperatorName returns a fresh init's immutable operator identity:
+// newMachineDeviceLabel returns a fresh init's device label:
 // machine- and 12 characters (60 bits) from crypto/rand. The name is written
-// to the pending secrets before first contact, so resume and restore keep it.
-func newMachineOperatorName() (string, error) {
+// to the pending secrets before first contact, so resume keeps it.
+func newMachineDeviceLabel() (string, error) {
 	var raw [12]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		return "", fmt.Errorf("generate operator name: %w", err)
+		return "", fmt.Errorf("generate device label: %w", err)
 	}
 
 	// 256 is a multiple of the 32-character alphabet, so the low five bits of
 	// each random byte are unbiased.
-	name := make([]byte, 0, len(machineOperatorPrefix)+len(raw))
-	name = append(name, machineOperatorPrefix...)
+	name := make([]byte, 0, len(machineDevicePrefix)+len(raw))
+	name = append(name, machineDevicePrefix...)
 
 	for _, b := range raw {
-		name = append(name, machineOperatorAlphabet[b&0x1f])
+		name = append(name, machineDeviceAlphabet[b&0x1f])
 	}
 
 	return string(name), nil
@@ -748,7 +748,7 @@ func (r *initRun) generateSecrets() error {
 
 	r.p.phase("init.secrets", "started", "generate the operator WireGuard and SSH keys")
 
-	operatorName, err := newMachineOperatorName()
+	deviceLabel, err := newMachineDeviceLabel()
 	if err != nil {
 		return err
 	}
@@ -758,7 +758,7 @@ func (r *initRun) generateSecrets() error {
 		return err
 	}
 
-	sshPriv, _, err := transport.GenerateSSHKey("vaire-" + r.name + "-" + operatorName)
+	sshPriv, _, err := transport.GenerateSSHKey("vaire-" + r.name + "-" + r.name)
 	if err != nil {
 		return err
 	}
@@ -769,10 +769,11 @@ func (r *initRun) generateSecrets() error {
 	}
 
 	r.sec = workspaces.PendingSecrets{
-		OperatorName:  operatorName,
-		WGPrivateKey:  wgPriv,
-		SSHPrivateKey: string(sshPriv),
-		SudoPassword:  sudo,
+		OperatorName:     r.name,
+		SetupDeviceLabel: deviceLabel,
+		WGPrivateKey:     wgPriv,
+		SSHPrivateKey:    string(sshPriv),
+		SudoPassword:     sudo,
 	}
 	registerPending(r.sec)
 
@@ -1186,7 +1187,7 @@ func (r *initRun) initInstallWorkspace(setup rpc.AccessSetup, keys enrollmentKey
 		fmt.Sprintf("Server %s is ready. Node %s (%s) runs PostgreSQL 18 behind PgBouncer at %s:6432.", r.name, n.Name, n.PublicAddress, r.cfg.MasterHostname()),
 		"TLS: " + r.tlsSummary() + r.healthSuffix(),
 		"No application databases yet: create one with vaire db create <name>, or point your agent to the CLI (vaire guide agents).",
-		"Workspace " + r.name + " is the current workspace on this machine. Keep the transfer bundle for recovery.",
+		"Workspace " + r.name + " is current on this machine. Keep the owner recovery kit and passphrase.",
 	}, "\n")
 	r.warnings = append(r.warnings, node.NoOffsiteWarning(r.cfg)...)
 
@@ -1207,7 +1208,7 @@ func (r *initRun) finish(res initResult, message string, next []string, title st
 		{"Node", fmt.Sprintf("%s  %s  (WireGuard %s)", n.Name, n.PublicAddress, n.WGAddress)},
 		{"PgBouncer", r.cfg.MasterHostname() + ":6432"},
 		{"TLS", r.tlsSummary()},
-		{"Secrets", "in your password manager (transfer bundle: vaire login on another machine)"},
+		{"Recovery kit", "save the encrypted kit and passphrase for vaire recover if you lose access"},
 		{"Databases", "none yet: create one with vaire db create <name>, or point your agent to the CLI (vaire guide agents)"},
 		{"Backups", r.backupSummary()},
 	}

@@ -202,6 +202,15 @@ func roundTripWithin(ctx context.Context, socket string, req sharedRequest, budg
 	raw, _ := json.Marshal(req)
 	if _, err := conn.Write(append(raw, '\n')); err != nil {
 		_ = conn.Close()
+
+		if ctx.Err() != nil {
+			return nil, sharedReply{}, ctx.Err()
+		}
+
+		if dl, ok := ctx.Deadline(); ok && !time.Now().Before(dl) {
+			return nil, sharedReply{}, context.DeadlineExceeded
+		}
+
 		return nil, sharedReply{}, err
 	}
 
@@ -211,6 +220,10 @@ func roundTripWithin(ctx context.Context, socket string, req sharedRequest, budg
 
 		if ctx.Err() != nil {
 			return nil, sharedReply{}, ctx.Err()
+		}
+		// The socket deadline and the context timer can fire in either order.
+		if dl, ok := ctx.Deadline(); ok && !time.Now().Before(dl) {
+			return nil, sharedReply{}, context.DeadlineExceeded
 		}
 
 		return nil, sharedReply{}, fmt.Errorf("%w: %w", ErrDaemonNoAnswer, err)

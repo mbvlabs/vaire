@@ -54,7 +54,8 @@ func TestBootstrapOwnerPersistsKeysBeforeRPCAndResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if keys.SSH == "" || keys.WG == "" || saved.OwnerSSHPrivateKey != keys.SSH || saved.OwnerWGPrivateKey != keys.WG {
+	if keys.SSH == "" || keys.WG == "" || !machineOperatorNamePattern.MatchString(saved.SetupDeviceLabel) ||
+		saved.OwnerSSHPrivateKey != keys.SSH || saved.OwnerWGPrivateKey != keys.WG || caller.requests[0].Label != saved.SetupDeviceLabel {
 		t.Fatal("owner keys not persisted before RPC")
 	}
 
@@ -76,7 +77,7 @@ func TestOwnerSetupChecksNodePins(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &initRun{name: "prod", sec: workspaces.PendingSecrets{OperatorName: "owner"},
+	r := &initRun{name: "prod", sec: workspaces.PendingSecrets{OperatorName: "owner", SetupDeviceLabel: "setup-device"},
 		cfg:  config.Cluster{Nodes: []config.NodeSpec{{Name: "db", Role: "master", PublicAddress: "192.0.2.1", WGAddress: "10.0.0.1"}}, Transport: config.Transport{ListenPort: 51820}},
 		prog: &workspaces.Progress{WGPublicKey: "node-key", SSHHostKeys: []string{host}}}
 
@@ -86,7 +87,14 @@ func TestOwnerSetupChecksNodePins(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	s.Label = "another-device"
+	if err := r.validateOwnerSetup(s); err == nil {
+		t.Fatal("accepted changed device label")
+	}
+
+	s.Label = "setup-device"
 	s.NodePublicAddress = "192.0.2.2"
+
 	if err := r.validateOwnerSetup(s); err == nil {
 		t.Fatal("accepted changed endpoint")
 	}

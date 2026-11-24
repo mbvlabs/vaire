@@ -125,7 +125,7 @@ func revokeDevice(cmd *cobra.Command, p *progress, node remote.Caller, user, lab
 		return output.NewError(output.CodeError, "node returned an invalid device confirmation target", output.ExitGeneric, "")
 	}
 
-	if err := Confirm(cmd, device.ID); err != nil {
+	if err := confirmDeviceRevoke(cmd, device); err != nil {
 		return err
 	}
 
@@ -143,4 +143,21 @@ func revokeDevice(cmd *cobra.Command, p *progress, node remote.Caller, user, lab
 	device.SetupCode = ""
 
 	return output.Success(cmd, output.Result{Data: device, Message: fmt.Sprintf("Revoked %s (%s).", device.Label, device.User), Warnings: append(warnings, reply.Warnings...)})
+}
+
+func confirmDeviceRevoke(cmd *cobra.Command, device rpc.Device) error {
+	if len(confirmTokens(cmd)) != 0 || MustNotPrompt(cmd) || flagTrue(cmd, "yes") {
+		return Confirm(cmd, device.ID)
+	}
+
+	ok, err := PromptYes(cmd, fmt.Sprintf("Revoke device %s for %s?", device.Label, device.User))
+	if err != nil {
+		return err
+	}
+
+	if !ok {
+		return output.NewError(output.CodeUnsafeAction, "device revocation cancelled", output.ExitUnsafe, "")
+	}
+
+	return nil
 }

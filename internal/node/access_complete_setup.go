@@ -38,7 +38,8 @@ func handleCompleteSetupAccess(ctx context.Context, env *Env) (Result, error) {
 	id := env.DeviceIdentity
 
 	index := accessOperator(r, id.Operator)
-	if id.Device != setupDeviceLabel || index < 0 || r.Operators[index].ID != id.OperatorID || !r.Operators[index].BootstrapOwner {
+	if index < 0 || r.Operators[index].ID != id.OperatorID || !r.Operators[index].BootstrapOwner ||
+		!isOriginalSetupDevice(r, id.DeviceID, id.OperatorID, id.Device) {
 		return Result{}, deviceAccessDenied()
 	}
 
@@ -57,6 +58,14 @@ func handleCompleteSetupAccess(ctx context.Context, env *Env) (Result, error) {
 	}
 
 	return Result{}, steps.RefreshAccessPoolerHBA(ctx, env.Cluster, runtimeFor(env, false))
+}
+
+func isOriginalSetupDevice(r config.AccessRegistry, deviceID, operatorID, label string) bool {
+	return slices.ContainsFunc(r.Devices, func(d config.AccessDevice) bool {
+		return d.ID == deviceID && d.OperatorID == operatorID && d.Label == label &&
+			d.State == config.DeviceActive && d.TemporaryAddress == "" &&
+			d.RequestDigest == bootstrapDeviceDigest(d.SSHPublicKey, d.WGPublicKey)
+	})
 }
 
 func retireBootstrapOperator(ctx context.Context, env *Env, n config.NodeSpec, name string) error {

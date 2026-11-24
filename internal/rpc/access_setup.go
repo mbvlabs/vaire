@@ -47,6 +47,7 @@ type AccessRedeemParams struct {
 
 type AccessBootstrapOwnerParams struct {
 	User         string `json:"user"`
+	Label        string `json:"label"`
 	SSHPublicKey string `json:"ssh_public_key"`
 	WGPublicKey  string `json:"wg_public_key"`
 }

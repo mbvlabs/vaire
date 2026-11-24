@@ -236,7 +236,7 @@ func recoveryIdentity(name string) (*workspaces.BackupCreds, string, error) {
 
 	if creds.Backup == nil || creds.Backup.Encryption.Identity == "" {
 		return creds.Backup, "", output.NewError(output.CodeInputRequired, "this workspace's recovery kit has no age identity", output.ExitInput,
-			"Master bundles open with the recovery identity. vaire login with a current secrets document (vaire secrets export).").
+			"Master bundles open with the backup recovery identity. Use an owner workspace that holds it.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
 

@@ -121,6 +121,10 @@ func newRecoveryRequest(operator string) (rpc.AccessRecoveryIssueParams, error) 
 func (r *initRun) bootstrapOwner(ctx context.Context, caller remote.Caller) (rpc.AccessSetup, enrollmentKeys, error) {
 	var setup rpc.AccessSetup
 
+	if err := r.ensureSetupDeviceLabel(); err != nil {
+		return setup, enrollmentKeys{}, err
+	}
+
 	if r.sec.OwnerSSHPrivateKey == "" && r.sec.OwnerWGPrivateKey == "" {
 		wg, _, err := transport.GenerateWGKey()
 		if err != nil {
@@ -153,7 +157,7 @@ func (r *initRun) bootstrapOwner(ctx context.Context, caller remote.Caller) (rpc
 	}
 
 	reply, err := r.p.call(ctx, caller, "access.bootstrap-owner", rpc.AccessBootstrapOwnerParams{
-		User: r.sec.OperatorName, SSHPublicKey: sshPub, WGPublicKey: wgPub,
+		User: r.sec.OperatorName, Label: r.sec.SetupDeviceLabel, SSHPublicKey: sshPub, WGPublicKey: wgPub,
 	}, remote.CallOptions{OperationID: r.prog.SetupOperationID, OnEvent: r.p.event})
 	if err != nil {
 		return setup, keys, err
@@ -177,11 +181,31 @@ func (r *initRun) bootstrapOwner(ctx context.Context, caller remote.Caller) (rpc
 	return setup, keys, nil
 }
 
+func (r *initRun) ensureSetupDeviceLabel() error {
+	if r.sec.SetupDeviceLabel != "" {
+		return nil
+	}
+
+	// Older pending inits may already have sent the fixed label with these keys.
+	if r.sec.OwnerSSHPrivateKey != "" || r.sec.OwnerWGPrivateKey != "" {
+		r.sec.SetupDeviceLabel = "setup-device"
+	} else {
+		label, err := newMachineDeviceLabel()
+		if err != nil {
+			return err
+		}
+
+		r.sec.SetupDeviceLabel = label
+	}
+
+	return workspaces.SaveSecrets(r.name, r.sec)
+}
+
 // The bootstrap connection is already pinned; do not let a malformed reply
 // redirect verification to another endpoint or host key.
 func (r *initRun) validateOwnerSetup(s rpc.AccessSetup) error {
 	n := r.master()
-	if s.ID == "" || s.Label != "setup-device" || s.UnixLogin == "" || s.Address == "" ||
+	if s.ID == "" || s.Label != r.sec.SetupDeviceLabel || s.UnixLogin == "" || s.Address == "" ||
 		s.Server != r.name || s.Node != n.Name || s.User != r.sec.OperatorName ||
 		s.Domain != r.cfg.Domain || s.TLSMode != r.cfg.TLS.Mode ||
 		s.NodeAddress != n.WGAddress || s.NodePublicAddress != n.PublicAddress ||

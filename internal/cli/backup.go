@@ -310,7 +310,7 @@ func prepareKit(kit *workspaces.BackupCreds, s backupSettings, wasConfigured boo
 		return nil, false, output.NewError(output.CodeInputRequired,
 			"backups are on, but this machine's workspace has no recovery kit for "+s.Bucket+"/"+s.Prefix,
 			output.ExitInput,
-			"vaire never makes a new cipher for an existing repository. Log in from a current transfer bundle (vaire login), then retry.").
+			"vaire never makes a new cipher for an existing repository. Retry from an owner workspace with the backup credentials.").
 			WithDetails(map[string]any{"reason": "recovery_kit_missing"})
 	}
 
