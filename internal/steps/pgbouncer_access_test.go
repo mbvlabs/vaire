@@ -157,4 +157,37 @@ func TestRefreshAccessPoolerHBA(t *testing.T) {
 	if err := RefreshAccessPoolerHBA(context.Background(), cfg, rt); err != nil || len(written) != 0 || len(reloaded) != 0 {
 		t.Fatalf("uninstalled poolers: error %v, writes %v reloads %v", err, written, reloaded)
 	}
+
+	checkAwaitingPoolerHBA(t, cfg, rt)
+}
+
+func checkAwaitingPoolerHBA(t *testing.T, cfg config.Cluster, rt engine.Runtime) {
+	t.Helper()
+
+	if err := backup.UpdateRecords(func(r *backup.Records) error {
+		r.AwaitingRecovery = map[string]backup.Awaiting{"sample": {Stanza: "sample"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	poolerServiceState = func(context.Context, string) (string, error) { return "active", nil }
+
+	// Stock or stale transaction ini. Without a session unit this is a
+	// fresh restore; once a managed pooler exists the stale ini must fail.
+	if err := os.WriteFile(poolerFilePaths.ini, []byte("stock"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RefreshAccessPoolerHBA(context.Background(), cfg, rt); err != nil {
+		t.Fatalf("awaiting-only restore must leave poolers alone: %v", err)
+	}
+
+	if err := os.WriteFile(poolerFilePaths.sessionUnit, []byte("managed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RefreshAccessPoolerHBA(context.Background(), cfg, rt); err == nil {
+		t.Fatal("awaiting-only node with managed poolers did not reject stale ini")
+	}
 }

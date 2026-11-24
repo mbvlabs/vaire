@@ -725,12 +725,17 @@ func refreshAccessPoolerHBAGuarded(ctx context.Context, cfg config.Cluster, rt e
 		return err
 	}
 
+	view := cfg.RoutingView(recs.IsAwaiting, "")
+	if accessPoolersNotConfigured(view, recs) {
+		return nil
+	}
+
 	operators, err := poolerOperators(cfg)
 	if err != nil {
 		return err
 	}
 
-	files := pgbouncerFilesFrom(cfg.RoutingView(recs.IsAwaiting, ""), rt, recs, operators)
+	files := pgbouncerFilesFrom(view, rt, recs, operators)
 	units := []string{PgbouncerService, SessionPoolerService}
 	ini := []pgbouncerFile{files[0], files[2]}
 	hba := []pgbouncerFile{files[1], files[3]}
@@ -763,6 +768,22 @@ func refreshAccessPoolerHBAGuarded(ctx context.Context, cfg config.Cluster, rt e
 	}
 
 	return nil
+}
+
+func accessPoolersNotConfigured(view config.Cluster, recs backup.Records) bool {
+	if len(view.Clusters) != 0 {
+		return false
+	}
+
+	if _, _, inspect := recoverInspectionSource(view, recs); inspect {
+		return false
+	}
+
+	// A fresh restore can have only awaiting databases and no managed
+	// session pooler. The first database recovery installs both HBAs.
+	_, err := os.Lstat(poolerFilePaths.sessionUnit)
+
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func accessPoolerPreflight(ctx context.Context, unit string, ini pgbouncerFile) (present, active bool, err error) {
