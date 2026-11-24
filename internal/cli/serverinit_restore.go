@@ -686,7 +686,7 @@ func (rr *restoreRun) place(ctx context.Context, r *initRun, n *remote.Node) ([]
 		"node_name":    r.master().Name,
 		"instance_id":  rr.state.InstanceID,
 		"epoch":        epoch,
-	}, remote.CallOptions{Secrets: map[string]string{steps.SecretMasterBundle: encoded}, Confirm: r.name + "/replace", OnEvent: r.p.event})
+	}, remote.CallOptions{Secrets: map[string]string{steps.SecretMasterBundle: encoded}, Confirm: r.name + "/replace", OperationID: r.prog.SetupOperationID, OnEvent: r.p.event})
 	if err != nil {
 		return nil, err
 	}

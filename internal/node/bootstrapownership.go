@@ -85,9 +85,13 @@ func bootstrapDir(create bool) error {
 }
 
 func bootstrapReadOwnership() (bootstrapOwnership, error) {
+	return readBootstrapOwnership(bootstrapManifestName)
+}
+
+func readBootstrapOwnership(filename string) (bootstrapOwnership, error) {
 	var owner bootstrapOwnership
 
-	path := filepath.Join(bootstrapStateDir, bootstrapManifestName)
+	path := filepath.Join(bootstrapStateDir, filename)
 
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {

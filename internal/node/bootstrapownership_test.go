@@ -46,6 +46,39 @@ func bootstrapOwnershipFixture(t *testing.T) config.Cluster {
 	return cfg
 }
 
+func TestRestoreAccessBindsOriginalOperationWithoutDatabaseOwnership(t *testing.T) {
+	cfg := bootstrapOwnershipFixture(t)
+	cfg.Nodes = []config.NodeSpec{{Name: "db1", Role: config.RoleMaster}}
+
+	if err := claimRestoreAccess(cfg, "db1", "original", "restored"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := claimRestoreAccess(cfg, "db1", "original", "restored"); err != nil {
+		t.Fatalf("same restore cannot retry: %v", err)
+	}
+
+	if err := claimRestoreAccess(cfg, "db1", "different", "restored"); err == nil {
+		t.Fatal("another operation claimed the restore")
+	}
+
+	if _, err := bootstrapReadOwnership(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restore created fresh database ownership: %v", err)
+	}
+
+	if err := bootstrapWriteNew(filepath.Join(bootstrapStateDir, "instance"), []byte("restored\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := authorizeBootstrapOperation(cfg.Name(), "db1", "original"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := authorizeBootstrapOperation(cfg.Name(), "db1", "different"); err == nil {
+		t.Fatal("foreign operation got access")
+	}
+}
+
 func TestCompletedServerBootstrapRPCDoesNotAcquireAccessAuthority(t *testing.T) {
 	_ = bootstrapOwnershipFixture(t)
 	cfg := copyTestConfig(t)

@@ -132,6 +132,14 @@ func bootstrapRestore(ctx context.Context, env *Env, p bootstrapParams) (Result,
 
 	res := RestorePlaced{Phase: PhaseRestore, Pruned: pruned}
 
+	if err := claimRestoreAccess(cfg, p.NodeName, env.Req.OperationID, p.InstanceID); err != nil {
+		return Result{}, fmt.Errorf("bind restore to setup operation: %w", err)
+	}
+
+	if err := placeInstance(p.InstanceID, p.Epoch); err != nil {
+		return Result{}, err
+	}
+
 	for _, f := range files {
 		if err := placeFile(f); err != nil {
 			return Result{}, fmt.Errorf("place %s: %w", f.Path, err)
@@ -141,10 +149,6 @@ func bootstrapRestore(ctx context.Context, env *Env, p bootstrapParams) (Result,
 		if strings.HasPrefix(f.Path, "/etc/ssh/") && strings.HasSuffix(f.Path, ".pub") {
 			res.SSHHostKeys = append(res.SSHHostKeys, strings.TrimSpace(string(f.Data)))
 		}
-	}
-
-	if err := placeInstance(p.InstanceID, p.Epoch); err != nil {
-		return Result{}, err
 	}
 
 	for _, c := range cfg.Clusters {

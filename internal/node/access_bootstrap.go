@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"os"
 	"slices"
 	"strings"
 
@@ -87,6 +89,10 @@ func authorizeBootstrapOperation(server, node, operation string) error {
 	}
 
 	owner, err := bootstrapReadOwnership()
+	if errors.Is(err, os.ErrNotExist) {
+		owner, err = readBootstrapOwnership(restoreAccessManifest)
+	}
+
 	if err != nil || owner.Operation != operation || owner.Server != server || owner.Node != node {
 		return deviceAccessDenied()
 	}
