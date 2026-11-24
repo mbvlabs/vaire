@@ -28,7 +28,7 @@ const (
 
 // Device logins are also validated by the access registry. Validate again at
 // this boundary because these values are interpolated into host configuration.
-var deviceHostLoginPattern = regexp.MustCompile(`^vdev-[a-z0-9][a-z0-9_-]{0,25}$`)
+var deviceHostLoginPattern = regexp.MustCompile(`^(vdev|vshl)-[a-z0-9][a-z0-9_-]{0,25}$`)
 
 type deviceHostSSHConfig struct {
 	AuthorizedKey string
@@ -286,6 +286,76 @@ func installDeviceSSHKey(ctx context.Context, login, address, publicKey string) 
 	return writeDeviceSSHKey(ctx, login, rendered.AuthorizedKey)
 }
 
+// installAdminShell grants a separate account only to an active admin device.
+// Its key is source-bound to the permanent WireGuard address.
+func installAdminShell(ctx context.Context, d config.AccessDevice) error {
+	registry, err := loadDeviceRegistry(deviceRegistryPath)
+	if err != nil {
+		return err
+	}
+
+	if !adminShellEligible(registry, d) {
+		return deviceAccessDenied()
+	}
+
+	login := config.HostLogin(d.UnixLogin)
+	if login == "" {
+		return deviceAccessDenied()
+	}
+
+	key, err := renderAdminShellKey(d.Address, d.SSHPublicKey)
+	if err != nil {
+		return err
+	}
+
+	if _, err := prepareDeviceSSH(ctx, login); err != nil {
+		return err
+	}
+
+	if err := validateDeviceSSHD(ctx, login, d.Address); err != nil {
+		return err
+	}
+
+	return writeDeviceSSHKey(ctx, login, key)
+}
+
+func renderAdminShellKey(address, publicKey string) (string, error) {
+	addr, err := netip.ParseAddr(address)
+	if err != nil || !addr.Is4() || addr.IsUnspecified() || addr.IsMulticast() || addr.String() != address {
+		return "", fmt.Errorf("invalid admin shell address")
+	}
+
+	if err := config.ValidateBareSSHEd25519PublicKey(publicKey); err != nil {
+		return "", err
+	}
+
+	return `restrict,pty,from="` + address + `/32" ` + publicKey + "\n", nil
+}
+
+func adminShellEligible(r config.AccessRegistry, d config.AccessDevice) bool {
+	if d.State != config.DeviceActive || d.UnixUID == "" || config.HostLogin(d.UnixLogin) == "" {
+		return false
+	}
+
+	found := false
+
+	for _, saved := range r.Devices {
+		if saved.ID == d.ID && saved.OperatorID == d.OperatorID && saved.State == config.DeviceActive &&
+			saved.UnixUID == d.UnixUID && saved.UnixLogin == d.UnixLogin &&
+			saved.Address == d.Address && saved.SSHPublicKey == d.SSHPublicKey {
+			found = true
+		}
+	}
+
+	for _, op := range r.Operators {
+		if found && op.ID == d.OperatorID && !op.Revoked && op.Role == config.AccessRoleOwner {
+			return true
+		}
+	}
+
+	return false
+}
+
 func writeDeviceSSHKey(ctx context.Context, login, key string) error {
 	// Only root can replace entries in this directory. Atomic rename ensures
 	// sshd never observes a partially written key.
@@ -352,6 +422,10 @@ func removeDeviceSSHKey(_ context.Context, login string) error {
 }
 
 func renderDeviceSudo(login string) string {
+	if strings.HasPrefix(login, "vshl-") {
+		return "# managed by vaire\n" + login + " ALL=(ALL) NOPASSWD: ALL\n"
+	}
+
 	return "# managed by vaire\n" + login + " ALL=(root) NOPASSWD: /usr/local/bin/vaire node rpc\n"
 }
 
@@ -368,6 +442,15 @@ func checkDeviceSSHBinding(registry config.AccessRegistry, login, uid, address, 
 }
 
 func renderDeviceSSHD(login string) string {
+	if strings.HasPrefix(login, "vshl-") {
+		return "# managed by vaire\nMatch User " + login + "\n    AllowUsers " + login + "\n" +
+			"    AuthorizedKeysFile " + deviceKeyPath(login) + "\n" +
+			"    AuthorizedKeysCommand none\n    TrustedUserCAKeys none\n" +
+			"    ForceCommand none\n    AuthenticationMethods publickey\n    PubkeyAuthentication yes\n" +
+			"    PasswordAuthentication no\n    KbdInteractiveAuthentication no\n" +
+			"    PermitTTY yes\n    PermitUserRC no\n    DisableForwarding yes\nMatch all\n"
+	}
+
 	return "# managed by vaire\nMatch User " + login + "\n    AllowUsers " + login + "\n" +
 		"    AuthorizedKeysFile " + deviceKeyPath(login) + "\n" +
 		"    AuthorizedKeysCommand none\n    TrustedUserCAKeys none\n" +
@@ -688,14 +771,22 @@ func validateDeviceSSHD(ctx context.Context, login, address string) error {
 
 func checkDeviceSSHD(effective, login string) error {
 	lines := "\n" + effective
-	for _, expected := range []string{
+
+	expectedLines := []string{
 		"authorizedkeysfile " + deviceKeyPath(login), "authorizedkeyscommand none",
-		"trustedusercakeys none", "forcecommand /usr/local/bin/vaire node access-ssh",
+		"trustedusercakeys none",
 		"authenticationmethods publickey", "pubkeyauthentication yes", "passwordauthentication no",
-		"kbdinteractiveauthentication no", "permittty no", "permituserrc no",
+		"kbdinteractiveauthentication no", "permituserrc no",
 		"permituserenvironment no", "disableforwarding yes",
 		"usepam yes", "usedns no", "allowusers " + login,
-	} {
+	}
+	if strings.HasPrefix(login, "vshl-") {
+		expectedLines = append(expectedLines, "forcecommand none", "permittty yes")
+	} else {
+		expectedLines = append(expectedLines, "forcecommand /usr/local/bin/vaire node access-ssh", "permittty no")
+	}
+
+	for _, expected := range expectedLines {
 		if !strings.Contains(lines, "\n"+expected+"\n") {
 			return fmt.Errorf("sshd effective configuration does not contain %q", expected)
 		}

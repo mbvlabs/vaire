@@ -61,6 +61,13 @@ func (d Document) Groups() []Group {
 		Field{"WireGuard private key", d.Operator.WGPrivateKey},
 		Field{"SSH private key", d.Operator.SSHPrivateKey},
 	)})
+	if d.Console != nil {
+		groups = append(groups, Group{Title: "Provider console (break-glass only)", Fields: nonEmpty(
+			Field{"Username", d.Console.Username},
+			Field{"Password", d.Console.Password},
+		)})
+	}
+
 	if db := d.Database; db != nil {
 		groups = append(groups, Group{Title: "Admin (all databases)", Fields: roleFields("", db.Admin)})
 		if len(db.Services) > 0 {

@@ -131,9 +131,10 @@ func TestOwnerInstallResumeAndRecoverySeparation(t *testing.T) {
 
 	keys := enrollmentKeys{SSH: string(ownerSSH), WG: ownerWG}
 	r := &initRun{name: "prod", sec: workspaces.PendingSecrets{OperatorName: "owner", SSHPrivateKey: string(legacySSH),
-		WGPrivateKey: "legacy-wg", OwnerSSHPrivateKey: keys.SSH, OwnerWGPrivateKey: keys.WG, RecoveryCode: "recovery-code"},
+		WGPrivateKey: "legacy-wg", OwnerSSHPrivateKey: keys.SSH, OwnerWGPrivateKey: keys.WG, RecoveryCode: "recovery-code", SudoPassword: "test-console-password"},
 		cfg:  config.Cluster{Nodes: []config.NodeSpec{{Name: "db", Role: "master", PublicAddress: "192.0.2.1", WGAddress: "10.0.0.1"}}},
 		prog: &workspaces.Progress{WGPublicKey: "node-key", SSHHostKeys: []string{host}}}
+	r.cfg.Server.AdminUser = "chosen-admin"
 
 	doc, err := r.document()
 	if err != nil {
@@ -142,6 +143,10 @@ func TestOwnerInstallResumeAndRecoverySeparation(t *testing.T) {
 
 	if doc.RecoveryCode != "recovery-code" || doc.Operator.SSHPrivateKey != "" || doc.Operator.WGPrivateKey != "" || doc.Operator.SudoPassword != "" {
 		t.Fatal("handoff must contain the recovery code but no reusable login")
+	}
+
+	if doc.Console == nil || doc.Console.Username != "chosen-admin" || doc.Console.Password != "test-console-password" {
+		t.Fatal("handoff must contain the selected console account credentials")
 	}
 
 	s := rpc.AccessSetup{ID: "device", Server: "prod", Node: "db", User: "owner", UnixLogin: "device-user",

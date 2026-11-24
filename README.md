@@ -120,17 +120,20 @@ vaire console app                # interactive usql session
 vaire console app --write        # run DDL as the database owner
 ```
 
-Setup enrolls the machine running `vaire server init` as the first verified owner
+Setup enrolls the machine running `vaire server init` as the first verified admin
 device. To add someone, run `vaire user add alice` and
 `vaire device add alice laptop`. On the other machine, run `vaire login` and
-paste the one-time setup code. Each device keeps its own keys.
+paste the one-time setup code. Each device keeps its own keys. New users are
+members by default. Use `vaire user add alice --role admin` only for someone
+you trust with full VPS access. Admins can run `vaire ssh` over WireGuard
+and use `sudo` with their own enrolled device key. Members cannot open a host shell.
 
 To use another signed-in identity for the same workspace on this machine, run
 `vaire workspace operator list` and `vaire workspace operator use alice`.
 The workspace name does not change.
 
 Keep the encrypted recovery kit and its passphrase somewhere you can reach
-without your owner device. It is for recovering access, not adding users.
+without your admin device. It is for recovering access, not adding users.
 
 ## Cloudflare setup
 
@@ -361,16 +364,15 @@ the rebuild uses the kit's backup credentials, not that code.
   - every secret in plain text, grouped for a password manager;
   - an ASCII-armored `age` transfer bundle (scrypt), with a generated passphrase.
 - You type `stored` to confirm you've saved it, and vaire offers to clear the screen. Nothing is written to disk unless you ask with `--secrets-out`.
-- If you lose owner access, use `vaire recover` with the encrypted kit and its passphrase. It enrolls a verified owner device with new keys and consumes the recovery code. Run `vaire secrets export` from the recovered workspace to make a replacement kit.
+- The setup handoff includes the chosen host admin username and generated password for the provider console. That password is not an SSH credential.
+- If you lose admin access, use `vaire recover` with the encrypted kit and its passphrase. It enrolls a verified admin device with new keys and consumes the recovery code. Run `vaire secrets export` from the recovered workspace to make a replacement kit.
 - Exporting a recovery kit requires a master password or authenticator code. Set either with `vaire auth setup`. This protects the export command, not the workspace files at rest.
 - Releases are signed with cosign. The node updater accepts only forward, signed tagged releases from Vaire’s release service. It never installs a binary or accepts a download URL supplied by the operator.
 
 ### Approving public access
 
-Use a fresh host with a dedicated Vaire operator account. Do not give that
-account general sudo, membership in privileged groups, or access to provider
-credentials. The approval guard does not constrain a host administrator.
-Do not use `beta.2` to retrofit this boundary onto a `beta.1` node.
+Use the member role for people and automation that do not need host access.
+Vaire approval checks do not constrain a host administrator with sudo.
 
 Run `vaire auth setup` on your workstation and select **Master password** or
 **Your authenticator code (TOTP)**. The master password is shared by the server.
@@ -379,7 +381,7 @@ your verified devices. Another operator can't use your code to approve their
 requests. Revoking one device doesn't reset the authenticator, and `vaire recover`
 doesn't reset it either.
 
-Verified owners can enroll their first authenticator without the master password,
+Verified admins can enroll their first authenticator without the master password,
 even if the server has one.
 
 The master password set during `server init` is already registered on the

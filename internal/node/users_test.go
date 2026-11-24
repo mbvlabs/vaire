@@ -49,11 +49,11 @@ func TestUserManagement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := add("bob", "owner", false); err != nil {
+	if err := add("bob", "admin", false); err != nil {
 		t.Fatal(err)
 	}
 
-	for _, p := range [][2]string{{"alice", "owner"}, {"Bad Name", "member"}, {"charlie", "admin"}} {
+	for _, p := range [][2]string{{"alice", "admin"}, {"Bad Name", "member"}, {"charlie", "owner"}} {
 		if err := add(p[0], p[1], false); err == nil {
 			t.Fatalf("accepted invalid or duplicate user %v", p)
 		}
@@ -70,7 +70,7 @@ func TestUserManagement(t *testing.T) {
 	}
 
 	users := reply.Users
-	if len(users) != 2 || users[0].Name != "alice" || users[0].Role != "member" || users[1].Role != "owner" || users[0].Status != "active" {
+	if len(users) != 2 || users[0].Name != "alice" || users[0].Role != "member" || users[1].Role != "admin" || users[0].Status != "active" {
 		t.Fatalf("users: %+v", users)
 	}
 
@@ -84,14 +84,14 @@ func TestUserManagement(t *testing.T) {
 		t.Fatal("non-admin listed users")
 	}
 
-	if err := add("mallory", "owner", false); err == nil {
+	if err := add("mallory", "admin", false); err == nil {
 		t.Fatal("non-admin added user")
 	}
 
 	env.Cluster.Server.AdminUser = account.Username
 	env.DeviceIdentity = &rpc.WhoamiReply{Role: config.AccessRoleOwner}
 
-	if err := add("mallory", "owner", false); err == nil {
+	if err := add("mallory", "admin", false); err == nil {
 		t.Fatal("unbound device owner authorized")
 	}
 

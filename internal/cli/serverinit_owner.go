@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/secrets"
@@ -84,7 +85,7 @@ func (r *initRun) issueRecovery(ctx context.Context, caller remote.Caller) error
 		return err
 	}
 
-	if setup.Mode != rpc.AccessSetupRecovery || setup.Role != "owner" || setup.User != r.sec.OperatorName ||
+	if setup.Mode != rpc.AccessSetupRecovery || setup.Role != config.AccessRoleOwner || setup.User != r.sec.OperatorName ||
 		setup.Server != r.name || setup.Node != r.master().Name || setup.Token != r.sec.RecoveryToken ||
 		setup.TemporaryPrivateKey != r.sec.RecoveryWGKey || setup.NodeWGPublicKey != r.prog.WGPublicKey {
 		return fmt.Errorf("node returned a mismatched recovery code")

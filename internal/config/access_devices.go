@@ -20,7 +20,7 @@ import (
 const AccessDevicesPath = "/etc/vaire/access-devices.toml"
 
 const (
-	AccessRoleOwner  = "owner"
+	AccessRoleOwner  = "admin"
 	AccessRoleMember = "member"
 
 	DevicePending = "pending"

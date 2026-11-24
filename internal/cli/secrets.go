@@ -7,6 +7,7 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/buildinfo"
 	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/secrets"
@@ -136,7 +137,7 @@ func secretsExportDocument(cmd *cobra.Command, c *workspaces.Workspace) (secrets
 		return doc, err
 	}
 
-	if setup.Mode != rpc.AccessSetupRecovery || setup.Role != "owner" || setup.Server != c.Server ||
+	if setup.Mode != rpc.AccessSetupRecovery || setup.Role != config.AccessRoleOwner || setup.Server != c.Server ||
 		setup.User != c.Operator.Name || setup.Token != params.Token || setup.TemporaryPrivateKey != params.TemporaryPrivateKey {
 		return doc, fmt.Errorf("node returned a mismatched recovery code")
 	}

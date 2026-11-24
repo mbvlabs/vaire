@@ -539,11 +539,7 @@ func reconcileAccessDevice(ctx context.Context, cfg config.Cluster, r config.Acc
 	}
 
 	if d.UnixUID != "" && d.State == config.DeviceActive {
-		if err := steps.SaveAccessWG(cfg, r); err != nil {
-			return err
-		}
-
-		if _, err := temporaryAccessCommand(ctx, "wg", "set", "wg0", "peer", d.WGPublicKey, "allowed-ips", d.Address+"/32"); err != nil {
+		if err := activateDeviceAccess(ctx, cfg, r, *d); err != nil {
 			return err
 		}
 	}
@@ -567,15 +563,34 @@ func reconcileAccessDevice(ctx context.Context, cfg config.Cluster, r config.Acc
 	return saveAccessRegistry(r)
 }
 
+func activateDeviceAccess(ctx context.Context, cfg config.Cluster, r config.AccessRegistry, d config.AccessDevice) error {
+	if slices.ContainsFunc(r.Operators, func(op config.AccessOperator) bool {
+		return op.ID == d.OperatorID && !op.Revoked && op.Role == config.AccessRoleOwner
+	}) {
+		if err := installAdminShell(ctx, d); err != nil {
+			return err
+		}
+	}
+
+	if err := steps.SaveAccessWG(cfg, r); err != nil {
+		return err
+	}
+
+	_, err := temporaryAccessCommand(ctx, "wg", "set", "wg0", "peer", d.WGPublicKey, "allowed-ips", d.Address+"/32")
+
+	return err
+}
+
 // All independent cuts are attempted even if persisting or updating one
 // fails. The durable cleanup flag leaves incomplete host work retryable.
 func revokeLiveAccess(ctx context.Context, cfg config.Cluster, r config.AccessRegistry, n config.NodeSpec, d config.AccessDevice) error {
 	_, wgErr := temporaryAccessCommand(ctx, "wg", "set", "wg0", "peer", d.WGPublicKey, "remove")
 	keyErr := removeDeviceSSHKey(ctx, d.UnixLogin)
+	hostErr := removeDeviceSSHKey(ctx, config.HostLogin(d.UnixLogin))
 	sshErr := closeAccessSSH(ctx, n.WGAddress, d.Address)
 	bootErr := steps.SaveAccessWG(cfg, r)
 
-	return errors.Join(wgErr, keyErr, sshErr, bootErr)
+	return errors.Join(wgErr, keyErr, hostErr, sshErr, bootErr)
 }
 
 // No process is selected by UID: only SSH sockets on the WG address whose

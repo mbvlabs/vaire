@@ -504,8 +504,8 @@ func phase1Commands() []cmdSpec {
 				flagString("command", "", "Run one remote command instead of a shell"),
 			},
 			meta: CommandMeta{
-				Summary:   "Open an SSH session to the node over WireGuard",
-				WhenToUse: []string{"Reach the admin user when a task has no vaire command yet.", "With stdout piped or redirected, --command runs without a PTY so the output stays clean; sudo then cannot ask for a password."},
+				Summary:   "Open a host shell over WireGuard as a verified admin",
+				WhenToUse: []string{"Use your enrolled admin device for host administration. Members do not have a host shell.", "With stdout piped or redirected, --command runs without a PTY so the output stays clean."},
 				Examples:  []string{"vaire ssh", "vaire ssh --command uptime"},
 			},
 		},

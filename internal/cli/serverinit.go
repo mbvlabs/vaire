@@ -1798,7 +1798,8 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 		Backup:         r.sec.Backup,
 		Metrics:        metricsDocument(r.sec.Metrics, r.cfg.Hostname(n.Name), r.cfg.Metrics.PathPrefix),
 		MasterPassword: r.masterHash,
-		BreakGlass:     "If WireGuard is unavailable, open the provider console and log in as root to repair it. Otherwise rebuild from backups with vaire server init --restore.",
+		Console:        &secretsdoc.Console{Username: r.cfg.Server.AdminUser, Password: r.sec.SudoPassword},
+		BreakGlass:     "The console credentials are for the provider console only; SSH uses a personal device key. To rebuild from backups, run vaire server init --restore.",
 	}, nil
 }
 

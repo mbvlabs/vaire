@@ -19,6 +19,7 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/buildinfo"
 	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/secrets"
@@ -299,7 +300,7 @@ func verifyEnrollmentIdentity(ctx context.Context, node *remote.Node, setup rpc.
 }
 
 func verifyOwnerEnrollment(ctx context.Context, setup rpc.AccessSetup, keys enrollmentKeys) error {
-	setup.Role = "owner"
+	setup.Role = config.AccessRoleOwner
 
 	return verifyEnrollment(ctx, setup, keys)
 }
@@ -320,7 +321,7 @@ func loginEnrollmentWithCredentials(cmd *cobra.Command, code string, credentials
 		return fmt.Errorf("invalid Vaire setup code")
 	}
 
-	if credentials != nil && (setup.Mode != rpc.AccessSetupRecovery || setup.Role != "owner") {
+	if credentials != nil && (setup.Mode != rpc.AccessSetupRecovery || setup.Role != config.AccessRoleOwner) {
 		return fmt.Errorf("the recovery bundle does not enroll an owner")
 	}
 

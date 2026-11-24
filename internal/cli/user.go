@@ -6,6 +6,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/spf13/cobra"
@@ -17,8 +18,8 @@ func userCommands() cmdSpec {
 		meta: CommandMeta{Summary: "Manage workspace users", WhenToUse: []string{"Create and list users; creating a user does not enroll a device."}, Examples: []string{"vaire user add alice", "vaire user list"}, Remote: true},
 		children: []cmdSpec{
 			{use: "add <user>", args: cobra.ExactArgs(1), run: runUserAdd,
-				flags: []fl{flagString("role", "member", "Workspace role: owner or member")},
-				meta:  CommandMeta{Summary: "Create a workspace user without enrolling a device", WhenToUse: []string{"Grant a role to a named user."}, Examples: []string{"vaire user add alice", "vaire user add alice --role owner"}, Mutating: true, SupportsDryRun: true, Remote: true}},
+				flags: []fl{flagString("role", config.AccessRoleMember, "Workspace role: admin or member")},
+				meta:  CommandMeta{Summary: "Create a workspace user without enrolling a device", WhenToUse: []string{"Grant a role to a named user. Admins have VPS shell and sudo access."}, Examples: []string{"vaire user add alice", "vaire user add alice --role admin"}, Mutating: true, SupportsDryRun: true, Remote: true}},
 			{use: "list", args: cobra.NoArgs, run: runUserList,
 				meta: CommandMeta{Summary: "List workspace users", WhenToUse: []string{"See users and their roles."}, Examples: []string{"vaire user list"}, Remote: true}},
 			{use: "revoke <user>", args: cobra.ExactArgs(1), run: runUserRevoke,
@@ -55,8 +56,8 @@ func runUserRevoke(cmd *cobra.Command, args []string) error {
 
 func runUserAdd(cmd *cobra.Command, args []string) error {
 	role := flagStringIf(cmd, "role")
-	if role != "owner" && role != "member" {
-		return output.NewError(output.CodeValidation, "role must be owner or member", output.ExitConfig, "")
+	if role != config.AccessRoleOwner && role != config.AccessRoleMember {
+		return output.NewError(output.CodeValidation, "role must be admin or member", output.ExitConfig, "")
 	}
 
 	p := newProgress(cmd)

@@ -148,6 +148,63 @@ func TestDeviceSSHRegistryBinding(t *testing.T) {
 	}
 }
 
+func TestAdminShellEligibility(t *testing.T) {
+	d := config.AccessDevice{ID: "dev-1", OperatorID: "op-1", UnixLogin: "vdev-1", UnixUID: "123",
+		State: config.DeviceActive, Address: "10.0.0.1", SSHPublicKey: deviceHostTestKey(t)}
+
+	r := config.AccessRegistry{Operators: []config.AccessOperator{{ID: "op-1", Role: config.AccessRoleOwner}},
+		Devices: []config.AccessDevice{d}}
+	if !adminShellEligible(r, d) {
+		t.Fatal("active admin device denied")
+	}
+
+	recovered := d
+	recovered.Recovery = true
+
+	r.Devices[0] = recovered
+	if !adminShellEligible(r, recovered) {
+		t.Fatal("verified recovery admin device denied")
+	}
+
+	r.Devices[0] = d
+
+	for _, change := range []func(*config.AccessRegistry){
+		func(r *config.AccessRegistry) { r.Operators[0].Role = config.AccessRoleMember },
+		func(r *config.AccessRegistry) { r.Operators[0].Revoked = true },
+		func(r *config.AccessRegistry) { r.Devices[0].State = config.DevicePending },
+		func(r *config.AccessRegistry) { r.Devices[0].State = config.DeviceRevoked },
+		func(r *config.AccessRegistry) { r.Devices[0].SSHPublicKey = deviceHostTestKey(t) + "x" },
+		func(r *config.AccessRegistry) { r.Devices[0].Address = "10.0.0.2" },
+	} {
+		other := config.AccessRegistry{Operators: append([]config.AccessOperator(nil), r.Operators...),
+			Devices: append([]config.AccessDevice(nil), r.Devices...)}
+		change(&other)
+
+		if adminShellEligible(other, d) {
+			t.Fatal("accepted unauthorized or mismatched device")
+		}
+	}
+}
+
+func TestAdminShellKeyIsRestrictedToPermanentPeer(t *testing.T) {
+	key := deviceHostTestKey(t)
+
+	got, err := renderAdminShellKey("10.42.255.2", key)
+	if err != nil || got != `restrict,pty,from="10.42.255.2/32" `+key+"\n" {
+		t.Fatalf("host key = %q, %v", got, err)
+	}
+
+	for _, address := range []string{"0.0.0.0", "::1", "10.42.255.2/32", "10.42.255.2,evil"} {
+		if _, err := renderAdminShellKey(address, key); err == nil {
+			t.Errorf("accepted address %q", address)
+		}
+	}
+
+	if _, err := renderAdminShellKey("10.42.255.2", key+"\n"+key); err == nil {
+		t.Fatal("accepted multiple keys")
+	}
+}
+
 func TestDeviceSSHNewFileDoesNotAdoptOrOverwrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "marker")
 	if err := writeNewDeviceFile(path, "123\n", 0o600); err != nil {
@@ -171,7 +228,7 @@ func TestDeviceSSHSudoersParses(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "sudoers")
-	if err := os.WriteFile(path, []byte(renderDeviceSudo("vdev-1")), 0o440); err != nil {
+	if err := os.WriteFile(path, []byte(renderDeviceSudo("vdev-1")+renderDeviceSudo("vshl-1")), 0o440); err != nil {
 		t.Fatal(err)
 	}
 
@@ -202,7 +259,7 @@ func TestDeviceSSHRealSSHDConfig(t *testing.T) {
 	path := filepath.Join(dir, "sshd_config")
 	// The device drop-in sorts before 00-vaire.conf. The latter is what
 	// normal sshd reapplication rewrites.
-	content := "HostKey " + hostKey + "\nUsePAM yes\n" + renderDeviceSSHD("vdev-1") + renderDeviceSSHD("vdev-2") +
+	content := "HostKey " + hostKey + "\nUsePAM yes\n" + renderDeviceSSHD("vdev-1") + renderDeviceSSHD("vdev-2") + renderDeviceSSHD("vshl-1") +
 		"AllowUsers admin\nPubkeyAuthentication yes\nPasswordAuthentication no\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -227,6 +284,15 @@ func TestDeviceSSHRealSSHDConfig(t *testing.T) {
 	other := effective("vdev-2")
 	if err := checkDeviceSSHD(other, "vdev-2"); err != nil {
 		t.Fatalf("second device effective config: %v\n%s", err, other)
+	}
+
+	host := effective("vshl-1")
+	if err := checkDeviceSSHD(host, "vshl-1"); err != nil {
+		t.Fatalf("host effective config: %v\n%s", err, host)
+	}
+
+	if renderDeviceSudo("vshl-1") != "# managed by vaire\nvshl-1 ALL=(ALL) NOPASSWD: ALL\n" {
+		t.Fatal("host account lacks full sudo")
 	}
 
 	admin := effective("admin")

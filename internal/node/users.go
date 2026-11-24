@@ -67,7 +67,7 @@ func handleUserAdd(_ context.Context, env *Env) (Result, error) {
 
 	op := config.AccessOperator{ID: id, Name: p.Name, Role: p.Role}
 	if err := r.AddOperator(op); err != nil {
-		return Result{}, output.NewError(output.CodeValidation, err.Error(), output.ExitPrecondition, "Use a unique lowercase user name and role owner or member.")
+		return Result{}, output.NewError(output.CodeValidation, err.Error(), output.ExitPrecondition, "Use a unique lowercase user name and role admin or member.")
 	}
 
 	if !env.Req.DryRun {

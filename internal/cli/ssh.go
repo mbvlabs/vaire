@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/localenv"
+	"github.com/mbvlabs/vaire/internal/transport"
+	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
@@ -33,7 +37,13 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 	}
 	defer s.Close()
 
-	client := s.node.SSH.SSH()
+	host, err := dialHostShell(cmd, s)
+	if err != nil {
+		return err
+	}
+	defer host.Close()
+
+	client := host.SSH()
 	if client == nil {
 		return output.NewError(output.CodeError, "the SSH client is not available", output.ExitGeneric, "")
 	}
@@ -45,6 +55,41 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 
 	defer func() { _ = sess.Close() }()
 
+	return runHostShell(cmd, sess, command)
+}
+
+func dialHostShell(cmd *cobra.Command, s *session) (*transport.SSHClient, error) {
+	login := config.HostLogin(s.ctx.Operator.SSHUser)
+	if login == "" {
+		return nil, output.NewError(output.CodePrecondition, "this workspace identity has no managed host shell", output.ExitPrecondition, "Sign in with a verified admin device.")
+	}
+
+	node, ok := s.ctx.Master()
+	if !ok {
+		return nil, output.NewError(output.CodeConfig, "workspace lists no node", output.ExitConfig, "")
+	}
+
+	key, err := workspaces.ReadFile(s.ctx.Name, workspaces.SSHKeyFile)
+	if err != nil {
+		return nil, workspaceFileError(s.ctx.Name, workspaces.SSHKeyFile, err)
+	}
+
+	auth, err := transport.KeyAuth(key)
+	if err != nil {
+		return nil, workspaceFileError(s.ctx.Name, workspaces.SSHKeyFile, err)
+	}
+
+	known, err := transport.LoadKnownHosts(workspaces.Path(s.ctx.Name, workspaces.KnownHostsFile))
+	if err != nil {
+		return nil, err
+	}
+
+	return transport.DialSSH(commandContext(cmd), s.dialer,
+		transport.SSHTarget{User: login, Addr: net.JoinHostPort(node.WGAddress, "22")},
+		transport.SSHOptions{Auth: []ssh.AuthMethod{auth}, HostKeys: known, Timeout: timeoutFlag(cmd)})
+}
+
+func runHostShell(cmd *cobra.Command, sess *ssh.Session, command string) error {
 	// A command run from a terminal gets a PTY too (like ssh -t), so sudo can
 	// ask for the admin password. With stdout piped or redirected it runs
 	// without one: a PTY merges the remote stderr (sudo's prompt) into stdout

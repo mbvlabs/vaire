@@ -184,7 +184,7 @@ func TestAccessRegistryRejectsInvalidDevice(t *testing.T) {
 		})
 	}
 
-	if err := (AccessRegistry{Operators: []AccessOperator{{ID: "op", Name: "alice", Role: "admin"}}}).Validate(); err == nil {
+	if err := (AccessRegistry{Operators: []AccessOperator{{ID: "op", Name: "alice", Role: "owner"}}}).Validate(); err == nil {
 		t.Fatal("invalid role accepted")
 	}
 }

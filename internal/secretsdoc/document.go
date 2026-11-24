@@ -41,10 +41,17 @@ type Document struct {
 	Backup       *Backup   `json:"backup,omitempty"`
 	Metrics      *Metrics  `json:"metrics,omitempty"`
 	BreakGlass   string    `json:"break_glass"`
+	Console      *Console  `json:"console,omitempty"`
 	// MasterPassword is the argon2id hash of the master password that gates
 	// vaire secrets export, carried so vaire login installs it on another
 	// machine. It is a verifier, not the password.
 	MasterPassword string `json:"master_password_hash,omitempty"`
+}
+
+// Console holds local VPS console credentials, never used to log in over SSH.
+type Console struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 // ConnectionNotes explains the URLs vaire db create and vaire db credentials
@@ -145,6 +152,10 @@ func (m *Metrics) creds() *workspaces.MetricsCreds {
 // registry.
 func (d Document) SecretValues() []string {
 	out := []string{d.Operator.WGPrivateKey, d.Operator.SSHPrivateKey, d.Operator.SudoPassword, d.RecoveryCode}
+	if d.Console != nil {
+		out = append(out, d.Console.Password)
+	}
+
 	if d.Database != nil {
 		out = append(out, d.Database.SecretValues()...)
 	}
