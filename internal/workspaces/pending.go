@@ -71,6 +71,7 @@ type Progress struct {
 // RestoreProgress is what a rebuild has decided so far, so --resume picks
 // up the same bundle, instance id and epoch.
 type RestoreProgress struct {
+	KitHash        string `json:"kit_hash,omitempty"`
 	Bundle         string `json:"bundle,omitempty"`
 	From           string `json:"from,omitempty"`
 	OldAddress     string `json:"old_address,omitempty"`

@@ -10,14 +10,167 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/catalog"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/masterbackup"
 	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/secretsdoc"
 	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
+
+func TestRestoreWithoutWorkspaceUsesKitNotEnrollment(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(workspaces.EnvWorkspace, "")
+
+	kit := writeOfflineRestoreKit(t)
+	root := NewRoot()
+
+	cmd, _, err := root.Find([]string{"server", "init"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for flag, value := range map[string]string{
+		"restore": "true", "host": "root@192.0.2.2", "recovery-kit": kit,
+		"passphrase-stdin": "true", "old-master-unreachable": "true",
+	} {
+		if err := cmd.Flags().Set(flag, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cmd.SetIn(strings.NewReader("example-passphrase\n"))
+
+	r, rr, backup, err := newRestoreRun(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if r.name != "prod" || rr.ctx.Operator.Name != "owner" || backup.Bucket != "test-bucket" ||
+		rr.identity != backup.Encryption.Identity || workspaces.Exists("prod") {
+		t.Fatal("restore did not derive its context from the kit alone")
+	}
+
+	if err := cmd.Flags().Set("old-master-unreachable", "false"); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd.SetIn(strings.NewReader("example-passphrase\n"))
+
+	if _, _, _, err := newRestoreRun(cmd); err == nil || workspaces.Exists("prod") {
+		t.Fatal("restore from kit did not require acknowledgement that the old node is offline")
+	}
+}
+
+func writeOfflineRestoreKit(t *testing.T) string {
+	t.Helper()
+
+	identity, recipient, err := backup.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, host, err := transport.GenerateSSHKey("test-server")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, wg, err := transport.GenerateWGKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	doc := secretsdoc.Document{
+		Schema: secretsdoc.Schema, Server: secretsdoc.Server{Name: "prod", TLSMode: "self-signed"},
+		Nodes: []secretsdoc.Node{{Name: "db1", Role: workspaces.RoleMaster, PublicAddress: "192.0.2.1",
+			WGAddress: "10.42.0.1", WGPublicKey: wg, ListenPort: 51820, SSHHostKeys: []string{host}}},
+		Operator: secretsdoc.Operator{Name: "owner"}, RecoveryCode: "irrelevant-spent-code",
+		Backup: &workspaces.BackupCreds{Provider: "r2", Bucket: "test-bucket", Prefix: "prod",
+			Endpoint: "https://example.test", Region: "auto", URIStyle: "path",
+			AccessKeyID: "test-access-id", SecretAccessKey: "test-access-secret"},
+	}
+	doc.Backup.Encryption.Identity, doc.Backup.Encryption.Recipient = identity, recipient
+	doc.Backup.PgBackRest.CipherPass = "test-backup-cipher"
+
+	raw, err := secretsdoc.EncryptArmored(doc, "example-passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(t.TempDir(), "recovery.age")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
+}
+
+func TestInstallOfflineRestoreWorkspace(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	_, host, err := transport.GenerateSSHKey("test-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := &initRun{name: "prod", restore: &restoreRun{ctx: &workspaces.Workspace{
+		Name: "prod", Server: "prod",
+		Nodes: []workspaces.Node{{Name: "db1", Role: workspaces.RoleMaster}},
+	}}}
+	setup := rpc.AccessSetup{Server: "prod", Node: "db1", User: "owner", Label: "new-device",
+		UnixLogin: "vdev-test", Address: "10.42.0.2", NodeAddress: "10.42.0.1",
+		NodeWGPublicKey: "node-key", NodePublicAddress: "192.0.2.2", HostPublicKey: host, WGPort: 51820}
+	keys := enrollmentKeys{SSH: "new-ssh", WG: "new-wg"}
+
+	if err := r.installKitRestoreWorkspace(setup, keys); err != nil {
+		t.Fatal(err)
+	}
+
+	if name, err := workspaces.Current(); err != nil || name != "prod" {
+		t.Fatalf("restored workspace is not current: %q, %v", name, err)
+	}
+
+	if err := r.installKitRestoreWorkspace(setup, keys); err != nil {
+		t.Fatalf("cannot resume after installing workspace: %v", err)
+	}
+
+	if err := r.installKitRestoreWorkspace(setup, enrollmentKeys{SSH: "different", WG: keys.WG}); err == nil {
+		t.Fatal("resume accepted different device keys")
+	}
+}
+
+func TestOfflineRestorePinsBackupHostIdentity(t *testing.T) {
+	sshPrivate, host, err := transport.GenerateSSHKey("test-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wgPrivate, wgPublic, err := transport.GenerateWGKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := restoreRun{ctx: &workspaces.Workspace{Nodes: []workspaces.Node{
+		{Name: "db1", Role: workspaces.RoleMaster, WGPublicKey: wgPublic},
+	}}, kitHostKeys: []string{host}}
+	b := masterbackup.Bundle{Manifest: masterbackup.Manifest{Node: "db1"}, Files: []masterbackup.File{
+		masterbackup.NewFile(masterbackup.WGKeyPath, "root", "root", 0o600, []byte(wgPrivate+"\n")),
+		masterbackup.NewFile("/etc/ssh/ssh_host_ed25519_key", "root", "root", 0o600, sshPrivate),
+	}}
+
+	if err := rr.validateKitBundle(b); err != nil {
+		t.Fatal(err)
+	}
+
+	rr.ctx.Nodes[0].WGPublicKey = "different-key"
+
+	if err := rr.validateKitBundle(b); err == nil {
+		t.Fatal("accepted a bundle with a different WireGuard identity")
+	}
+}
 
 func TestRestoreTemporaryTransportAndWorkspaceExchange(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

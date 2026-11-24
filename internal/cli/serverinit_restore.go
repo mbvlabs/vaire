@@ -51,11 +51,14 @@ const oldMasterProbe = 6 * time.Second
 
 // restoreRun is a rebuild's state beside the initRun it drives.
 type restoreRun struct {
-	ctx      *workspaces.Workspace
-	identity string
-	fetched  fetchedBundle
-	bundle   masterbackup.Bundle
-	state    *workspaces.RestoreProgress
+	ctx         *workspaces.Workspace
+	identity    string
+	kitCreds    *workspaces.Credentials
+	kitHash     string
+	kitHostKeys []string
+	fetched     fetchedBundle
+	bundle      masterbackup.Bundle
+	state       *workspaces.RestoreProgress
 }
 
 func (rr *restoreRun) addressChanged() bool {
@@ -138,6 +141,14 @@ func runInitRestore(cmd *cobra.Command) error {
 // newRestoreRun resolves the workspace and its recovery identity, and loads a
 // pending rebuild.
 func newRestoreRun(cmd *cobra.Command) (*initRun, *restoreRun, *workspaces.BackupCreds, error) {
+	if err := validateRestoreKitInput(cmd); err != nil {
+		return nil, nil, nil, err
+	}
+
+	if stringFlag(cmd, "recovery-kit") != "" {
+		return newKitRestoreRun(cmd)
+	}
+
 	name := stringFlag(cmd, "name")
 	if name == "" {
 		name = stringFlag(cmd, "workspace")
@@ -164,6 +175,25 @@ func newRestoreRun(cmd *cobra.Command) (*initRun, *restoreRun, *workspaces.Backu
 	}
 
 	return r, rr, kit, nil
+}
+
+func validateRestoreKitInput(cmd *cobra.Command) error {
+	stdin := flagTrue(cmd, "passphrase-stdin")
+	file := stringFlag(cmd, "passphrase-file") != ""
+	kit := stringFlag(cmd, "recovery-kit")
+
+	switch {
+	case (stdin || file) && kit == "":
+		return output.NewError(output.CodeUsage, "passphrase flags require --recovery-kit", output.ExitUsage, "")
+	case stdin && file:
+		return output.NewError(output.CodeUsage, "use only one passphrase flag", output.ExitUsage, "")
+	case stdin && (kit == "-" || stringFlag(cmd, "bundle-file") == "-"):
+		return output.NewError(output.CodeUsage, "the passphrase and a recovery file cannot both come from stdin", output.ExitUsage, "Use --passphrase-file instead.")
+	case kit == "-" && stringFlag(cmd, "bundle-file") == "-":
+		return output.NewError(output.CodeUsage, "the recovery kit and master bundle cannot both come from stdin", output.ExitUsage, "")
+	default:
+		return nil
+	}
 }
 
 // restoreSaveBundle keeps the bundle encrypted in the pending state for
@@ -281,6 +311,14 @@ func (r *initRun) restoreResumePending(name string) error {
 	r.cfg, r.boot, r.prog = cfg, boot, prog
 
 	r.restore.state = prog.Restore
+	if prog.Restore.KitHash != "" && r.restore.kitHash == "" {
+		return output.NewError(output.CodePrecondition, "this rebuild requires its original recovery kit", output.ExitPrecondition, "Pass --recovery-kit and its passphrase again.")
+	}
+
+	if r.restore.kitHash != "" && prog.Restore.KitHash != r.restore.kitHash {
+		return output.NewError(output.CodePrecondition, "recovery kit differs from the pending rebuild", output.ExitPrecondition, "Use the original recovery kit.")
+	}
+
 	if prog.Done(phaseSecrets) {
 		sec, err := workspaces.LoadSecrets(name)
 		if err != nil {
@@ -340,6 +378,12 @@ func (r *initRun) restoreFetch(ctx context.Context, kit *workspaces.BackupCreds)
 		return err
 	}
 
+	if rr.kitHash != "" {
+		if err := rr.validateKitBundle(b); err != nil {
+			return err
+		}
+	}
+
 	if _, ok := b.File(masterbackup.ClusterPath); !ok {
 		return output.NewError(output.CodeBundleCorrupt, "the bundle has no cluster.toml", output.ExitSecrets, "")
 	}
@@ -368,6 +412,12 @@ func (r *initRun) restoreConfig() error {
 	if cfg.Name() != rr.ctx.Server {
 		return output.NewError(output.CodePrecondition, "the bundle is server "+cfg.Name()+"'s, not "+rr.ctx.Server+"'s", output.ExitPrecondition, "").
 			WithDetails(map[string]any{"reason": "bundle_server_mismatch"})
+	}
+
+	if rr.kitHash != "" {
+		if err := rr.validateKitConfig(cfg); err != nil {
+			return err
+		}
 	}
 
 	// Approvals belong to the old node, not the backup. Retain the private
@@ -454,6 +504,10 @@ func (r *initRun) checkOldMaster(ctx context.Context) error {
 		return nil
 	}
 
+	if rr.kitHash != "" {
+		return oldMasterCheckUnavailable()
+	}
+
 	old, ok := rr.ctx.Master()
 	if !ok || !rr.addressChanged() || rr.state.OldAddress == "" {
 		return oldMasterCheckUnavailable()
@@ -508,7 +562,7 @@ func canFence(cfg config.Cluster, kit *workspaces.BackupCreds) bool {
 
 // fence writes the next epoch with a new instance id (D5). Without a bucket
 // there is nothing to fence.
-func (r *initRun) fence(ctx context.Context, kit *workspaces.BackupCreds) error {
+func (r *initRun) fence(ctx context.Context, kit *workspaces.BackupCreds) error { //nolint:gocognit // Keep the persisted epoch protocol together.
 	rr := r.restore
 	if rr.state.InstanceID == "" {
 		id, err := masterbackup.NewInstanceID()
@@ -517,6 +571,10 @@ func (r *initRun) fence(ctx context.Context, kit *workspaces.BackupCreds) error 
 		}
 
 		rr.state.InstanceID = id
+
+		if err := workspaces.SaveProgress(r.name, r.prog); err != nil {
+			return err
+		}
 	}
 
 	if !canFence(r.cfg, kit) {
@@ -542,16 +600,37 @@ func (r *initRun) fence(ctx context.Context, kit *workspaces.BackupCreds) error 
 		}
 
 		if cur.InstanceID == rr.state.InstanceID {
+			if rr.state.Epoch != 0 && (rr.state.Epoch != cur.Epoch || rr.state.EpochWrittenAt != cur.WrittenAt) {
+				return output.NewError(output.CodePrecondition, "the bucket's epoch does not match the pending rebuild", output.ExitPrecondition, "").
+					WithDetails(map[string]any{"reason": "epoch_conflict"})
+			}
 			// A resumed rebuild that already wrote it: keep its time, which
 			// db recover's stale-WAL check compares against.
 			rr.state.Epoch, rr.state.EpochWrittenAt = cur.Epoch, cur.WrittenAt
+
 			return nil
 		}
 
 		next = cur.Epoch + 1
 	}
 
-	e := masterbackup.NewEpoch(r.name, next, rr.state.InstanceID, rr.ctx.Operator.Name, masterbackup.ReasonRestore)
+	if rr.state.Epoch != 0 {
+		if next != rr.state.Epoch {
+			return output.NewError(output.CodePrecondition, "the bucket's epoch changed during the pending rebuild", output.ExitPrecondition,
+				"Stop other rebuilds and investigate before retrying.").WithDetails(map[string]any{"reason": "epoch_conflict"})
+		}
+	} else {
+		e := masterbackup.NewEpoch(r.name, next, rr.state.InstanceID, rr.ctx.Operator.Name, masterbackup.ReasonRestore)
+		rr.state.Epoch, rr.state.EpochWrittenAt = e.Epoch, e.WrittenAt
+
+		if err := workspaces.SaveProgress(r.name, r.prog); err != nil {
+			return err
+		}
+	}
+
+	e := masterbackup.NewEpoch(r.name, rr.state.Epoch, rr.state.InstanceID, rr.ctx.Operator.Name, masterbackup.ReasonRestore)
+
+	e.WrittenAt = rr.state.EpochWrittenAt
 	if err := backup.WriteEpoch(ctx, t, e); err != nil {
 		return err
 	}
@@ -617,9 +696,18 @@ func (r *initRun) restoreSecrets() error {
 }
 
 func (r *initRun) saveRestoreSecrets() error {
-	creds, err := workspaces.LoadCredentials(r.restore.ctx.Name)
-	if err != nil {
-		return err
+	var (
+		creds workspaces.Credentials
+		err   error
+	)
+
+	if r.restore.kitCreds != nil {
+		creds = *r.restore.kitCreds
+	} else {
+		creds, err = workspaces.LoadCredentials(r.restore.ctx.Name)
+		if err != nil {
+			return err
+		}
 	}
 
 	wg, _, err := transport.GenerateWGKey()
@@ -765,7 +853,12 @@ func (r *initRun) restoreRemote(ctx context.Context, timer *phaseTimer) error {
 	// The pending keys are a temporary bootstrap transport, not the owner.
 	stopTunnelDaemonQuietly(ctx, r.name)
 
-	tun, err := upTunnel(ctx, r.name, r.sec.WGPrivateKey, rr.ctx.Operator.WGAddress, r.prog.WGPublicKey, n.PublicAddress, r.cfg.Transport.ListenPort, n.WGAddress, r.p)
+	lockPath := workspaces.Path(r.name, TunnelLockFile)
+	if rr.kitHash != "" && !workspaces.Exists(r.name) {
+		lockPath = filepath.Join(workspaces.PendingDir(r.name), TunnelLockFile)
+	}
+
+	tun, err := upTunnelWithLock(ctx, r.name, lockPath, r.sec.WGPrivateKey, rr.ctx.Operator.WGAddress, r.prog.WGPublicKey, n.PublicAddress, r.cfg.Transport.ListenPort, n.WGAddress, r.p)
 	if err != nil {
 		return err
 	}
@@ -986,6 +1079,10 @@ func (r *initRun) saveRestoreOwner(setup rpc.AccessSetup) error {
 // crash leaves either the old workspace or the verified owner workspace in
 // place; the pending directory holds the other until the next resume.
 func (r *initRun) replaceRestoreWorkspace(setup rpc.AccessSetup, keys enrollmentKeys) error {
+	if r.restore.kitHash != "" {
+		return r.installKitRestoreWorkspace(setup, keys)
+	}
+
 	target := workspaces.Dir(r.name)
 	stage := filepath.Join(workspaces.PendingDir(r.name), "restore-workspace")
 

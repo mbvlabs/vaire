@@ -340,6 +340,21 @@ Default privileges grant access to new tables created by the owner in `public`: 
 
 ### Secrets
 
+If you lose both the server and your local Vaire workspace, use the encrypted
+owner recovery kit directly to rebuild from the backup bucket. Power off or
+destroy the old server first:
+
+```sh
+vaire server init --restore --host root@203.0.113.10 \
+  --recovery-kit ./thelab-recovery.age --old-master-unreachable \
+  --secrets-out ./thelab-rebuilt-recovery.age
+vaire db recover --all
+```
+
+Enter the old kit's passphrase when prompted and save the new kit and its
+passphrase. The old kit's device enrollment code does not need to be unused:
+the rebuild uses the kit's backup credentials, not that code.
+
 - vaire generates server and database passwords. The optional master password for the secrets-export gate is chosen by the operator.
 - The server keeps only SCRAM verifiers, plus the two service passwords PgBouncer and the exporters need at runtime.
 - At the end of `server init`, vaire prints the **secrets handoff** once:

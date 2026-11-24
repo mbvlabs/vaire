@@ -138,7 +138,7 @@ func runServerInit(cmd *cobra.Command, args []string) error {
 		return runInitRestore(cmd)
 	}
 
-	for _, name := range []string{"bundle", "bundle-file", "old-master-unreachable"} {
+	for _, name := range []string{"bundle", "bundle-file", "old-master-unreachable", "recovery-kit", "passphrase-stdin", "passphrase-file"} {
 		if flagChanged(cmd, name) {
 			return output.NewError(output.CodeUsage, "--"+name+" needs --restore", output.ExitUsage, "")
 		}
