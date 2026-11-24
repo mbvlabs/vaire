@@ -146,7 +146,7 @@ func TestDeviceAuthorization(t *testing.T) {
 
 	registry.Operators[0].Role = config.AccessRoleOwner
 
-	for _, name := range []string{"user.add", "user.list", "device.list", "db.create", "db.write-access", "upgrade.install"} {
+	for _, name := range []string{"user.add", "user.list", "device.list", "db.create", "db.write-access", "backup.now", "upgrade.install"} {
 		if _, err := authorizeDeviceCaller("123", name); err != nil {
 			t.Errorf("owner denied %s: %v", name, err)
 		}
