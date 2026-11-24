@@ -158,6 +158,19 @@ func TestLoginRejectsRecoveryKit(t *testing.T) {
 	}
 }
 
+func TestEnrollmentRejectsLocalWorkspaceAliases(t *testing.T) {
+	for _, command := range []string{"login", "recover"} {
+		root := NewRoot()
+		root.SetArgs([]string{command, "--name", "thelab-alice"})
+		root.SetOut(&bytes.Buffer{})
+		root.SetErr(&bytes.Buffer{})
+
+		if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "unknown flag: --name") {
+			t.Errorf("%s accepted a local workspace alias: %v", command, err)
+		}
+	}
+}
+
 func TestEnrollmentPendingPreservesKeys(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
@@ -221,6 +234,23 @@ func TestInstallEnrollmentNeverOverwrites(t *testing.T) {
 
 	if _, err := workspaces.Load("prod"); err != nil {
 		t.Fatal(err)
+	}
+
+	second := setup
+	second.ID, second.User, second.UnixLogin = "dev-second", "bob", "vdev-bob"
+
+	if err := installEnrollment("prod", second, enrollmentKeys{SSH: "second-ssh", WG: "second-wg"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	bob, err := workspaces.LoadIdentity("prod", second.ID)
+	if err != nil || bob.Name != "prod" || bob.Operator.Name != "bob" {
+		t.Fatalf("second identity: %+v, %v", bob, err)
+	}
+
+	original, err := workspaces.ReadIdentityFile("prod", "", workspaces.SSHKeyFile)
+	if err != nil || string(original) != keys.SSH {
+		t.Fatal("second enrollment modified the first identity")
 	}
 
 	known, err := transport.LoadKnownHosts(workspaces.Path("prod", workspaces.KnownHostsFile))

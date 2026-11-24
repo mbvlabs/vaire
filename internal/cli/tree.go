@@ -32,7 +32,7 @@ func addSpec(parent *cobra.Command, spec cmdSpec) {
 		Example:       joinLines(spec.meta.Examples),
 		Hidden:        spec.hidden,
 		Args:          spec.args,
-		RunE:          spec.run,
+		RunE:          withWorkspaceIdentity(spec.run),
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
@@ -183,13 +183,10 @@ func phase1Commands() []cmdSpec {
 			use:  "login",
 			args: cobra.NoArgs,
 			run:  runLogin,
-			flags: []fl{
-				flagString("name", "", "Local workspace name (default: the server name)"),
-			},
 			meta: CommandMeta{
 				Summary:          "Enroll a device with a one-time setup code",
-				WhenToUse:        []string{"Paste a setup code from a workspace owner. Use --name to keep a separate identity for the same server."},
-				Examples:         []string{"vaire login", "vaire login --name thelab-alice"},
+				WhenToUse:        []string{"Paste a setup code from a workspace owner. The code identifies the workspace and user."},
+				Examples:         []string{"vaire login"},
 				Mutating:         true,
 				SkipDryRunCheck:  true,
 				SkipDryRunReason: "login enrolls a device and has no host step to preview",
@@ -204,7 +201,6 @@ func phase1Commands() []cmdSpec {
 			args: cobra.MaximumNArgs(1),
 			run:  runRecover,
 			flags: []fl{
-				flagString("name", "", "Workspace name (default: the server name in the document)"),
 				flagBool("passphrase-stdin", "Read the passphrase from stdin"),
 				flagString("passphrase-file", "", "Read the passphrase from a file"),
 			},
@@ -648,6 +644,7 @@ func workspaceCommands() cmdSpec {
 			Examples:  []string{"vaire workspace list", "vaire workspace use prod"},
 		},
 		children: []cmdSpec{
+			workspaceIdentityCommands(),
 			{
 				use: "list",
 				run: runWorkspaceList,

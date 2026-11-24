@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -330,18 +331,13 @@ func loginEnrollmentWithCredentials(cmd *cobra.Command, code string, credentials
 	secrets.Add(setup.TemporaryPrivateKey)
 	secrets.Add(setup.Token)
 
-	name := stringFlag(cmd, "name")
-	if name == "" {
-		name = setup.Server
-	}
+	name := setup.Server
 
 	if err := workspaces.ValidateName(name); err != nil {
 		return err
 	}
 
-	if _, err := os.Lstat(workspaces.Dir(name)); err == nil {
-		return fmt.Errorf("workspace %s already exists; choose another name with --name", name)
-	} else if !os.IsNotExist(err) {
+	if err := checkEnrollmentWorkspace(name, setup); err != nil {
 		return err
 	}
 
@@ -390,7 +386,87 @@ func loginEnrollmentWithCredentials(cmd *cobra.Command, code string, credentials
 }
 
 func installEnrollment(name string, setup rpc.AccessSetup, keys enrollmentKeys, credentials *workspaces.Credentials) error {
+	if workspaces.Exists(name) {
+		return addEnrollmentIdentity(name, setup, keys, credentials)
+	}
+
 	return saveEnrollmentWorkspace(name, setup, keys, credentials, "")
+}
+
+func checkEnrollmentWorkspace(name string, setup rpc.AccessSetup) error {
+	if !workspaces.Exists(name) {
+		return nil
+	}
+
+	existing, err := workspaces.LoadIdentity(name, "")
+	if err != nil {
+		return err
+	}
+
+	node, ok := existing.Master()
+	if !existing.Managed || existing.Server != setup.Server || !ok ||
+		node.Name != setup.Node || node.WGPublicKey != setup.NodeWGPublicKey {
+		return fmt.Errorf("workspace %s already points to a different server", name)
+	}
+
+	host, _, _, _, err := ssh.ParseAuthorizedKey([]byte(setup.HostPublicKey))
+	if err != nil {
+		return err
+	}
+
+	known, err := transport.LoadKnownHosts(workspaces.IdentityPath(name, "", workspaces.KnownHostsFile))
+	if err != nil {
+		return err
+	}
+
+	if !slices.ContainsFunc(known.Keys(net.JoinHostPort(node.WGAddress, "22")), func(key ssh.PublicKey) bool {
+		return ssh.FingerprintSHA256(key) == ssh.FingerprintSHA256(host)
+	}) {
+		return fmt.Errorf("workspace %s has a different SSH host key", name)
+	}
+
+	if existing.Operator.SSHUser == setup.UnixLogin {
+		return fmt.Errorf("this device is already enrolled in workspace %s", name)
+	}
+
+	return nil
+}
+
+func addEnrollmentIdentity(name string, setup rpc.AccessSetup, keys enrollmentKeys, credentials *workspaces.Credentials) error {
+	if err := checkEnrollmentWorkspace(name, setup); err != nil {
+		return err
+	}
+
+	if setup.ID == "" {
+		return fmt.Errorf("missing device ID")
+	}
+
+	if err := workspaces.ValidateIdentity(setup.ID); err != nil {
+		return err
+	}
+
+	target := workspaces.IdentityDir(name, setup.ID)
+
+	parent := filepath.Dir(target)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return err
+	}
+
+	stage, err := os.MkdirTemp(parent, ".enrollment-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(stage) }()
+
+	if err := writeEnrollmentFiles(stage, setup, keys, credentials); err != nil {
+		return err
+	}
+
+	if err := workspaces.SaveStagedEnrollment(stage, enrolledWorkspace(name, setup, "")); err != nil {
+		return err
+	}
+
+	return os.Rename(stage, target)
 }
 
 func installOwnerEnrollment(name string, setup rpc.AccessSetup, keys enrollmentKeys, credentials workspaces.Credentials, lockedAt string) error {
@@ -491,7 +567,7 @@ func enrolledWorkspace(name string, setup rpc.AccessSetup, lockedAt string) *wor
 	}
 
 	return &workspaces.Workspace{Name: name, Server: setup.Server, Domain: setup.Domain, TLSMode: setup.TLSMode, Managed: true,
-		Operator: workspaces.Operator{Name: setup.User, SSHUser: setup.UnixLogin, WGAddress: setup.Address},
+		Operator: workspaces.Operator{Name: setup.User, Device: setup.Label, SSHUser: setup.UnixLogin, WGAddress: setup.Address},
 		Nodes: []workspaces.Node{{Name: setup.Node, Role: workspaces.RoleMaster, Hostname: hostname, PublicAddress: setup.NodePublicAddress,
 			WGAddress: setup.NodeAddress, WGPublicKey: setup.NodeWGPublicKey, ListenPort: setup.WGPort}},
 		Databases: map[string]string{}, LockdownConfirmedAt: lockedAt, CreatedAt: now, VaireVersion: buildinfo.Version}

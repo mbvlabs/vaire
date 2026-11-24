@@ -79,6 +79,7 @@ type Node struct {
 // Operator is this machine's identity on the server.
 type Operator struct {
 	Name      string `toml:"name" json:"name"`
+	Device    string `toml:"device,omitempty" json:"device,omitempty"`
 	WGAddress string `toml:"wg_address" json:"wg_address"`
 	SSHUser   string `toml:"ssh_user" json:"ssh_user"`
 }
@@ -155,8 +156,16 @@ func Root() string {
 // Dir is workspaces/<name>.
 func Dir(name string) string { return filepath.Join(Root(), "workspaces", name) }
 
-// Path is a file inside workspaces/<name>.
-func Path(name, file string) string { return filepath.Join(Dir(name), file) }
+// Path is a file in the selected identity. A corrupt selector returns an
+// invalid path so callers cannot accidentally use another identity.
+func Path(name, file string) string {
+	identity, err := ActiveIdentity(name)
+	if err != nil {
+		return filepath.Join(Dir(name), "\x00", file)
+	}
+
+	return IdentityPath(name, identity, file)
+}
 
 func ensureRoot() error {
 	root := Root()
@@ -185,7 +194,7 @@ func ValidateName(name string) error {
 
 // Exists reports whether workspaces/<name>/workspace.toml exists.
 func Exists(name string) bool {
-	_, err := os.Stat(Path(name, WorkspaceFile))
+	_, err := os.Stat(IdentityPath(name, "", WorkspaceFile))
 	return err == nil
 }
 
@@ -215,28 +224,12 @@ func List() ([]string, error) {
 
 // Load reads workspaces/<name>/workspace.toml.
 func Load(name string) (*Workspace, error) {
-	if err := ValidateName(name); err != nil {
-		return nil, err
-	}
-
-	raw, err := os.ReadFile(Path(name, WorkspaceFile))
+	identity, err := ActiveIdentity(name)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, notFound(name)
-		}
-
 		return nil, err
 	}
 
-	var c Workspace
-	if err := toml.NewDecoder(bytes.NewReader(raw)).Decode(&c); err != nil {
-		return nil, output.NewError(output.CodeConfig, Path(name, WorkspaceFile)+" does not parse: "+err.Error(), output.ExitConfig,
-			"Recreate the workspace with vaire login.")
-	}
-
-	c.Name = name
-
-	return &c, nil
+	return LoadIdentity(name, identity)
 }
 
 func notFound(name string) *output.CLIError {
@@ -244,7 +237,7 @@ func notFound(name string) *output.CLIError {
 		output.CodeWorkspaceNotFound,
 		"workspace "+name+" does not exist",
 		output.ExitWorkspace,
-		workspaceHint("List workspaces with vaire workspace list, or create one with vaire login <secrets.age>."),
+		workspaceHint("List workspaces with vaire workspace list, enroll with vaire login, or use vaire recover."),
 	).WithDetails(map[string]any{"workspace": name})
 }
 
@@ -268,11 +261,20 @@ func Save(c *Workspace) error {
 		return err
 	}
 
+	identity, err := ActiveIdentity(c.Name)
+	if err != nil {
+		return err
+	}
+
+	if identity != "" {
+		return SaveIdentity(identity, c)
+	}
+
 	if err := ensureRoot(); err != nil {
 		return err
 	}
 
-	return saveWorkspaceFile(Path(c.Name, WorkspaceFile), c)
+	return saveWorkspaceFile(IdentityPath(c.Name, "", WorkspaceFile), c)
 }
 
 // SaveStagedEnrollment writes the manifest into a private unpublished
@@ -292,16 +294,30 @@ func saveWorkspaceFile(path string, c *Workspace) error {
 
 // WriteFile writes a 0600 file inside workspaces/<name>.
 func WriteFile(name, file string, data []byte) error {
+	identity, err := ActiveIdentity(name)
+	if err != nil {
+		return err
+	}
+
+	if identity != "" {
+		return WriteIdentityFile(name, identity, file, data)
+	}
+
 	if err := ensureRoot(); err != nil {
 		return err
 	}
 
-	return transport.WriteSecretFile(Path(name, file), data)
+	return transport.WriteSecretFile(IdentityPath(name, "", file), data)
 }
 
 // ReadFile reads a file inside workspaces/<name>.
 func ReadFile(name, file string) ([]byte, error) {
-	return os.ReadFile(Path(name, file))
+	identity, err := ActiveIdentity(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return ReadIdentityFile(name, identity, file)
 }
 
 // SaveCredentials writes credentials.json.
@@ -430,7 +446,7 @@ func Resolve(flag string) (*Workspace, error) {
 			output.CodeWorkspaceNotFound,
 			"no workspace is selected",
 			output.ExitWorkspace,
-			workspaceHint("Run vaire login <secrets.age>, or pick one with vaire workspace use <name>."),
+			workspaceHint("Run vaire login or vaire recover, or pick one with vaire workspace use <name>."),
 		)
 	}
 

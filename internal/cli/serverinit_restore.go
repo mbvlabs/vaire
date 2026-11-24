@@ -1023,7 +1023,7 @@ func (r *initRun) replaceRestoreWorkspace(setup rpc.AccessSetup, keys enrollment
 	}
 
 	c.Managed = true
-	c.Operator = workspaces.Operator{Name: setup.User, SSHUser: setup.UnixLogin, WGAddress: setup.Address}
+	c.Operator = workspaces.Operator{Name: setup.User, Device: setup.Label, SSHUser: setup.UnixLogin, WGAddress: setup.Address}
 
 	for i := range c.Nodes {
 		if c.Nodes[i].Name == setup.Node {

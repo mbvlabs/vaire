@@ -125,6 +125,10 @@ device. To add someone, run `vaire user add alice` and
 `vaire device add alice laptop`. On the other machine, run `vaire login` and
 paste the one-time setup code. Each device keeps its own keys.
 
+To use another signed-in identity for the same workspace on this machine, run
+`vaire workspace operator list` and `vaire workspace operator use alice`.
+The workspace name does not change.
+
 Keep the encrypted recovery kit and its passphrase somewhere you can reach
 without your owner device. It is for recovering access, not adding users.
 

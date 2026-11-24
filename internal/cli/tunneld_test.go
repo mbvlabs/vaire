@@ -69,6 +69,36 @@ func TestTunnelSocketPathFallsBackWhenTooLong(t *testing.T) {
 	}
 }
 
+func TestFallbackTunnelSocketSeparatesWorkspaceIdentities(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), strings.Repeat("x", 120)))
+
+	dir, err := os.MkdirTemp("", "vaire-rt")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("TMPDIR", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+
+	socket := func(identity string) string {
+		t.Helper()
+
+		t.Setenv(workspaces.EnvIdentityPin, `{"workspace":"prod","identity":"`+identity+`"}`)
+
+		path, err := tunnelSocketPath("prod")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return path
+	}
+
+	if socket("dev-alice") == socket("dev-bob") {
+		t.Fatal("two identities can attach to the same tunnel socket")
+	}
+}
+
 func TestPrivateDirRefusesLooseMode(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vaire")
 	if err := os.Mkdir(dir, 0o755); err != nil {

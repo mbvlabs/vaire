@@ -131,7 +131,7 @@ func tunnelSocketPath(name string) (string, error) {
 		return path, nil
 	}
 
-	sum := sha256.Sum256([]byte(workspaces.Dir(name)))
+	sum := sha256.Sum256([]byte(filepath.Dir(path)))
 
 	dir := filepath.Join(os.TempDir(), "vaire-"+strconv.Itoa(os.Getuid()))
 	if xdg := os.Getenv("XDG_RUNTIME_DIR"); runtime.GOOS == "linux" && xdg != "" {
