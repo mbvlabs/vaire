@@ -754,7 +754,7 @@ func serverCommands() cmdSpec {
 				flagString("db-diff-schedule", "", "systemd OnCalendar for differential database backups"),
 				flagString("tls-mode", "", "acme or self-signed"),
 				flagBool("restore", "Rebuild this workspace's server on a new VPS from its master bundle (Phase 5)"),
-				flagString("recovery-kit", "", "With --restore: encrypted owner recovery kit to use without a local workspace"),
+				flagString("recovery-kit", "", "With --restore: encrypted owner recovery kit file, or - to paste or read from stdin"),
 				flagBool("passphrase-stdin", "With --recovery-kit: read its passphrase from stdin"),
 				flagString("passphrase-file", "", "With --recovery-kit: read its passphrase from a file"),
 				flagString("bundle", "", "With --restore: a bundle name or a time (default: the newest in the bucket)"),

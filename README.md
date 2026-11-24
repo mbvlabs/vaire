@@ -346,12 +346,12 @@ destroy the old server first:
 
 ```sh
 vaire server init --restore --host root@203.0.113.10 \
-  --recovery-kit ./thelab-recovery.age --old-master-unreachable \
-  --secrets-out ./thelab-rebuilt-recovery.age
+  --recovery-kit - --old-master-unreachable
 vaire db recover --all
 ```
 
-Enter the old kit's passphrase when prompted and save the new kit and its
+Paste the encrypted block from the saved handoff, enter its passphrase when
+prompted, and save the new kit and its
 passphrase. The old kit's device enrollment code does not need to be unused:
 the rebuild uses the kit's backup credentials, not that code.
 

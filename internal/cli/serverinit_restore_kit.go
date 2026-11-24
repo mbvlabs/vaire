@@ -52,9 +52,19 @@ func (rr *restoreRun) validateKitConfig(cfg config.Cluster) error {
 	return nil
 }
 
+func readRestoreKit(cmd *cobra.Command) ([]byte, error) {
+	source := stringFlag(cmd, "recovery-kit")
+	if source == "-" && !MustNotPrompt(cmd) {
+		// Stop at the end of the pasted encrypted block, not at terminal EOF.
+		return recoveryBundle(cmd, nil)
+	}
+
+	return recoveryBundle(cmd, []string{source})
+}
+
 // The kit is an offline source of identity and credentials, not an access code.
 func newKitRestoreRun(cmd *cobra.Command) (*initRun, *restoreRun, *workspaces.BackupCreds, error) { //nolint:gocognit,gocyclo // Validate the offline kit before preparing a rebuild.
-	raw, err := recoveryBundle(cmd, []string{stringFlag(cmd, "recovery-kit")})
+	raw, err := readRestoreKit(cmd)
 	if err != nil {
 		return nil, nil, nil, err
 	}
