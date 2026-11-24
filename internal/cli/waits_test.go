@@ -59,9 +59,3 @@ func TestApplyNextOnlyWhenStepsApply(t *testing.T) {
 		t.Errorf("2 steps suggested %v", next)
 	}
 }
-
-func TestLiftNotice(t *testing.T) {
-	if got := liftNotice("app2"); !strings.HasPrefix(got, "Lifting the protection of app2 needs a code") {
-		t.Errorf("liftNotice = %q", got)
-	}
-}

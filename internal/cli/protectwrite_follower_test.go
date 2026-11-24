@@ -16,7 +16,7 @@ import (
 // protectStatusWith is a protect.status result naming dbs, with the protected
 // ones in Protected, as the node reports them.
 func protectStatusWith(dbs ...node.ProtectedDatabase) (protectStatusData, error) {
-	st := protectStatusData{Configured: true, Protected: []string{}, Databases: dbs}
+	st := protectStatusData{ApprovalFactors: &node.ExposureFactorStatus{TOTP: true}, Protected: []string{}, Databases: dbs}
 	for _, d := range dbs {
 		if d.Protected {
 			st.Protected = append(st.Protected, d.Name)
@@ -67,7 +67,7 @@ func TestRefuseFollowerWrite(t *testing.T) {
 		st, err := refuseFollowerWrite(func() (protectStatusData, error) {
 			return protectStatusWith(dbs...)
 		}, db)()
-		if err != nil || !st.Configured || len(st.Databases) != len(dbs) ||
+		if err != nil || !hasApprovalFactor(st.ApprovalFactors) || len(st.Databases) != len(dbs) ||
 			len(st.Protected) != 1 || st.Protected[0] != "app_protected_follower" {
 			t.Errorf("%s: got %+v, %v; want the status unchanged", db, st, err)
 		}

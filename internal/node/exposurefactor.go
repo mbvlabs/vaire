@@ -13,6 +13,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/engine"
 	"github.com/mbvlabs/vaire/internal/password"
+	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/totp"
 )
 
@@ -20,19 +21,38 @@ import (
 const exposureFactorDir = "/etc/vaire/exposure-factor"
 
 type exposureFactorState struct {
-	PasswordHash string    `json:"password_hash,omitempty"`
-	Secret       string    `json:"secret,omitempty"`
-	LastStep     int64     `json:"last_step,omitempty"`
-	Failures     int       `json:"failures,omitempty"`
-	LockedUntil  time.Time `json:"locked_until,omitzero"`
+	PasswordHash string                    `json:"password_hash,omitempty"`
+	Secret       string                    `json:"secret,omitempty"`
+	LastStep     int64                     `json:"last_step,omitempty"`
+	Failures     int                       `json:"failures,omitempty"`
+	LockedUntil  time.Time                 `json:"locked_until,omitzero"`
+	Operators    map[string]operatorFactor `json:"operators,omitempty"`
+}
+
+type operatorFactor struct {
+	Secret      string    `json:"secret,omitempty"`
+	LastStep    int64     `json:"last_step,omitempty"`
+	Failures    int       `json:"failures,omitempty"`
+	LockedUntil time.Time `json:"locked_until,omitzero"`
+}
+
+func verifiedOperator(env *Env) string {
+	if env != nil && env.DeviceIdentity != nil && env.DeviceIdentity.IdentityKind == rpc.IdentityVerifiedDevice {
+		return env.DeviceIdentity.OperatorID
+	}
+
+	return ""
 }
 
 type exposureFactorGuard struct {
-	dir string
-	now func() time.Time
+	dir      string
+	now      func() time.Time
+	parent   *exposureFactorState
+	operator string
 }
 
 var defaultExposureFactorGuard = exposureFactorGuard{dir: exposureFactorDir, now: time.Now}
+var checkExposureRoot = exposureRoot
 
 func exposureFactorError(reason, message string) error {
 	hint := ""
@@ -47,25 +67,24 @@ func exposureFactorError(reason, message string) error {
 // ExposureEnrollmentHint points to the trusted first-enrollment path.
 const ExposureEnrollmentHint = "Run vaire auth setup from your workstation and select Master password or Authenticator code (TOTP)."
 
-func hasApprovalFactor() (bool, error) {
-	st, err := ReadExposureFactorStatus()
-
-	return st.Password || st.TOTP, err
-}
-
-func carriesApprovalFactor(values map[string]string) bool {
-	return values["exposure_password"] != "" || values["exposure_totp"] != ""
-}
-
-func verifyApprovalFactor(ctx context.Context, values map[string]string) error {
-	return verifyExposureFactor(ctx, values["exposure_password"], values["exposure_totp"])
-}
-
 // ExposureFactorStatus reports enrolled methods without returning secrets.
 type ExposureFactorStatus struct {
-	Password   bool `json:"password"`
-	TOTP       bool `json:"totp"`
-	LegacyTOTP bool `json:"legacy_totp,omitempty"`
+	Password   bool   `json:"password"`
+	TOTP       bool   `json:"totp"`
+	LegacyTOTP bool   `json:"legacy_totp,omitempty"`
+	Operator   string `json:"operator,omitempty"`
+}
+
+func operatorFactorStatus(env *Env) (ExposureFactorStatus, error) {
+	st, err := defaultExposureFactorGuard.load()
+	id := verifiedOperator(env)
+
+	status := ExposureFactorStatus{Password: st.PasswordHash != "", TOTP: id != "" && st.Operators[id].Secret != ""}
+	if id != "" {
+		status.Operator = env.DeviceIdentity.Operator
+	}
+
+	return status, err
 }
 
 // ReadExposureFactorStatus reads the atomically replaced node state without
@@ -165,16 +184,111 @@ func (g exposureFactorGuard) load() (exposureFactorState, error) {
 		}
 	}
 
+	for id, factor := range st.Operators {
+		if id == "" || factor.Failures < 0 || factor.Failures >= protectMaxFailures {
+			return st, exposureFactorError("invalid_state", "invalid exposure factor state")
+		}
+
+		if factor.Secret != "" {
+			if _, err := totp.DecodeSecret(factor.Secret); err != nil {
+				return st, exposureFactorError("invalid_state", "invalid exposure factor state")
+			}
+		}
+	}
+
 	return st, nil
 }
 
+// operatorState returns a view whose TOTP and lockout belong only to this
+// operator. The shared password remains in the parent state.
+func operatorState(st exposureFactorState, id string) exposureFactorState {
+	f := st.Operators[id]
+	return exposureFactorState{PasswordHash: st.PasswordHash, Secret: f.Secret, LastStep: f.LastStep, Failures: f.Failures, LockedUntil: f.LockedUntil}
+}
+
+func putOperator(st *exposureFactorState, id string, view exposureFactorState) {
+	if st.Operators == nil {
+		st.Operators = make(map[string]operatorFactor)
+	}
+
+	st.Operators[id] = operatorFactor{Secret: view.Secret, LastStep: view.LastStep, Failures: view.Failures, LockedUntil: view.LockedUntil}
+	st.PasswordHash = view.PasswordHash
+}
+
 func (g exposureFactorGuard) save(st exposureFactorState) error {
+	if g.parent != nil {
+		if g.operator == "" {
+			g.parent.PasswordHash, g.parent.Failures, g.parent.LockedUntil = st.PasswordHash, st.Failures, st.LockedUntil
+		} else {
+			putOperator(g.parent, g.operator, st)
+		}
+
+		st = *g.parent
+	}
+
 	raw, err := json.Marshal(st) //nolint:gosec // G117: this is the root-only factor state file.
 	if err != nil {
 		return err
 	}
 
 	return engine.WriteFileAtomic(filepath.Join(g.dir, "state.json"), append(raw, '\n'), 0o600)
+}
+
+func (g exposureFactorGuard) forOperator(ctx context.Context, id string, fn func(exposureFactorGuard, *exposureFactorState) error) error {
+	if id == "" {
+		return exposureFactorError("verified_operator_required", "a verified operator is required")
+	}
+
+	return g.locked(ctx, func() error {
+		st, err := g.load()
+		if err != nil {
+			return err
+		}
+
+		view := operatorState(st, id)
+		g.parent, g.operator = &st, id
+
+		return fn(g, &view)
+	})
+}
+
+// forApproval uses an operator-specific TOTP view for verified devices.
+// Authorized non-device callers get a shared-password-only view.
+func (g exposureFactorGuard) forApproval(ctx context.Context, env *Env, fn func(exposureFactorGuard, *exposureFactorState) error) error {
+	if id := verifiedOperator(env); id != "" {
+		return g.forOperator(ctx, id, fn)
+	}
+
+	if env == nil || env.DeviceIdentity != nil {
+		return exposureFactorError("verified_operator_required", "a verified operator is required for authenticator codes")
+	}
+
+	return g.locked(ctx, func() error {
+		st, err := g.load()
+		if err != nil {
+			return err
+		}
+
+		view := exposureFactorState{PasswordHash: st.PasswordHash, Failures: st.Failures, LockedUntil: st.LockedUntil}
+		g.parent = &st
+
+		return fn(g, &view)
+	})
+}
+
+func verifyOperatorApproval(ctx context.Context, env *Env) error {
+	if err := checkExposureRoot(); err != nil {
+		return err
+	}
+
+	return defaultExposureFactorGuard.forApproval(ctx, env, func(g exposureFactorGuard, st *exposureFactorState) error {
+		code := ""
+		if verifiedOperator(env) != "" {
+			code = env.Req.Secrets["exposure_totp"]
+		}
+
+		return g.verify(st, env.Req.Secrets["exposure_password"], code)
+	})
 }
 
 func (g exposureFactorGuard) failure(st *exposureFactorState, reason string) error {
@@ -230,14 +344,6 @@ func (g exposureFactorGuard) verify(st *exposureFactorState, pw, code string) er
 	st.Failures, st.LockedUntil = 0, time.Time{}
 
 	return g.save(*st)
-}
-
-func verifyExposureFactor(ctx context.Context, password, code string) error {
-	if err := exposureRoot(); err != nil {
-		return err
-	}
-
-	return defaultExposureFactorGuard.check(ctx, password, code)
 }
 
 func (g exposureFactorGuard) check(ctx context.Context, password, code string) error {

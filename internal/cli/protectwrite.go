@@ -42,27 +42,16 @@ func protectedWriteCode(cmd *cobra.Command, db, what string, status func() (prot
 			WithDetails(map[string]any{"reason": "write_requires_human", "database": db})
 	}
 
-	if st.ApprovalFactors != nil && (st.ApprovalFactors.Password || st.ApprovalFactors.TOTP) {
-		note("Database " + db + " is protected: " + what + " needs approval.")
-		return promptApprovalFactor(cmd, st.ApprovalFactors, "Approve writing to "+db+" with")
-	}
-
-	if !st.Configured {
+	if !hasApprovalFactor(st.ApprovalFactors) {
 		return nil, output.NewError(output.CodeDatabaseProtected,
-			"database "+db+" is protected and "+what+" needs an approval factor, which this node does not have set up", output.ExitUnsafe,
+			"database "+db+" is protected and "+what+" needs an approval factor available to this operator", output.ExitUnsafe,
 			node.ExposureEnrollmentHint).
 			WithDetails(map[string]any{"reason": "protect_not_initialized", "database": db})
 	}
 
-	if st.LockedUntil != "" {
-		return nil, output.NewError(output.CodeProtectCodeRejected, "too many wrong codes; codes are locked out until "+st.LockedUntil, output.ExitUnsafe,
-			"Wait until the lockout ends, then try again with a fresh code.").
-			WithDetails(map[string]any{"reason": "locked", "locked_until": st.LockedUntil})
-	}
+	note("Database " + db + " is protected: " + what + " needs approval.")
 
-	note("Database " + db + " is protected: " + what + " needs a code from the authenticator app set up with vaire protect init.")
-
-	return readAuthenticatorCode(cmd, "nothing was written to "+db, map[string]any{"database": db})
+	return promptApprovalFactor(cmd, st.ApprovalFactors, "Approve writing to "+db+" with")
 }
 
 // isFollowerStatus reports whether db is a follower in a protect.status

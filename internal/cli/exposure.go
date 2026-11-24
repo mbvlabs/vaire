@@ -16,6 +16,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func hasApprovalFactor(status *node.ExposureFactorStatus) bool {
+	return status != nil && (status.Password || status.TOTP)
+}
+
 func exposureChoices(status *node.ExposureFactorStatus) [][2]string {
 	var options [][2]string
 
@@ -24,7 +28,7 @@ func exposureChoices(status *node.ExposureFactorStatus) [][2]string {
 	}
 
 	if status == nil || status.TOTP {
-		options = append(options, [2]string{"Authenticator code (TOTP)", "totp"})
+		options = append(options, [2]string{"Your authenticator code (TOTP)", "totp"})
 	}
 
 	return options
@@ -144,12 +148,17 @@ func runAuthSetup(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	values, err := authSetupProof(cmd, status)
+	values, err := authSetupProof(cmd, status, mode)
 	if err != nil {
 		return err
 	}
 
-	localHash, err := prepareAuthFactor(cmd, s.ctx.Name, mode, values)
+	label := s.ctx.Name
+	if status.Operator != "" {
+		label += "/" + status.Operator
+	}
+
+	localHash, err := prepareAuthFactor(cmd, label, mode, values)
 	if err != nil {
 		return err
 	}
@@ -168,13 +177,13 @@ func runAuthSetup(cmd *cobra.Command, _ []string) error {
 	return output.Success(cmd, output.Result{Data: map[string]string{"factor": mode}, Message: "Approval factor set up"})
 }
 
-func authSetupProof(cmd *cobra.Command, status node.ExposureFactorStatus) (map[string]string, error) {
+func authSetupProof(cmd *cobra.Command, status node.ExposureFactorStatus, mode string) (map[string]string, error) {
+	if mode == "password" && status.Password {
+		status.TOTP = false
+	}
+
 	options := exposureChoices(&status)
 	if len(options) == 0 {
-		if status.LegacyTOTP {
-			return readAuthenticatorCode(cmd, "no approval factor was added", nil)
-		}
-
 		return map[string]string{}, nil
 	}
 

@@ -12,7 +12,7 @@ import (
 
 func statusOf(protected ...string) func() (protectStatusData, error) {
 	return func() (protectStatusData, error) {
-		return protectStatusData{Configured: true, Protected: protected}, nil
+		return protectStatusData{ApprovalFactors: &node.ExposureFactorStatus{TOTP: true}, Protected: protected}, nil
 	}
 }
 
@@ -64,8 +64,8 @@ func TestProtectedWriteUnprotectedNeedsNoCode(t *testing.T) {
 func TestProtectedWriteFollowerNeedsNoCode(t *testing.T) {
 	status := func() (protectStatusData, error) {
 		return protectStatusData{
-			Configured: true,
-			Protected:  []string{"app", "app_follower"},
+			ApprovalFactors: &node.ExposureFactorStatus{TOTP: true},
+			Protected:       []string{"app", "app_follower"},
 			Databases: []node.ProtectedDatabase{
 				{Name: "app", Protected: true},
 				{Name: "app_follower", Protected: true, Follows: "app"},

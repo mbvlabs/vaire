@@ -16,10 +16,44 @@ import (
 	"github.com/mbvlabs/vaire/internal/totp"
 )
 
-// writeEnv is a request on protectedCluster with params and, when code is
-// set, the protect_code secret.
+func installWriteApproval(t *testing.T, clock *testClock) {
+	t.Helper()
+
+	old, oldRoot := defaultExposureFactorGuard, checkExposureRoot
+	defaultExposureFactorGuard = exposureFactorGuard{dir: filepath.Join(t.TempDir(), "factors"), now: clock.now}
+	checkExposureRoot = func() error { return nil }
+
+	t.Cleanup(func() { defaultExposureFactorGuard, checkExposureRoot = old, oldRoot })
+}
+
+func writeIdentity() *rpc.WhoamiReply {
+	return &rpc.WhoamiReply{IdentityKind: rpc.IdentityVerifiedDevice, OperatorID: "op-1", Operator: "alice", DeviceID: "dev-1", Role: config.AccessRoleOwner}
+}
+
+func setupWriteApproval(t *testing.T, clock *testClock) string {
+	t.Helper()
+
+	secret, err := totp.NewSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env := &Env{DeviceIdentity: writeIdentity(), Req: rpc.Request{
+		Params:  json.RawMessage(`{"mode":"totp"}`),
+		Secrets: map[string]string{"new_totp_secret": secret, "new_totp_code": codeFor(t, secret, clock.t, 0)},
+	}}
+	if _, err := handleAuthSetup(context.Background(), env); err != nil {
+		t.Fatal(err)
+	}
+
+	return secret
+}
+
+// writeEnv is a request on protectedCluster with a verified owner.
 func writeEnv(params, code string, dryRun bool) *Env {
 	env := codeEnv(params, code)
+	env.DeviceIdentity = writeIdentity()
+	env.Req.Secrets = map[string]string{"exposure_totp": code}
 	env.Cluster = protectedCluster()
 	env.Req.DryRun = dryRun
 
@@ -28,8 +62,10 @@ func writeEnv(params, code string, dryRun bool) *Env {
 
 func TestRequireWriteCodeSQL(t *testing.T) {
 	g, clock := newTestGuard(t)
+	installWriteApproval(t, clock)
+
 	called := false
-	h := g.requireWriteCode("writing to it", sqlWrites, func(context.Context, *Env) (Result, error) {
+	h := g.requireWriteCode(sqlWrites, func(context.Context, *Env) (Result, error) {
 		called = true
 		return Result{}, nil
 	})
@@ -43,10 +79,10 @@ func TestRequireWriteCodeSQL(t *testing.T) {
 	// Before protect init, a write to a protected database is refused and
 	// a read runs.
 	err := run(`{"db":"app","write":true}`, "")
-	wantReason(t, err, output.CodeDatabaseProtected, "protect_not_initialized")
+	wantReason(t, err, output.CodePrecondition, "factor_not_initialized")
 	reject(t, called, "handler ran without protection set up")
 
-	secret := setUp(t, g, clock)
+	secret := setupWriteApproval(t, clock)
 	clock.t = clock.t.Add(totp.Period)
 
 	// Reads never need a code, on a protected database or not.
@@ -62,10 +98,10 @@ func TestRequireWriteCodeSQL(t *testing.T) {
 
 	// A write to a protected one does.
 	err = run(`{"db":"app","write":true}`, "")
-	wantReason(t, err, output.CodeDatabaseProtected, "write_requires_human")
+	wantReason(t, err, output.CodePrecondition, "factor_invalid")
 	reject(t, called, "handler ran without a code")
 	err = run(`{"db":"app","write":true}`, codeFor(t, secret, clock.t, 7))
-	wantReason(t, err, output.CodeProtectCodeRejected, "code_invalid")
+	wantReason(t, err, output.CodePrecondition, "factor_invalid")
 	reject(t, called, "handler ran with a wrong code")
 
 	code := codeFor(t, secret, clock.t, 0)
@@ -74,16 +110,17 @@ func TestRequireWriteCodeSQL(t *testing.T) {
 	}
 	// One code is one write: the same code again is refused.
 	err = run(`{"db":"app","write":true}`, code)
-	wantReason(t, err, output.CodeProtectCodeRejected, "code_reused")
+	wantReason(t, err, output.CodePrecondition, "code_reused")
 	reject(t, called, "handler ran with a reused code")
 }
 
 func TestRequireWriteCodeMaintKill(t *testing.T) {
 	g, clock := newTestGuard(t)
-	secret := setUp(t, g, clock)
+	installWriteApproval(t, clock)
+	secret := setupWriteApproval(t, clock)
 	clock.t = clock.t.Add(totp.Period)
 	called := false
-	h := g.requireWriteCode("terminating its sessions", nil, func(context.Context, *Env) (Result, error) {
+	h := g.requireWriteCode(nil, func(context.Context, *Env) (Result, error) {
 		called = true
 		return Result{}, nil
 	})
@@ -99,8 +136,8 @@ func TestRequireWriteCodeMaintKill(t *testing.T) {
 	}
 
 	err := run(`{"db":"app","idle_in_tx":true}`, "", false)
-	wantReason(t, err, output.CodeDatabaseProtected, "write_requires_human")
-	rejectf(t, called || !strings.Contains(err.Error(), "terminating its sessions"), "kill without code: %v, called %v", err, called)
+	wantReason(t, err, output.CodePrecondition, "factor_invalid")
+	rejectf(t, called, "kill without code: %v, called %v", err, called)
 
 	if err := run(`{"db":"other","idle_in_tx":true}`, "", false); err != nil || !called {
 		t.Fatalf("kill on other: err %v, called %v", err, called)
@@ -113,6 +150,7 @@ func TestRequireWriteCodeMaintKill(t *testing.T) {
 
 func TestWriteAccess(t *testing.T) {
 	g, clock := newTestGuard(t)
+	installWriteApproval(t, clock)
 
 	var granted []writeRole
 
@@ -157,15 +195,15 @@ func TestWriteAccess(t *testing.T) {
 	}
 
 	_, err = access(`{"db":"app"}`, "123456")
-	wantReason(t, err, output.CodeDatabaseProtected, "protect_not_initialized")
+	wantReason(t, err, output.CodePrecondition, "factor_not_initialized")
 
-	secret := setUp(t, g, clock)
+	secret := setupWriteApproval(t, clock)
 	clock.t = clock.t.Add(totp.Period)
 
 	_, err = access(`{"db":"app"}`, "")
-	wantReason(t, err, output.CodeDatabaseProtected, "write_requires_human")
+	wantReason(t, err, output.CodePrecondition, "factor_invalid")
 	_, err = access(`{"db":"app"}`, codeFor(t, secret, clock.t, 9))
-	wantReason(t, err, output.CodeProtectCodeRejected, "code_invalid")
+	wantReason(t, err, output.CodePrecondition, "factor_invalid")
 	rejectf(t, len(granted) != 0, "a role was made without a valid code: %+v", granted)
 
 	// A valid code without the CLI's password (or a short one) makes no
@@ -189,8 +227,71 @@ func TestWriteAccess(t *testing.T) {
 	rejectf(t, err != nil || !until.Equal(clock.t.Add(writeRoleLogin).Truncate(time.Second)), "valid until %s (%v), want %s", got.ValidUntil, err, clock.t.Add(writeRoleLogin))
 	// The same code makes no second role.
 	_, err = access(`{"db":"app"}`, code)
-	wantReason(t, err, output.CodeProtectCodeRejected, "code_reused")
+	wantReason(t, err, output.CodePrecondition, "code_reused")
 	rejectf(t, len(granted) != 1, "granted %d roles", len(granted))
+}
+
+func TestWriteAccessOperatorDevices(t *testing.T) {
+	g, clock := newTestGuard(t)
+	installWriteApproval(t, clock)
+	secret := setupWriteApproval(t, clock)
+
+	var otherSecret string
+
+	for {
+		var err error
+
+		otherSecret, err = totp.NewSecret()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if codeFor(t, otherSecret, clock.t.Add(totp.Period), 0) != codeFor(t, secret, clock.t.Add(totp.Period), 0) {
+			break
+		}
+	}
+
+	other := &Env{DeviceIdentity: writeIdentity(), Req: rpc.Request{Params: json.RawMessage(`{"mode":"totp"}`), Secrets: map[string]string{
+		"new_totp_secret": otherSecret, "new_totp_code": codeFor(t, otherSecret, clock.t, 0),
+	}}}
+	other.DeviceIdentity.OperatorID = "op-2"
+
+	if _, err := handleAuthSetup(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+
+	clock.t = clock.t.Add(totp.Period)
+	grants := 0
+	grant := func(context.Context, config.ClusterSpec, writeRole) error { //nolint:unparam // Implements the production grant callback.
+		grants++
+		return nil
+	}
+	requestWrite := func(operator, device, code string) error {
+		env := writeEnv(`{"db":"app"}`, code, false)
+		env.DeviceIdentity.OperatorID, env.DeviceIdentity.DeviceID = operator, device
+		env.Req.Secrets[WritePasswordSecret] = strings.Repeat("p", writeRolePasswordMin)
+		_, err := g.writeAccess(context.Background(), env, grant)
+
+		return err
+	}
+	code := codeFor(t, secret, clock.t, 0)
+
+	if err := requestWrite("op-2", "dev-other", code); err == nil || grants != 0 {
+		t.Fatalf("cross-operator code: %v, grants %d", err, grants)
+	}
+
+	if err := requestWrite("op-1", "dev-1", code); err != nil || grants != 1 {
+		t.Fatalf("enrolled device: %v, grants %d", err, grants)
+	}
+
+	if err := requestWrite("op-1", "dev-2", code); err == nil || grants != 1 {
+		t.Fatalf("same-operator replay: %v, grants %d", err, grants)
+	}
+
+	clock.t = clock.t.Add(totp.Period)
+	if err := requestWrite("op-1", "dev-2", codeFor(t, secret, clock.t, 0)); err != nil || grants != 2 {
+		t.Fatalf("same operator, second device: %v, grants %d", err, grants)
+	}
 }
 
 // A follower takes no writes, so db.write-access refuses it before the
@@ -223,7 +324,8 @@ func TestWriteAccessRefusesAFollower(t *testing.T) {
 // on its own. A protected primary is still gated (Phase 6).
 func TestRequireWriteCodeSkipsAFollower(t *testing.T) {
 	g, clock := newTestGuard(t)
-	secret := setUp(t, g, clock)
+	installWriteApproval(t, clock)
+	secret := setupWriteApproval(t, clock)
 	clock.t = clock.t.Add(totp.Period)
 
 	cfg := followerCfg()
@@ -233,13 +335,13 @@ func TestRequireWriteCodeSkipsAFollower(t *testing.T) {
 
 	called := func(context.Context, *Env) (Result, error) { return Result{}, nil }
 	run := func(params, code string) (bool, error) {
-		env := &Env{Cluster: cfg, Req: rpc.Request{Params: json.RawMessage(params)}}
+		env := &Env{Cluster: cfg, DeviceIdentity: writeIdentity(), Req: rpc.Request{Params: json.RawMessage(params)}}
 		if code != "" {
-			env.Req.Secrets = map[string]string{ProtectCodeSecret: code}
+			env.Req.Secrets = map[string]string{"exposure_totp": code}
 		}
 
 		handlerRan := false
-		wrapped := g.requireWriteCode("writing to it", sqlWrites, func(ctx context.Context, env *Env) (Result, error) {
+		wrapped := g.requireWriteCode(sqlWrites, func(ctx context.Context, env *Env) (Result, error) {
 			handlerRan = true
 			return called(ctx, env)
 		})
@@ -252,7 +354,7 @@ func TestRequireWriteCodeSkipsAFollower(t *testing.T) {
 	if ran, err := run(`{"db":"app","write":true}`, ""); ran {
 		t.Fatalf("the protected source ran without a code: %v", err)
 	} else {
-		wantReason(t, err, output.CodeDatabaseProtected, "write_requires_human")
+		wantReason(t, err, output.CodePrecondition, "factor_invalid")
 	}
 
 	if ran, err := run(`{"db":"app","write":true}`, codeFor(t, secret, clock.t, 0)); err != nil || !ran {
@@ -265,7 +367,7 @@ func TestRequireWriteCodeSkipsAFollower(t *testing.T) {
 	}
 	// maint kill's gate is the same guard; a follower's sessions may be
 	// terminated without a code (D9).
-	wrappedKill := g.requireWriteCode("terminating its sessions", nil, called)
+	wrappedKill := g.requireWriteCode(nil, called)
 
 	env := &Env{Cluster: cfg, Req: rpc.Request{Params: json.RawMessage(`{"db":"app_follower","idle_in_tx":true}`)}}
 	if _, err := wrappedKill(context.Background(), env); err != nil {
@@ -297,21 +399,23 @@ func TestSQLWriteRefusesFollowerAfterInterruptedUnfollow(t *testing.T) {
 	}
 
 	g, clock := newTestGuard(t)
+	installWriteApproval(t, clock)
+
 	old := defaultProtectGuard
 
 	t.Cleanup(func() { defaultProtectGuard = old })
 
 	defaultProtectGuard = g
-	secret := setUp(t, g, clock)
+	secret := setupWriteApproval(t, clock)
 	clock.t = clock.t.Add(totp.Period)
 	sqlWrite := methods()["sql"].handler
 	write := func(cfg config.Cluster, db, code string) (Result, error) {
 		req := request("sql", map[string]any{"db": db, "query": "delete from t", "write": true})
 		if code != "" {
-			req.Secrets = map[string]string{ProtectCodeSecret: code}
+			req.Secrets = map[string]string{"exposure_totp": code}
 		}
 
-		return sqlWrite(context.Background(), &Env{Cluster: cfg, Req: req})
+		return sqlWrite(context.Background(), &Env{Cluster: cfg, Req: req, DeviceIdentity: writeIdentity()})
 	}
 
 	for _, protected := range []bool{false, true} {
@@ -326,7 +430,7 @@ func TestSQLWriteRefusesFollowerAfterInterruptedUnfollow(t *testing.T) {
 	// The protected primary keeps its gate: no psql without a code.
 	cfg := protectedCluster()
 	if _, err := write(cfg, "app", ""); err != nil {
-		wantReason(t, err, output.CodeDatabaseProtected, "write_requires_human")
+		wantReason(t, err, output.CodePrecondition, "factor_invalid")
 	}
 
 	reject(t, ran(), "psql ran for a protected primary without a code")

@@ -135,7 +135,7 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 		return Result{Data: WriteAccess{}}, nil
 	}
 
-	if err := g.checkWriteApproval(ctx, p.DB, "writing to it", env.Req.Secrets); err != nil {
+	if err := verifyOperatorApproval(ctx, env); err != nil {
 		return Result{}, err
 	}
 
@@ -160,45 +160,12 @@ func (g protectGuard) writeAccess(ctx context.Context, env *Env, grant grantWrit
 		ValidUntil: role.ValidUntil.UTC().Format(time.RFC3339)}}, nil
 }
 
-func (g protectGuard) checkWriteApproval(ctx context.Context, name, action string, values map[string]string) error {
-	if carriesApprovalFactor(values) {
-		return verifyApprovalFactor(ctx, values)
-	}
-
-	return g.checkWrite(name, action, values[ProtectCodeSecret])
-}
-
-// checkWrite verifies the protect_code a write to protected database name
-// needs. action names the write in the refusal when no secret is set up.
-func (g protectGuard) checkWrite(name, action, code string) error {
-	ok, err := g.configured()
-	if err != nil {
-		return err
-	}
-
-	if !ok {
-		return protectNotInitialized(output.CodeDatabaseProtected,
-			"database "+name+" is protected and "+action+" needs two-factor protection, which this node does not have set up", output.ExitUnsafe)
-	}
-
-	if strings.TrimSpace(code) == "" {
-		return output.NewError(output.CodeDatabaseProtected,
-			"database "+name+" is protected, so "+action+" needs a code from the authenticator app", output.ExitUnsafe,
-			"A person runs the command at an interactive terminal, without --yes or structured output, and types the current 6-digit code from the authenticator app set up with vaire protect init. Reads need no code.").
-			WithDetails(map[string]any{"reason": "write_requires_human", "database": name})
-	}
-
-	_, err = g.verify(code, false)
-
-	return err
-}
-
 // requireWriteCode wraps a method handler so that, when the database it
 // names (params["db"]) is protected and applies says the request writes,
 // it runs only with a current code from the authenticator app in the
 // request's protect_code secret. A nil applies covers every request that is
 // not a dry run.
-func (g protectGuard) requireWriteCode(action string, applies func(rpc.Request) bool,
+func (g protectGuard) requireWriteCode(applies func(rpc.Request) bool,
 	handler func(context.Context, *Env) (Result, error)) func(context.Context, *Env) (Result, error) {
 	return func(ctx context.Context, env *Env) (Result, error) {
 		writes := !env.Req.DryRun
@@ -207,7 +174,7 @@ func (g protectGuard) requireWriteCode(action string, applies func(rpc.Request) 
 		}
 
 		if writes {
-			if err := g.checkRequestedWrite(ctx, action, env); err != nil {
+			if err := g.checkRequestedWrite(ctx, env); err != nil {
 				return Result{}, err
 			}
 		}
@@ -216,7 +183,7 @@ func (g protectGuard) requireWriteCode(action string, applies func(rpc.Request) 
 	}
 }
 
-func (g protectGuard) checkRequestedWrite(ctx context.Context, action string, env *Env) error {
+func (g protectGuard) checkRequestedWrite(ctx context.Context, env *Env) error {
 	var params map[string]any
 
 	_ = json.Unmarshal(env.Req.Params, &params)
@@ -233,7 +200,7 @@ func (g protectGuard) checkRequestedWrite(ctx context.Context, action string, en
 	// A follower takes no writes, so a code from the authenticator app can
 	// never authorise one: its handler or PostgreSQL refuses the write instead
 	// (Phase 6).
-	return g.checkWriteApproval(ctx, name, action, env.Req.Secrets)
+	return verifyOperatorApproval(ctx, env)
 }
 
 // sqlWrites reports whether a sql request writes.

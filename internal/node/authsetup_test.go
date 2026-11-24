@@ -1,21 +1,23 @@
 package node
 
 import (
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/totp"
 )
 
 func TestFactorSetupFirstPassword(t *testing.T) {
-	g := exposureFactorGuard{dir: filepath.Join(t.TempDir(), "factor"), now: time.Now}
+	clock := &testClock{t: time.Now()}
+	installWriteApproval(t, clock)
 	ctx := t.Context()
 
 	const pw = "a sufficiently long password"
 
-	if err := g.check(ctx, pw, ""); err == nil {
+	env := &Env{DeviceIdentity: writeIdentity(), Req: rpc.Request{Secrets: map[string]string{"exposure_password": pw}}}
+	if err := verifyOperatorApproval(ctx, env); err == nil {
 		t.Fatal("approved with no enrolled factor")
 	}
 
@@ -24,7 +26,12 @@ func TestFactorSetupFirstPassword(t *testing.T) {
 	results := make(chan error, 2)
 
 	for range 2 {
-		wg.Go(func() { results <- g.setup(ctx, "password", "", "", pw, "", "") })
+		wg.Go(func() {
+			_, err := handleAuthSetup(ctx, &Env{DeviceIdentity: writeIdentity(), Req: rpc.Request{
+				Params: []byte(`{"mode":"password"}`), Secrets: map[string]string{"new_password": pw},
+			}})
+			results <- err
+		})
 	}
 
 	wg.Wait()
@@ -42,14 +49,14 @@ func TestFactorSetupFirstPassword(t *testing.T) {
 		t.Fatalf("concurrent first enrollments = %d, want 1", successes)
 	}
 
-	if err := g.check(ctx, pw, ""); err != nil {
+	if err := verifyOperatorApproval(ctx, env); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestFactorSetupTOTPAndReplacement(t *testing.T) {
-	now := time.Unix(1800000000, 0)
-	g := exposureFactorGuard{dir: filepath.Join(t.TempDir(), "factor"), now: func() time.Time { return now }}
+	clock := &testClock{t: time.Unix(1800000000, 0)}
+	installWriteApproval(t, clock)
 	ctx := t.Context()
 
 	secret, err := totp.NewSecret()
@@ -62,31 +69,41 @@ func TestFactorSetupTOTPAndReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := g.setup(ctx, "totp", "", "", "", secret, "wrong"); err == nil {
+	env := &Env{DeviceIdentity: writeIdentity(), Req: rpc.Request{Params: []byte(`{"mode":"totp"}`), Secrets: map[string]string{
+		"new_totp_secret": secret, "new_totp_code": "wrong",
+	}}}
+	if _, err := handleAuthSetup(ctx, env); err == nil {
 		t.Fatal("accepted invalid confirmation")
 	}
 
-	if err := g.setup(ctx, "totp", "", "", "", secret, totp.Code(key, now)); err != nil {
+	env.Req.Secrets["new_totp_code"] = totp.Code(key, clock.t)
+	if _, err := handleAuthSetup(ctx, env); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := g.check(ctx, "", totp.Code(key, now)); err == nil {
+	env.Req.Secrets = map[string]string{"exposure_totp": totp.Code(key, clock.t)}
+	if err := verifyOperatorApproval(ctx, env); err == nil {
 		t.Fatal("accepted confirmation replay")
 	}
 
-	now = now.Add(totp.Period)
+	clock.t = clock.t.Add(totp.Period)
 
 	const pw = "a sufficiently long password"
 
-	if err := g.setup(ctx, "password", "", "", pw, "", ""); err == nil {
+	env.Req.Params = []byte(`{"mode":"password"}`)
+	env.Req.Secrets = map[string]string{"new_password": pw}
+
+	if _, err := handleAuthSetup(ctx, env); err == nil {
 		t.Fatal("added password without an existing factor")
 	}
 
-	if err := g.setup(ctx, "password", "", totp.Code(key, now), pw, "", ""); err != nil {
+	env.Req.Secrets["exposure_totp"] = totp.Code(key, clock.t)
+	if _, err := handleAuthSetup(ctx, env); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := g.check(ctx, pw, ""); err != nil {
+	env.Req.Secrets = map[string]string{"exposure_password": pw}
+	if err := verifyOperatorApproval(ctx, env); err != nil {
 		t.Fatal(err)
 	}
 }

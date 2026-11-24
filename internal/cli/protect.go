@@ -16,11 +16,6 @@ import (
 
 // protectStatusData is the protect.status result.
 type protectStatusData struct {
-	Configured      bool                       `json:"configured"`
-	Pending         bool                       `json:"pending"`
-	ConfirmedAt     string                     `json:"confirmed_at,omitempty"`
-	Failures        int                        `json:"failures"`
-	LockedUntil     string                     `json:"locked_until,omitempty"`
 	Protected       []string                   `json:"protected_databases"`
 	ApprovalFactors *node.ExposureFactorStatus `json:"approval_factors"`
 	// Databases is every database with whether it is protected.
@@ -147,8 +142,8 @@ func nonNil(names []string) []string {
 }
 
 // runDBProtect protects the named databases, or every one with --all. It
-// needs an approval factor or an existing legacy authenticator: a database
-// is never protected without a way to lift it.
+// needs an approval factor: a database is never protected without a way to
+// lift it.
 func runDBProtect(cmd *cobra.Command, args []string) error {
 	all := flagTrue(cmd, "all")
 	if _, err := protectTargets(args, all, args); err != nil {
@@ -300,39 +295,21 @@ func runProtectStatus(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	var message string
-
-	switch {
-	case data.Configured && data.ConfirmedAt != "":
-		message = "a legacy authenticator is set up (since " + data.ConfirmedAt + ")"
-	case data.Configured:
-		message = "a legacy authenticator is set up"
-	case data.ApprovalFactors != nil && (data.ApprovalFactors.Password || data.ApprovalFactors.TOTP):
-		message = "an approval factor is set up"
-	default:
-		message = "no approval factor is set up"
-	}
-
-	if data.Pending {
-		message += "; a legacy authenticator enrollment is pending"
-	}
-
-	if data.LockedUntil != "" {
-		message += "; codes are locked out until " + data.LockedUntil + " after too many wrong codes"
-	} else if data.Failures > 0 {
-		message += fmt.Sprintf("; %d wrong code(s) since the last accepted one", data.Failures)
+	message := "no approval factor is available to this operator"
+	if hasApprovalFactor(data.ApprovalFactors) {
+		message = "an approval factor is available to this operator"
 	}
 
 	message += "\n" + strings.Join(protectStatusLines(data.Databases), "\n")
 	warnings := s.warnings
 
 	var next []string
-	if !data.Configured && (data.ApprovalFactors == nil || (!data.ApprovalFactors.Password && !data.ApprovalFactors.TOTP)) {
+	if !hasApprovalFactor(data.ApprovalFactors) {
 		next = []string{"vaire auth setup"}
 
 		if len(data.Protected) > 0 {
 			warnings = append(warnings, output.Warning{Code: "protect_not_initialized",
-				Message: strings.Join(data.Protected, ", ") + " is protected but no approval factor is set up. Run vaire auth setup to set one up."})
+				Message: strings.Join(data.Protected, ", ") + " is protected but no approval factor is available to this operator. Run vaire auth setup to set one up."})
 		}
 	}
 

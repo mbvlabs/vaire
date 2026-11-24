@@ -259,26 +259,22 @@ func (g protectGuard) checkProtect(names []string) error {
 		"protecting "+strings.Join(names, ", ")+" needs two-factor protection set up first", output.ExitPrecondition)
 }
 
-func checkProtectionAvailable(names []string) error {
+func checkProtectionAvailable(names []string, env *Env) error {
 	if len(names) == 0 {
 		return nil
 	}
 
-	ready, err := hasApprovalFactor()
-	if err != nil || ready {
+	status, err := operatorFactorStatus(env)
+	if err != nil {
 		return err
 	}
 
-	if err := defaultProtectGuard.checkProtect(names); err != nil {
-		if cliErr, ok := errors.AsType[*output.CLIError](err); ok && cliErr.Code == output.CodePrecondition {
-			return output.NewError(output.CodePrecondition, "protecting "+strings.Join(names, ", ")+" needs an approval factor", output.ExitPrecondition, ExposureEnrollmentHint).
-				WithDetails(map[string]any{"reason": "protect_not_initialized"})
-		}
-
-		return err
+	if status.Password && env != nil && (env.DeviceIdentity == nil || verifiedOperator(env) != "") || status.TOTP {
+		return nil
 	}
 
-	return nil
+	return output.NewError(output.CodePrecondition, "protecting "+strings.Join(names, ", ")+" needs an approval factor", output.ExitPrecondition, ExposureEnrollmentHint).
+		WithDetails(map[string]any{"reason": "protect_not_initialized"})
 }
 
 // checkUnprotect refuses a config.set that lifts a database's protection (or
@@ -317,25 +313,7 @@ type protectInitParams struct {
 // refuses unless rotate, and rotating needs a current code from the old one.
 // The secret is in the result, so the method writes no run log.
 func handleProtectInit(_ context.Context, env *Env) (Result, error) {
-	if err := checkLegacyFactorEnrollment(); err != nil {
-		return Result{}, err
-	}
-
-	return defaultProtectGuard.init(env)
-}
-
-func checkLegacyFactorEnrollment() error {
-	legacy, err := defaultProtectGuard.configured()
-	if err != nil || legacy {
-		return err
-	}
-
-	ready, err := hasApprovalFactor()
-	if err != nil || !ready {
-		return err
-	}
-
-	return exposureFactorError("use_auth_setup", "use vaire auth setup to add an authenticator to the existing approval factors")
+	return Result{}, exposureFactorError("use_auth_setup", "use vaire auth setup to enroll an authenticator")
 }
 
 func (g protectGuard) init(env *Env) (Result, error) {
@@ -389,13 +367,10 @@ func (g protectGuard) init(env *Env) (Result, error) {
 // handleProtectConfirm checks a code from the pending secret and makes it
 // the confirmed one.
 func handleProtectConfirm(_ context.Context, env *Env) (Result, error) {
-	if err := checkLegacyFactorEnrollment(); err != nil {
-		return Result{}, err
-	}
-
-	return defaultProtectGuard.confirm(env)
+	return Result{}, exposureFactorError("use_auth_setup", "use vaire auth setup to enroll an authenticator")
 }
 
+//nolint:unparam // Retained for tests of the legacy guard's confirmation result.
 func (g protectGuard) confirm(env *Env) (Result, error) {
 	st, err := g.load()
 	if err != nil {
@@ -437,20 +412,19 @@ type ProtectedDatabase struct {
 	Follows string `json:"follows,omitempty"`
 }
 
-func handleProtectStatus(_ context.Context, _ *Env) (Result, error) {
-	res, err := defaultProtectGuard.status(config.ClusterPath)
+func handleProtectStatus(_ context.Context, env *Env) (Result, error) {
+	factors, err := operatorFactorStatus(env)
 	if err != nil {
 		return Result{}, err
 	}
 
-	if factors, err := ReadExposureFactorStatus(); err == nil {
-		if status, ok := res.Data.(protectStatus); ok {
-			status.ApprovalFactors = &factors
-			res.Data = status
-		}
+	status := protectStatus{ApprovalFactors: &factors, Protected: []string{}, Databases: []ProtectedDatabase{}}
+	if cfg, err := config.LoadCluster(config.ClusterPath); err == nil {
+		status.Protected, status.Databases = protectionOf(cfg)
+		status.Protected = append(status.Protected, protectedCopies(cfg)...)
 	}
 
-	return res, nil
+	return Result{Data: status}, nil
 }
 
 // protectVerify is protect.verify's result.
@@ -463,25 +437,7 @@ type protectVerify struct {
 // It reuses the write path's guard, so a code is one use and failures lock
 // codes out as they do there.
 func handleProtectVerify(ctx context.Context, env *Env) (Result, error) {
-	if carriesApprovalFactor(env.Req.Secrets) {
-		if err := verifyApprovalFactor(ctx, env.Req.Secrets); err != nil {
-			return Result{}, err
-		}
-
-		return Result{Data: protectVerify{Verified: true}}, nil
-	}
-
-	ok, err := defaultProtectGuard.configured()
-	if err != nil {
-		return Result{}, err
-	}
-
-	if !ok {
-		return Result{}, protectNotInitialized(output.CodePrecondition,
-			"this node has no two-factor protection set up", output.ExitPrecondition)
-	}
-
-	if _, err := defaultProtectGuard.verify(env.Req.Secrets[ProtectCodeSecret], false); err != nil {
+	if err := verifyOperatorApproval(ctx, env); err != nil {
 		return Result{}, err
 	}
 

@@ -38,7 +38,8 @@ import (
 // refused it with "password authentication failed".
 func TestWriteAccessLoginPath(t *testing.T) {
 	g, clock := newTestGuard(t)
-	secret := setUp(t, g, clock)
+	installWriteApproval(t, clock)
+	secret := setupWriteApproval(t, clock)
 	clock.t = clock.t.Add(totp.Period)
 
 	// The CLI's side (sessionLogin).

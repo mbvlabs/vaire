@@ -373,10 +373,11 @@ credentials. The approval guard does not constrain a host administrator.
 Do not use `beta.2` to retrofit this boundary onto a `beta.1` node.
 
 Run `vaire auth setup` on your workstation and select **Master password** or
-**Authenticator code (TOTP)**. An authenticated operator can set the first
-factor without a root console or setup code. Set it up before giving an agent
-operator access: until a factor exists, any authenticated operator can enroll
-first. After that, adding or replacing a factor requires an existing one.
+**Your authenticator code (TOTP)**. The master password is shared by the server.
+An authenticator belongs to one operator: use the same authenticator on any of
+your verified devices. Another operator can't use your code to approve their
+requests. Revoking one device doesn't reset the authenticator, and `vaire recover`
+doesn't reset it either.
 
 The master password set during `server init` is already registered on the
 node. If you skip it, use `vaire auth setup` later to choose a master password
@@ -419,7 +420,7 @@ A protected database refuses `db drop`, a shrinking resize, credential rotation 
 
 `vaire sql --write`, `vaire psql --write`, `vaire console --write` and `vaire maint kill` ask for approval at startup. A `psql` or `console` session stays writable until you close it; `vaire sql --write` asks on every run. Reads never ask. A protected write is refused without a terminal, with `--yes`, or with structured output. The node keeps `vaire_admin` read-only on protected databases and creates a two-minute login for approved interactive writes. Vacuum, analyze, reindex, restores into a copy and forks work as before.
 
-Set up an approval factor once with `vaire auth setup`, then protect the databases you choose:
+Set up an approval factor with `vaire auth setup`, then protect the databases you choose:
 
 ```sh
 vaire db protect app billing     # or --all; in effect at once, no apply
@@ -429,7 +430,7 @@ vaire sql --db app --write "…"   # on a protected database, asks for approval 
 vaire protect status             # every database, protected yes or no
 ```
 
-Protection is opt-in and requires a factor set up with `vaire auth setup`. Existing authenticator enrollments from `vaire protect init` also work. Protection does not change the application's `<db>_app` privileges. A TOTP code works once. This guards against mistakes and unintended operator writes, not a compromised server.
+Protection is opt-in and requires a factor set up with `vaire auth setup`. Protection does not change the application's `<db>_app` privileges. An operator's TOTP code works once across all their devices. This guards against mistakes and unintended operator writes, not a compromised server.
 
 ### Operator connections
 

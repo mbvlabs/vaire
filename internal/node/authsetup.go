@@ -7,22 +7,16 @@ import (
 	"github.com/mbvlabs/vaire/internal/totp"
 )
 
-func handleAuthStatus(_ context.Context, _ *Env) (Result, error) {
-	status, err := ReadExposureFactorStatus()
+func handleAuthStatus(_ context.Context, env *Env) (Result, error) {
+	status, err := operatorFactorStatus(env)
 	if err != nil {
 		return Result{}, err
-	}
-
-	if !status.Password && !status.TOTP {
-		status.LegacyTOTP, err = defaultProtectGuard.configured()
-		if err != nil {
-			return Result{}, err
-		}
 	}
 
 	return Result{Data: status}, nil
 }
 
+//nolint:gocognit // The setup checks and mutation stay within one state lock.
 func handleAuthSetup(ctx context.Context, env *Env) (Result, error) {
 	var p struct {
 		Mode string `json:"mode"`
@@ -35,62 +29,38 @@ func handleAuthSetup(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, exposureFactorError("dry_run_unsupported", "factor setup cannot be a dry run")
 	}
 
-	if err := exposureRoot(); err != nil {
+	if err := checkExposureRoot(); err != nil {
 		return Result{}, err
 	}
 
 	s := env.Req.Secrets
-	if err := authorizeLegacyFactorSetup(s[ProtectCodeSecret]); err != nil {
-		return Result{}, err
+	if p.Mode == "totp" && verifiedOperator(env) == "" {
+		return Result{}, exposureFactorError("verified_operator_required", "a verified operator is required for authenticator setup")
 	}
 
-	if err := defaultExposureFactorGuard.setup(ctx, p.Mode, s["exposure_password"], s["exposure_totp"], s["new_password"], s["new_totp_secret"], s["new_totp_code"]); err != nil {
-		return Result{}, err
-	}
-
-	return Result{}, nil
-}
-
-func authorizeLegacyFactorSetup(code string) error {
-	ready, err := hasApprovalFactor()
-	if err != nil || ready {
-		return err
-	}
-
-	legacy, err := defaultProtectGuard.configured()
-	if err != nil || !legacy {
-		return err
-	}
-
-	_, err = defaultProtectGuard.verify(code, false)
-
-	return err
-}
-
-func (g exposureFactorGuard) setup(ctx context.Context, mode, existingPassword, existingCode, newPassword, newSecret, newCode string) error {
-	if mode != "password" && mode != "totp" {
-		return exposureFactorError("invalid_mode", "exposure factor mode must be password or totp")
-	}
-
-	return g.locked(ctx, func() error {
-		st, err := g.load()
-		if err != nil {
-			return err
+	if err := defaultExposureFactorGuard.forApproval(ctx, env, func(g exposureFactorGuard, st *exposureFactorState) error {
+		if p.Mode != "password" && p.Mode != "totp" {
+			return exposureFactorError("invalid_mode", "exposure factor mode must be password or totp")
 		}
 
 		if g.now().Before(st.LockedUntil) {
 			return exposureFactorError("locked", "exposure factor is temporarily locked")
 		}
 
-		if err := g.authorizeSetup(&st, existingPassword, existingCode); err != nil {
+		code := s["exposure_totp"]
+		if p.Mode == "password" && st.PasswordHash != "" {
+			code = ""
+		}
+
+		if err := g.authorizeSetup(st, s["exposure_password"], code); err != nil {
 			return err
 		}
 
-		if mode == "password" {
-			if err := enrollExposurePassword(&st, newPassword); err != nil {
+		if p.Mode == "password" {
+			if err := enrollExposurePassword(st, s["new_password"]); err != nil {
 				return err
 			}
-		} else if err := g.setupTOTP(&st, newSecret, newCode); err != nil {
+		} else if err := g.setupTOTP(st, s["new_totp_secret"], s["new_totp_code"]); err != nil {
 			return err
 		}
 
@@ -100,8 +70,12 @@ func (g exposureFactorGuard) setup(ctx context.Context, mode, existingPassword, 
 
 		st.Failures, st.LockedUntil = 0, time.Time{}
 
-		return g.save(st)
-	})
+		return g.save(*st)
+	}); err != nil {
+		return Result{}, err
+	}
+
+	return Result{}, nil
 }
 
 // The authenticated operator can set the first factor. Recheck under the

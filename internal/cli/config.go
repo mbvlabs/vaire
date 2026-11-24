@@ -17,7 +17,6 @@ import (
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/render"
-	"github.com/mbvlabs/vaire/internal/totp"
 	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
@@ -549,48 +548,16 @@ func unprotectCode(cmd *cobra.Command, s *session, p *progress, lifted []string)
 		return nil, err
 	}
 
-	if status.ApprovalFactors != nil && (status.ApprovalFactors.Password || status.ApprovalFactors.TOTP) {
-		p.note("Lifting the protection of " + names + " needs approval.")
-		return promptApprovalFactor(cmd, status.ApprovalFactors, "Approve lifting protection with")
-	}
-
-	if !status.Configured {
+	if !hasApprovalFactor(status.ApprovalFactors) {
 		return nil, output.NewError(output.CodeDatabaseProtected,
-			"lifting the protection of "+names+" needs an approval factor, which this node does not have set up", output.ExitUnsafe,
+			"lifting the protection of "+names+" needs an approval factor available to this operator", output.ExitUnsafe,
 			node.ExposureEnrollmentHint).
 			WithDetails(map[string]any{"reason": "protect_not_initialized", "databases": lifted})
 	}
 
-	if status.LockedUntil != "" {
-		return nil, output.NewError(output.CodeProtectCodeRejected, "too many wrong codes; codes are locked out until "+status.LockedUntil, output.ExitUnsafe,
-			"Wait until the lockout ends, then try again with a fresh code.").
-			WithDetails(map[string]any{"reason": "locked", "locked_until": status.LockedUntil})
-	}
+	p.note("Lifting the protection of " + names + " needs approval.")
 
-	p.note(liftNotice(names))
-
-	return readAuthenticatorCode(cmd, "the protection of "+names+" was kept", map[string]any{"databases": lifted})
-}
-
-// readAuthenticatorCode reads a code from the authenticator app without
-// echo and returns it as the request's protect_code secret. A code that is
-// not 6 digits is refused here, saying kept, with details added.
-func readAuthenticatorCode(cmd *cobra.Command, kept string, details map[string]any) (map[string]string, error) {
-	code, err := readSecretTTY(cmd, "Current code from the authenticator app")
-	if err != nil {
-		return nil, err
-	}
-
-	code = totp.NormalizeCode(code)
-	if !totp.WellFormed(code) {
-		d := map[string]any{"reason": "code_invalid"}
-		maps.Copy(d, details)
-
-		return nil, output.NewError(output.CodeProtectCodeRejected, "the code must be 6 digits; "+kept, output.ExitUnsafe,
-			"Type the 6-digit code the authenticator app shows for vaire.").WithDetails(d)
-	}
-
-	return map[string]string{node.ProtectCodeSecret: code}, nil
+	return promptApprovalFactor(cmd, status.ApprovalFactors, "Approve lifting protection with")
 }
 
 // editUntilValid opens path in the editor until the result parses and
@@ -746,12 +713,6 @@ func workspaceSyncFailed(s *session, err error) []output.Warning {
 		Code:    "workspace_sync_failed",
 		Message: "could not update the domain and TLS mode of workspace " + s.ctx.Name + ": " + err.Error() + ". Run vaire apply to retry.",
 	}}
-}
-
-// liftNotice is printed before the code prompt of a change that lifts a
-// protection.
-func liftNotice(names string) string {
-	return "Lifting the protection of " + names + " needs a code from the authenticator app set up with vaire protect init."
 }
 
 // pendingSteps says what the next vaire apply would do after a config change.

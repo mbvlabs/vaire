@@ -2,13 +2,11 @@ package cli
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/password"
 	"github.com/mbvlabs/vaire/internal/remote"
-	"github.com/mbvlabs/vaire/internal/totp"
 	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
 )
@@ -81,12 +79,8 @@ func secretGateUnlock(cmd *cobra.Command, hash string, s *session, p *progress, 
 			return nil, closeFn
 		}
 
-		if factors := st.ApprovalFactors; factors != nil && (factors.Password || factors.TOTP) {
+		if factors := st.ApprovalFactors; hasApprovalFactor(factors) {
 			return func() error { return secretGateApproval(cmd, s, p, factors) }, closeFn
-		}
-
-		if st.Configured {
-			return func() error { return secretGateCode(cmd, s, p, hash, action) }, closeFn
 		}
 
 		return nil, closeFn
@@ -124,48 +118,6 @@ func unlockSecretFactors(human, passwordSet bool, openCode func() (func() error,
 	}
 
 	return secretGateRequired(false)
-}
-
-// secretGateCode asks for a code from the authenticator app and has the node
-// verify it. When a master password is set too, an empty answer uses it, so
-// the password still works if the app is lost.
-func secretGateCode(cmd *cobra.Command, s *session, p *progress, hash, action string) error {
-	if hash != "" {
-		p.note("Two-factor protection is set up: " + action + " needs a current code from the authenticator app, or the master password.")
-
-		code, err := readSecretTTY(cmd, "Current code from the authenticator app (Enter to use the master password)")
-		if err != nil {
-			return err
-		}
-
-		if strings.TrimSpace(code) == "" {
-			return secretGatePassword(cmd, hash, action)
-		}
-
-		return secretGateVerifyCode(cmd, s, p, totp.NormalizeCode(code))
-	}
-
-	secrets, err := readAuthenticatorCode(cmd, action+" was refused", nil)
-	if err != nil {
-		return err
-	}
-
-	return secretGateVerifyCode(cmd, s, p, secrets[node.ProtectCodeSecret])
-}
-
-// secretGateVerifyCode has the node check code, reusing the write path's guard
-// so the code is one use and failures lock codes out as they do there.
-func secretGateVerifyCode(cmd *cobra.Command, s *session, p *progress, code string) error {
-	if s == nil || p == nil {
-		return secretGateRequired(false)
-	}
-
-	if _, err := p.call(commandContext(cmd), s.node, "protect.verify", nil,
-		remote.CallOptions{Secrets: map[string]string{node.ProtectCodeSecret: code}, OnEvent: p.event}); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // secretGatePassword asks for the master password and checks it against the

@@ -294,7 +294,7 @@ func methods() map[string]method {
 			name:    "sql",
 			lock:    fixedLock(engine.LockShared),
 			cluster: true,
-			handler: defaultProtectGuard.requireWriteCode("writing to it", sqlWrites, handleSQL),
+			handler: defaultProtectGuard.requireWriteCode(sqlWrites, handleSQL),
 		},
 		{
 			// No run log, like sql, whose writes it serves.
@@ -317,7 +317,7 @@ func methods() map[string]method {
 		{name: "maint.report", cluster: true, handler: handleMaintReport},
 		// maint.run starts a job, which takes its own locks.
 		{name: "maint.run", cluster: true, confirm: maintRunToken, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: handleMaintRun},
-		{name: "maint.kill", cluster: true, confirm: killToken, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: defaultProtectGuard.requireWriteCode("terminating its sessions", nil, handleMaintKill)},
+		{name: "maint.kill", cluster: true, confirm: killToken, runLog: func(req rpc.Request) bool { return !req.DryRun }, handler: defaultProtectGuard.requireWriteCode(nil, handleMaintKill)},
 		{name: "queries.reset", cluster: true, confirm: statsToken, runLog: always, handler: handleQueriesReset},
 		{name: "metrics.rotate", lock: fixedLock(engine.LockExclusive), cluster: true, confirm: metricsToken, runLog: always, handler: handleMetricsRotate},
 		// Phase 5. The master backup takes no node lock (D3): it has its own.

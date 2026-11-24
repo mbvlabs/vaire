@@ -131,7 +131,7 @@ func TestDeviceAuthorization(t *testing.T) {
 	}
 
 	for _, name := range []string{"apply", "sql", "ssh.confirm", "upgrade.install", "user.add", "device.list", "unknown",
-		"db.create", "db.write-access", "auth.setup", "db.drop", "db.resize", "job.list", "job.follow", "metrics.show", "queries.top", "maint.report", "backup.now", "backup.verify"} {
+		"db.create", "db.write-access", "auth.setup", "protect.verify", "db.drop", "db.resize", "job.list", "job.follow", "metrics.show", "queries.top", "maint.report", "backup.now", "backup.verify"} {
 		if _, err := authorizeDeviceCaller("123", name); err == nil {
 			t.Errorf("member allowed %s", name)
 		}
@@ -146,10 +146,14 @@ func TestDeviceAuthorization(t *testing.T) {
 
 	registry.Operators[0].Role = config.AccessRoleOwner
 
-	for _, name := range []string{"user.add", "user.list", "device.list", "db.create", "db.write-access", "backup.now", "upgrade.install"} {
+	for _, name := range []string{"user.add", "user.list", "device.add", "device.list", "db.create", "db.write-access", "protect.verify", "backup.now", "upgrade.install"} {
 		if _, err := authorizeDeviceCaller("123", name); err != nil {
 			t.Errorf("owner denied %s: %v", name, err)
 		}
+	}
+
+	if _, err := authorizeDeviceCaller("123", "config.set"); err == nil {
+		t.Error("owner allowed config.set")
 	}
 
 	registry.Operators[0].Revoked = true
