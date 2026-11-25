@@ -83,6 +83,9 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
         run: |
           version="edge-${GITHUB_SHA::12}"
+          # Current release files fit in a single PUT. Avoid R2 multipart
+          # completion failures when uploading them.
+          aws configure set default.s3.multipart_threshold 1GB
           scripts/upload-release.sh dist/release-edge edge "${RELEASE_BUCKET}" "${R2_ENDPOINT}" artifacts
           git fetch --tags origin
           promote="$(go run ./internal/release/cmd/promote --bucket "${RELEASE_BUCKET}" --key edge/manifest.json --endpoint "${R2_ENDPOINT}" "${version}")"
