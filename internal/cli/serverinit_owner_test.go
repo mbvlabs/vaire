@@ -11,6 +11,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/secretsdoc"
 	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
@@ -152,6 +153,12 @@ func TestOwnerInstallResumeAndRecoverySeparation(t *testing.T) {
 
 	if !slices.Contains(doc.SecretValues(), doc.Console.Password) {
 		t.Fatal("console password must be registered for redaction")
+	}
+
+	if !slices.ContainsFunc(doc.Groups(), func(group secretsdoc.Group) bool {
+		return group.Title == "VPS admin account"
+	}) {
+		t.Fatal("handoff must label the credentials as the VPS admin account")
 	}
 
 	s := rpc.AccessSetup{ID: "device", Server: "prod", Node: "db", User: "owner", UnixLogin: "device-user",

@@ -1799,7 +1799,7 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 		Metrics:        metricsDocument(r.sec.Metrics, r.cfg.Hostname(n.Name), r.cfg.Metrics.PathPrefix),
 		MasterPassword: r.masterHash,
 		Console:        &secretsdoc.Console{Username: r.cfg.Server.AdminUser, Password: r.sec.SudoPassword},
-		BreakGlass:     "If WireGuard is unavailable, use the provider console to sign in with the local Unix password. Normal SSH over WireGuard uses your device key.",
+		BreakGlass:     "Normal SSH over WireGuard uses your device key, and sudo works without a password. If WireGuard is unavailable, you can use the local account password to sign in at the VPS console.",
 	}, nil
 }
 

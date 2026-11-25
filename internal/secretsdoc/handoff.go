@@ -62,9 +62,9 @@ func (d Document) Groups() []Group {
 		Field{"SSH private key", d.Operator.SSHPrivateKey},
 	)})
 	if d.Console != nil {
-		groups = append(groups, Group{Title: "Provider console (break-glass only)", Fields: nonEmpty(
+		groups = append(groups, Group{Title: "VPS admin account", Fields: nonEmpty(
 			Field{"Username", d.Console.Username},
-			Field{"Password", d.Console.Password},
+			Field{"Local account password", d.Console.Password},
 		)})
 	}
 
