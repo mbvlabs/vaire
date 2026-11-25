@@ -15,8 +15,8 @@ import (
 
 // CheckAdminUser checks server.admin_user.
 func CheckAdminUser(v string) error {
-	if !userPattern.MatchString(v) || v == "root" {
-		return errors.New("must be a lower-case user name other than root")
+	if !userPattern.MatchString(v) || !validAccessLabel(v) || v == "root" || strings.HasPrefix(v, "vdev-") {
+		return errors.New("must be a lower-case Unix user name starting with a letter, other than root or a reserved vdev- name")
 	}
 
 	return nil

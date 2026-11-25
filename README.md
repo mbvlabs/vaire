@@ -121,7 +121,8 @@ vaire console app --write        # run DDL as the database owner
 ```
 
 Setup enrolls the machine running `vaire server init` as the first verified admin
-device. To add someone, run `vaire user add alice` and
+device. The initial operator and Unix login use the admin username chosen at
+setup, not the workspace name. To add someone, run `vaire user add alice` and
 `vaire device add alice laptop`. On the other machine, run `vaire login` and
 paste the one-time setup code. Each device keeps its own keys. New users are
 members by default. Use `vaire user add alice --role admin` only for someone

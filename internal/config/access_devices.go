@@ -70,7 +70,7 @@ var (
 
 // Validate checks the entire registry, including revoked records. Keys,
 // addresses, logins and request digests cannot be reused by another device.
-func (r AccessRegistry) Validate() error {
+func (r AccessRegistry) Validate() error { //nolint:gocognit // Validate all registry invariants together.
 	ids, names := map[string]bool{}, map[string]bool{}
 	bootstrapOwner := false
 
@@ -81,6 +81,12 @@ func (r AccessRegistry) Validate() error {
 
 		if op.Role != AccessRoleOwner && op.Role != AccessRoleMember {
 			return fmt.Errorf("operator %q: invalid role", op.ID)
+		}
+
+		if op.Role == AccessRoleOwner {
+			if err := CheckAdminUser(op.Name); err != nil {
+				return fmt.Errorf("admin operator name %q %w", op.Name, err)
+			}
 		}
 
 		if op.BootstrapOwner {

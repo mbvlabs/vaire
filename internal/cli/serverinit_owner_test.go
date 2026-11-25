@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -147,6 +148,10 @@ func TestOwnerInstallResumeAndRecoverySeparation(t *testing.T) {
 
 	if doc.Console == nil || doc.Console.Username != "chosen-admin" || doc.Console.Password != "test-console-password" {
 		t.Fatal("handoff must contain the selected console account credentials")
+	}
+
+	if !slices.Contains(doc.SecretValues(), doc.Console.Password) {
+		t.Fatal("console password must be registered for redaction")
 	}
 
 	s := rpc.AccessSetup{ID: "device", Server: "prod", Node: "db", User: "owner", UnixLogin: "device-user",

@@ -28,7 +28,7 @@ const (
 
 // Device logins are also validated by the access registry. Validate again at
 // this boundary because these values are interpolated into host configuration.
-var deviceHostLoginPattern = regexp.MustCompile(`^(vdev|vshl)-[a-z0-9][a-z0-9_-]{0,25}$`)
+var deviceHostLoginPattern = regexp.MustCompile(`^vdev-[a-z0-9][a-z0-9_-]{0,25}$`)
 
 type deviceHostSSHConfig struct {
 	AuthorizedKey string
@@ -286,8 +286,8 @@ func installDeviceSSHKey(ctx context.Context, login, address, publicKey string) 
 	return writeDeviceSSHKey(ctx, login, rendered.AuthorizedKey)
 }
 
-// installAdminShell grants a separate account only to an active admin device.
-// Its key is source-bound to the permanent WireGuard address.
+// installAdminShell grants the verified operator a named account. Its managed
+// key file contains one source-bound key per active device.
 func installAdminShell(ctx context.Context, d config.AccessDevice) error {
 	registry, err := loadDeviceRegistry(deviceRegistryPath)
 	if err != nil {
@@ -298,17 +298,19 @@ func installAdminShell(ctx context.Context, d config.AccessDevice) error {
 		return deviceAccessDenied()
 	}
 
-	login := config.HostLogin(d.UnixLogin)
-	if login == "" {
+	op, ok := adminShellOperator(registry, d)
+	if !ok || config.CheckAdminUser(op.Name) != nil {
 		return deviceAccessDenied()
 	}
 
-	key, err := renderAdminShellKey(d.Address, d.SSHPublicKey)
+	login := op.Name
+
+	cfg, err := config.LoadCluster(config.ClusterPath)
 	if err != nil {
 		return err
 	}
 
-	if _, err := prepareDeviceSSH(ctx, login); err != nil {
+	if err := prepareAdminShell(ctx, cfg, op); err != nil {
 		return err
 	}
 
@@ -316,7 +318,171 @@ func installAdminShell(ctx context.Context, d config.AccessDevice) error {
 		return err
 	}
 
-	return writeDeviceSSHKey(ctx, login, key)
+	keys, err := renderAdminShellKeys(registry, op.ID)
+	if err != nil {
+		return err
+	}
+
+	if op.BootstrapOwner && op.Name == cfg.Server.AdminUser {
+		legacy, err := config.LoadOperators(config.OperatorsPath)
+		if err != nil {
+			return err
+		}
+
+		keys, err = appendBootstrapShellKey(keys, op.Name, legacy)
+		if err != nil {
+			return err
+		}
+	}
+
+	return writeDeviceSSHKey(ctx, login, keys)
+}
+
+// Keep the setup connection resumable until complete-setup retires it. This
+// key is also confined to the bootstrap peer's WireGuard address.
+func appendBootstrapShellKey(keys, name string, legacy config.Operators) (string, error) {
+	if len(legacy.Operators) == 0 {
+		return keys, nil
+	}
+
+	if len(legacy.Operators) != 1 || legacy.Operators[0].Name != name {
+		return "", deviceAccessDenied()
+	}
+
+	op := legacy.Operators[0]
+
+	fields := strings.Fields(op.SSHPublicKey)
+	if len(fields) < 2 {
+		return "", deviceAccessDenied()
+	}
+
+	key, err := renderAdminShellKey(op.WGAddress, strings.Join(fields[:2], " "))
+	if err != nil {
+		return "", err
+	}
+
+	return keys + key, nil
+}
+
+func adminShellOperator(r config.AccessRegistry, d config.AccessDevice) (config.AccessOperator, bool) {
+	for _, op := range r.Operators {
+		if op.ID == d.OperatorID && !op.Revoked && op.Role == config.AccessRoleOwner {
+			return op, true
+		}
+	}
+
+	return config.AccessOperator{}, false
+}
+
+func renderAdminShellKeys(r config.AccessRegistry, operatorID string) (string, error) {
+	var keys strings.Builder
+
+	for _, d := range r.Devices {
+		if d.OperatorID != operatorID || d.State != config.DeviceActive {
+			continue
+		}
+
+		key, err := renderAdminShellKey(d.Address, d.SSHPublicKey)
+		if err != nil {
+			return "", err
+		}
+
+		keys.WriteString(key)
+	}
+
+	return keys.String(), nil
+}
+
+func prepareAdminShell(ctx context.Context, cfg config.Cluster, op config.AccessOperator) error { //nolint:gocognit // Account creation and safe resumption are inseparable here.
+	if os.Geteuid() != 0 || config.CheckAdminUser(op.Name) != nil {
+		return deviceAccessDenied()
+	}
+
+	if err := ensureDeviceSSHDirs(); err != nil {
+		return err
+	}
+
+	login := op.Name
+	if op.BootstrapOwner && login == cfg.Server.AdminUser { //nolint:nestif // Existing bootstrap account and newly managed accounts require distinct checks.
+		account, err := user.Lookup(login)
+		if err != nil {
+			return err
+		}
+
+		if err := checkDeviceAccount(account, login, account.Uid); err != nil {
+			return err
+		}
+
+		if account.HomeDir != "/home/"+login {
+			return fmt.Errorf("bootstrap admin has an unexpected home directory")
+		}
+	} else {
+		intent, err := prepareDeviceIntent(login)
+		if err != nil {
+			return err
+		}
+
+		account, err := user.Lookup(login)
+		if err != nil {
+			if _, ok := errors.AsType[user.UnknownUserError](err); !ok {
+				return err
+			}
+
+			if _, err := os.Lstat(deviceMarkerPath(login)); !os.IsNotExist(err) {
+				return fmt.Errorf("reserved admin account is missing")
+			}
+
+			if _, err := os.Lstat("/home/" + login); !os.IsNotExist(err) {
+				return fmt.Errorf("admin home already exists or cannot be inspected")
+			}
+
+			if err := deviceCommand(ctx, "useradd", "--create-home", "--user-group", "--shell", "/bin/bash", "--password", "!", "--comment", "vaire-device-"+intent, login); err != nil {
+				return err
+			}
+
+			account, err = user.Lookup(login)
+			if err != nil {
+				return err
+			}
+		}
+
+		if err := checkDeviceAccount(account, login, account.Uid); err != nil {
+			return err
+		}
+
+		passwd, err := exec.CommandContext(ctx, "/usr/bin/getent", "passwd", login).Output()
+		if err != nil {
+			return err
+		}
+
+		fields := strings.Split(strings.TrimSpace(string(passwd)), ":")
+		if len(fields) != 7 || fields[4] != "vaire-device-"+intent || fields[5] != "/home/"+login || fields[6] != "/bin/bash" {
+			return fmt.Errorf("admin account does not match provisioning intent")
+		}
+
+		if err := ensureDeviceFile(deviceMarkerPath(login), account.Uid+"\n"); err != nil {
+			return err
+		}
+	}
+
+	if err := ensureDeviceSudo(ctx, login); err != nil {
+		return err
+	}
+
+	created, err := ensureDeviceSSHD(login)
+	if err != nil {
+		return err
+	}
+
+	if err := validateDeviceSSHD(ctx, login, "127.0.0.1"); err != nil {
+		if created {
+			_ = os.Remove(deviceSSHDPath(login))
+		}
+
+		return err
+	}
+
+	return deviceCommand(ctx, "systemctl", "reload", "ssh.service")
 }
 
 func renderAdminShellKey(address, publicKey string) (string, error) {
@@ -333,7 +499,7 @@ func renderAdminShellKey(address, publicKey string) (string, error) {
 }
 
 func adminShellEligible(r config.AccessRegistry, d config.AccessDevice) bool {
-	if d.State != config.DeviceActive || d.UnixUID == "" || config.HostLogin(d.UnixLogin) == "" {
+	if d.State != config.DeviceActive || d.UnixUID == "" {
 		return false
 	}
 
@@ -422,7 +588,7 @@ func removeDeviceSSHKey(_ context.Context, login string) error {
 }
 
 func renderDeviceSudo(login string) string {
-	if strings.HasPrefix(login, "vshl-") {
+	if !strings.HasPrefix(login, "vdev-") {
 		return "# managed by vaire\n" + login + " ALL=(ALL) NOPASSWD: ALL\n"
 	}
 
@@ -442,12 +608,12 @@ func checkDeviceSSHBinding(registry config.AccessRegistry, login, uid, address, 
 }
 
 func renderDeviceSSHD(login string) string {
-	if strings.HasPrefix(login, "vshl-") {
+	if !strings.HasPrefix(login, "vdev-") {
 		return "# managed by vaire\nMatch User " + login + "\n    AllowUsers " + login + "\n" +
 			"    AuthorizedKeysFile " + deviceKeyPath(login) + "\n" +
 			"    AuthorizedKeysCommand none\n    TrustedUserCAKeys none\n" +
-			"    ForceCommand none\n    AuthenticationMethods publickey\n    PubkeyAuthentication yes\n" +
-			"    PasswordAuthentication no\n    KbdInteractiveAuthentication no\n" +
+			"    ForceCommand none\n    PubkeyAuthentication yes\n" +
+			"    KbdInteractiveAuthentication no\n" +
 			"    PermitTTY yes\n    PermitUserRC no\n    DisableForwarding yes\nMatch all\n"
 	}
 
@@ -751,7 +917,7 @@ func deviceCommand(ctx context.Context, name string, args ...string) error {
 
 func validateDeviceSSHD(ctx context.Context, login, address string) error {
 	addr, err := netip.ParseAddr(address)
-	if !deviceHostLoginPattern.MatchString(login) || err != nil || !addr.Is4() || addr.String() != address {
+	if (!deviceHostLoginPattern.MatchString(login) && config.CheckAdminUser(login) != nil) || err != nil || !addr.Is4() || addr.String() != address {
 		return fmt.Errorf("invalid sshd validation identity")
 	}
 
@@ -775,15 +941,15 @@ func checkDeviceSSHD(effective, login string) error {
 	expectedLines := []string{
 		"authorizedkeysfile " + deviceKeyPath(login), "authorizedkeyscommand none",
 		"trustedusercakeys none",
-		"authenticationmethods publickey", "pubkeyauthentication yes", "passwordauthentication no",
+		"pubkeyauthentication yes", "passwordauthentication no",
 		"kbdinteractiveauthentication no", "permituserrc no",
 		"permituserenvironment no", "disableforwarding yes",
 		"usepam yes", "usedns no", "allowusers " + login,
 	}
-	if strings.HasPrefix(login, "vshl-") {
+	if !strings.HasPrefix(login, "vdev-") {
 		expectedLines = append(expectedLines, "forcecommand none", "permittty yes")
 	} else {
-		expectedLines = append(expectedLines, "forcecommand /usr/local/bin/vaire node access-ssh", "permittty no")
+		expectedLines = append(expectedLines, "authenticationmethods publickey", "forcecommand /usr/local/bin/vaire node access-ssh", "permittty no")
 	}
 
 	for _, expected := range expectedLines {

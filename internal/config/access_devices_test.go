@@ -202,3 +202,17 @@ func TestAccessOperatorName(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAdminOperatorRequiresUnixName(t *testing.T) {
+	for _, name := range []string{"alice.dev", "root", "vdev-1", strings.Repeat("a", 40)} {
+		r := AccessRegistry{}
+		if err := r.AddOperator(AccessOperator{ID: "op", Name: name, Role: AccessRoleOwner}); err == nil {
+			t.Errorf("accepted admin name %q", name)
+		}
+	}
+
+	r := AccessRegistry{}
+	if err := r.AddOperator(AccessOperator{ID: "op", Name: "mbv", Role: AccessRoleOwner}); err != nil {
+		t.Fatal(err)
+	}
+}

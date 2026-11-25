@@ -228,7 +228,7 @@ func TestDeviceSSHSudoersParses(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "sudoers")
-	if err := os.WriteFile(path, []byte(renderDeviceSudo("vdev-1")+renderDeviceSudo("vshl-1")), 0o440); err != nil {
+	if err := os.WriteFile(path, []byte(renderDeviceSudo("vdev-1")+renderDeviceSudo("mbv")), 0o440); err != nil {
 		t.Fatal(err)
 	}
 
@@ -259,7 +259,7 @@ func TestDeviceSSHRealSSHDConfig(t *testing.T) {
 	path := filepath.Join(dir, "sshd_config")
 	// The device drop-in sorts before 00-vaire.conf. The latter is what
 	// normal sshd reapplication rewrites.
-	content := "HostKey " + hostKey + "\nUsePAM yes\n" + renderDeviceSSHD("vdev-1") + renderDeviceSSHD("vdev-2") + renderDeviceSSHD("vshl-1") +
+	content := "HostKey " + hostKey + "\nUsePAM yes\n" + renderDeviceSSHD("vdev-1") + renderDeviceSSHD("vdev-2") + renderDeviceSSHD("mbv") +
 		"AllowUsers admin\nPubkeyAuthentication yes\nPasswordAuthentication no\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -286,12 +286,12 @@ func TestDeviceSSHRealSSHDConfig(t *testing.T) {
 		t.Fatalf("second device effective config: %v\n%s", err, other)
 	}
 
-	host := effective("vshl-1")
-	if err := checkDeviceSSHD(host, "vshl-1"); err != nil {
+	host := effective("mbv")
+	if err := checkDeviceSSHD(host, "mbv"); err != nil {
 		t.Fatalf("host effective config: %v\n%s", err, host)
 	}
 
-	if renderDeviceSudo("vshl-1") != "# managed by vaire\nvshl-1 ALL=(ALL) NOPASSWD: ALL\n" {
+	if renderDeviceSudo("mbv") != "# managed by vaire\nmbv ALL=(ALL) NOPASSWD: ALL\n" {
 		t.Fatal("host account lacks full sudo")
 	}
 
@@ -303,6 +303,61 @@ func TestDeviceSSHRealSSHDConfig(t *testing.T) {
 
 	if err := checkDeviceSSHD(strings.Replace(device, "trustedusercakeys none\n", "trustedusercakeys /etc/ssh/ca\n", 1), "vdev-1"); err == nil {
 		t.Fatal("accepted alternate certificate authentication")
+	}
+
+	// Break-glass remains an explicit exception to the normal key-only policy.
+	content = "HostKey " + hostKey + "\nUsePAM yes\n" + renderDeviceSSHD("mbv") +
+		"Match User mbv\n PasswordAuthentication yes\nMatch all\nPasswordAuthentication no\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := effective("mbv"); !strings.Contains(got, "\npasswordauthentication yes\n") ||
+		!strings.Contains(got, "\nauthenticationmethods any\n") {
+		t.Fatalf("break-glass password authentication disabled: %s", got)
+	}
+}
+
+func TestAdminShellKeysArePerDevice(t *testing.T) {
+	key := deviceHostTestKey(t)
+	r := config.AccessRegistry{Devices: []config.AccessDevice{
+		{OperatorID: "owner", State: config.DeviceActive, Address: "10.0.0.1", SSHPublicKey: key},
+		{OperatorID: "owner", State: config.DeviceActive, Address: "10.0.0.2", SSHPublicKey: key},
+		{OperatorID: "other", State: config.DeviceActive, Address: "10.0.0.3", SSHPublicKey: key},
+	}}
+
+	keys, err := renderAdminShellKeys(r, "owner")
+	if err != nil || !strings.Contains(keys, `from="10.0.0.1/32"`) ||
+		!strings.Contains(keys, `from="10.0.0.2/32"`) || strings.Contains(keys, "10.0.0.3") {
+		t.Fatalf("unexpected managed keys: %q, %v", keys, err)
+	}
+
+	r.Devices[0].State = config.DeviceRevoked
+
+	keys, err = renderAdminShellKeys(r, "owner")
+	if err != nil || strings.Contains(keys, "10.0.0.1") || !strings.Contains(keys, "10.0.0.2") {
+		t.Fatalf("revocation changed other keys: %q, %v", keys, err)
+	}
+}
+
+func TestBootstrapShellKeyIsSourceBoundAndTemporary(t *testing.T) {
+	key := deviceHostTestKey(t)
+	legacy := config.Operators{Operators: []config.Operator{{
+		Name: "mbv", WGAddress: "10.0.0.9", SSHPublicKey: key + " setup",
+	}}}
+
+	keys, err := appendBootstrapShellKey("permanent\n", "mbv", legacy)
+	if err != nil || !strings.Contains(keys, `from="10.0.0.9/32" `+key) {
+		t.Fatalf("bootstrap key: %q, %v", keys, err)
+	}
+
+	keys, err = appendBootstrapShellKey("permanent\n", "mbv", config.Operators{})
+	if err != nil || keys != "permanent\n" {
+		t.Fatalf("retired bootstrap key: %q, %v", keys, err)
+	}
+
+	if _, err := appendBootstrapShellKey("", "other", legacy); err == nil {
+		t.Fatal("accepted foreign bootstrap identity")
 	}
 }
 

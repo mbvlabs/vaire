@@ -586,7 +586,31 @@ func activateDeviceAccess(ctx context.Context, cfg config.Cluster, r config.Acce
 func revokeLiveAccess(ctx context.Context, cfg config.Cluster, r config.AccessRegistry, n config.NodeSpec, d config.AccessDevice) error {
 	_, wgErr := temporaryAccessCommand(ctx, "wg", "set", "wg0", "peer", d.WGPublicKey, "remove")
 	keyErr := removeDeviceSSHKey(ctx, d.UnixLogin)
-	hostErr := removeDeviceSSHKey(ctx, config.HostLogin(d.UnixLogin))
+
+	var hostErr error
+
+	for _, op := range r.Operators {
+		if op.ID != d.OperatorID || op.Role != config.AccessRoleOwner {
+			continue
+		}
+
+		if config.CheckAdminUser(op.Name) != nil {
+			hostErr = deviceAccessDenied()
+			break
+		}
+
+		var keys string
+		if !op.Revoked {
+			keys, hostErr = renderAdminShellKeys(r, op.ID)
+		}
+
+		if hostErr == nil {
+			hostErr = writeDeviceSSHKey(ctx, op.Name, keys)
+		}
+
+		break
+	}
+
 	sshErr := closeAccessSSH(ctx, n.WGAddress, d.Address)
 	bootErr := steps.SaveAccessWG(cfg, r)
 

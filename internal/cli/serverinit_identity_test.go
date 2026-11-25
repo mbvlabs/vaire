@@ -37,6 +37,8 @@ func TestFreshInitGeneratesPersistentMachineOperator(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	first := machineOperatorTestRun(t, "prod")
+	first.cfg.Server.AdminUser = "mbv"
+
 	if err := first.savePending(); err != nil {
 		t.Fatal(err)
 	}
@@ -46,12 +48,12 @@ func TestFreshInitGeneratesPersistentMachineOperator(t *testing.T) {
 	}
 
 	name := first.sec.SetupDeviceLabel
-	if first.sec.OperatorName != "prod" || !machineOperatorNamePattern.MatchString(name) {
+	if first.sec.OperatorName != "mbv" || !machineOperatorNamePattern.MatchString(name) {
 		t.Fatalf("unexpected operator %q or device label %q", first.sec.OperatorName, name)
 	}
 
 	saved, err := workspaces.LoadSecrets("prod")
-	if err != nil || saved.OperatorName != "prod" || saved.SetupDeviceLabel != name || saved.WGPrivateKey != first.sec.WGPrivateKey || saved.SSHPrivateKey != first.sec.SSHPrivateKey {
+	if err != nil || saved.OperatorName != "mbv" || saved.SetupDeviceLabel != name || saved.WGPrivateKey != first.sec.WGPrivateKey || saved.SSHPrivateKey != first.sec.SSHPrivateKey {
 		t.Fatalf("the generated operator identity or keys were not persisted: %v", err)
 	}
 
@@ -63,16 +65,18 @@ func TestFreshInitGeneratesPersistentMachineOperator(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if resumed.sec.OperatorName != "prod" || resumed.sec.SetupDeviceLabel != name || resumed.sec.SSHPrivateKey != first.sec.SSHPrivateKey {
+	if resumed.sec.OperatorName != "mbv" || resumed.sec.SetupDeviceLabel != name || resumed.sec.SSHPrivateKey != first.sec.SSHPrivateKey {
 		t.Fatalf("resume changed the setup device label: %q -> %q", name, resumed.sec.SetupDeviceLabel)
 	}
 
 	second := machineOperatorTestRun(t, "staging")
+	second.cfg.Server.AdminUser = "alice"
+
 	if err := second.generateSecrets(); err != nil {
 		t.Fatal(err)
 	}
 
-	if second.sec.SetupDeviceLabel == name || second.sec.OperatorName != "staging" {
+	if second.sec.SetupDeviceLabel == name || second.sec.OperatorName != "alice" {
 		t.Fatalf("unexpected second operator %q or device label %q", second.sec.OperatorName, second.sec.SetupDeviceLabel)
 	}
 }

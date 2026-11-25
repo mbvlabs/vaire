@@ -11,7 +11,6 @@ import (
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/cli/ui"
-	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/localenv"
 	"github.com/mbvlabs/vaire/internal/transport"
 	"github.com/mbvlabs/vaire/internal/workspaces"
@@ -59,7 +58,7 @@ func runSSH(cmd *cobra.Command, _ []string) error {
 }
 
 func dialHostShell(cmd *cobra.Command, s *session) (*transport.SSHClient, error) {
-	login := config.HostLogin(s.ctx.Operator.SSHUser)
+	login := s.ctx.Operator.Name
 	if login == "" {
 		return nil, output.NewError(output.CodePrecondition, "this workspace identity has no managed host shell", output.ExitPrecondition, "Sign in with a verified admin device.")
 	}

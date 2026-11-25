@@ -82,6 +82,25 @@ func retireBootstrapOperator(ctx context.Context, env *Env, n config.NodeSpec, n
 		return err
 	}
 
+	r, err := userRegistry()
+	if err != nil {
+		return err
+	}
+
+	index := accessOperator(r, name)
+	if index < 0 || !r.Operators[index].BootstrapOwner || config.CheckAdminUser(name) != nil {
+		return deviceAccessDenied()
+	}
+
+	keys, err := renderAdminShellKeys(r, r.Operators[index].ID)
+	if err != nil {
+		return err
+	}
+
+	if err := writeDeviceSSHKey(ctx, name, keys); err != nil {
+		return err
+	}
+
 	op := ops.Operators[0]
 	if _, err := temporaryAccessCommand(ctx, "wg", "set", "wg0", "peer", op.WGPublicKey, "remove"); err != nil {
 		return err

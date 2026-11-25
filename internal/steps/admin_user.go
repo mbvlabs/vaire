@@ -73,7 +73,8 @@ func ClearBootstrapSSH(ctx context.Context, cfg config.Cluster, rt engine.Runtim
 }
 
 func adminSudoers(user string) string {
-	return "# managed by vaire\n" + user + " ALL=(root) NOPASSWD: /usr/local/bin/vaire node rpc\n"
+	return "# managed by vaire\n" + user + " ALL=(ALL) PASSWD: ALL\n" +
+		user + " ALL=(root) NOPASSWD: /usr/local/bin/vaire node rpc\n"
 }
 
 func (adminUser) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {

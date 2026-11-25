@@ -11,7 +11,7 @@ import (
 )
 
 func TestAdminSudoersOnlyAllowsRPC(t *testing.T) {
-	want := "# managed by vaire\noperator ALL=(root) NOPASSWD: /usr/local/bin/vaire node rpc\n"
+	want := "# managed by vaire\noperator ALL=(ALL) PASSWD: ALL\noperator ALL=(root) NOPASSWD: /usr/local/bin/vaire node rpc\n"
 	if got := adminSudoers("operator"); got != want {
 		t.Fatalf("sudoers = %q, want %q", got, want)
 	}

@@ -758,7 +758,7 @@ func (r *initRun) generateSecrets() error {
 		return err
 	}
 
-	sshPriv, _, err := transport.GenerateSSHKey("vaire-" + r.name + "-" + r.name)
+	sshPriv, _, err := transport.GenerateSSHKey("vaire-" + r.name + "-" + r.cfg.Server.AdminUser)
 	if err != nil {
 		return err
 	}
@@ -769,7 +769,7 @@ func (r *initRun) generateSecrets() error {
 	}
 
 	r.sec = workspaces.PendingSecrets{
-		OperatorName:     r.name,
+		OperatorName:     r.cfg.Server.AdminUser,
 		SetupDeviceLabel: deviceLabel,
 		WGPrivateKey:     wgPriv,
 		SSHPrivateKey:    string(sshPriv),
@@ -1799,7 +1799,7 @@ func (r *initRun) document() (secretsdoc.Document, error) {
 		Metrics:        metricsDocument(r.sec.Metrics, r.cfg.Hostname(n.Name), r.cfg.Metrics.PathPrefix),
 		MasterPassword: r.masterHash,
 		Console:        &secretsdoc.Console{Username: r.cfg.Server.AdminUser, Password: r.sec.SudoPassword},
-		BreakGlass:     "The console credentials are for the provider console only; SSH uses a personal device key. To rebuild from backups, run vaire server init --restore.",
+		BreakGlass:     "If WireGuard is unavailable, use the provider console to sign in with the local Unix password. Normal SSH over WireGuard uses your device key.",
 	}, nil
 }
 
