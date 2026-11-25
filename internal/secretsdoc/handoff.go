@@ -64,7 +64,7 @@ func (d Document) Groups() []Group {
 	if d.Console != nil {
 		groups = append(groups, Group{Title: "VPS admin account", Fields: nonEmpty(
 			Field{"Username", d.Console.Username},
-			Field{"Local account password", d.Console.Password},
+			Field{"Password", d.Console.Password},
 		)})
 	}
 

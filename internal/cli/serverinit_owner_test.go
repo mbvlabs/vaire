@@ -156,9 +156,12 @@ func TestOwnerInstallResumeAndRecoverySeparation(t *testing.T) {
 	}
 
 	if !slices.ContainsFunc(doc.Groups(), func(group secretsdoc.Group) bool {
-		return group.Title == "VPS admin account"
+		return group.Title == "VPS admin account" && slices.Equal(group.Fields, []secretsdoc.Field{
+			{Label: "Username", Value: doc.Console.Username},
+			{Label: "Password", Value: doc.Console.Password},
+		})
 	}) {
-		t.Fatal("handoff must label the credentials as the VPS admin account")
+		t.Fatal("handoff must list the admin credentials as Username and Password")
 	}
 
 	s := rpc.AccessSetup{ID: "device", Server: "prod", Node: "db", User: "owner", UnixLogin: "device-user",
