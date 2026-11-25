@@ -3,6 +3,7 @@ package release
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"regexp"
 	"slices"
 
@@ -33,6 +34,8 @@ type Manifest struct {
 	Version        string              `json:"version"`
 	ReleaseBaseURL string              `json:"releaseBaseUrl"`
 	Artifacts      map[string]Artifact `json:"artifacts"`
+	PSQLArtifacts  map[string]Artifact `json:"psqlArtifacts,omitempty"`
+	USQLArtifacts  map[string]Artifact `json:"usqlArtifacts,omitempty"`
 	Raw            []byte              `json:"-"`
 	Bundle         []byte              `json:"-"`
 }
@@ -71,12 +74,29 @@ func Validate(m Manifest, channel, wantVersion string) error {
 		return verificationFailed("release manifest artifacts are incomplete")
 	}
 
-	for key, art := range m.Artifacts {
+	for _, group := range []struct {
+		file string
+		set  map[string]Artifact
+	}{
+		{"vaire", m.Artifacts},
+		{"psql.tar.gz", m.PSQLArtifacts},
+		{"usql", m.USQLArtifacts},
+	} {
+		if err := validateArtifacts(wantBase, group.file, group.set); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateArtifacts(base, file string, artifacts map[string]Artifact) error {
+	for key, art := range artifacts {
 		if !slices.Contains(artifactKeys, key) {
 			return verificationFailed("release manifest artifact platform is invalid")
 		}
 
-		if art.URL != wantBase+"/"+key+"/vaire" {
+		if art.URL != base+"/"+key+"/"+file {
 			return verificationFailed("release manifest artifact URL is invalid")
 		}
 
@@ -97,7 +117,7 @@ func decodeManifest(raw []byte) (Manifest, error) {
 		return Manifest{}, verificationFailed("release manifest is malformed")
 	}
 
-	if dec.More() {
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
 		return Manifest{}, verificationFailed("release manifest is malformed")
 	}
 

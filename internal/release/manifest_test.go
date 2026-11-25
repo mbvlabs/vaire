@@ -92,6 +92,51 @@ func TestValidateTaggedRequiresEveryArtifact(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidSidecars(t *testing.T) {
+	m := testManifest(ChannelEdge, edgeManifestVersion)
+	art := m.Artifacts["linux/amd64"]
+	m.PSQLArtifacts = map[string]Artifact{"linux/amd64": art}
+
+	if err := Validate(m, ChannelEdge, ""); err == nil {
+		t.Fatal("accepted a psql bundle that points to the vaire binary")
+	}
+
+	m.PSQLArtifacts = nil
+	art.URL = versionRoot(edgeManifestVersion) + "/linux/amd64/usql"
+	art.SHA256 = "invalid"
+	m.USQLArtifacts = map[string]Artifact{"linux/amd64": art}
+
+	if err := Validate(m, ChannelEdge, ""); err == nil {
+		t.Fatal("accepted an invalid usql checksum")
+	}
+}
+
+func TestDecodeManifestRejectsUnknownFieldsAndTrailingData(t *testing.T) {
+	for _, raw := range []string{`{"unknown":true}`, `{} {}`, `{} ]`} {
+		if _, err := decodeManifest([]byte(raw)); err == nil {
+			t.Errorf("accepted malformed manifest %q", raw)
+		}
+	}
+}
+
+// Opt-in check of the same signed pinned release path used for bootstrap.
+func TestPublishedEdgeManifest(t *testing.T) {
+	if os.Getenv("VAIRE_TEST_PUBLISHED_EDGE") != "1" {
+		t.Skip("set VAIRE_TEST_PUBLISHED_EDGE=1 to check the signed regression fixture")
+	}
+
+	client := &Client{}
+
+	m, err := client.Resolve(t.Context(), ChannelEdge, "edge-043892d668ba")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(m.PSQLArtifacts) != len(artifactKeys) || len(m.USQLArtifacts) != len(artifactKeys) {
+		t.Fatal("published manifest is missing bundled clients")
+	}
+}
+
 func TestValidateNamedEdgeManifest(t *testing.T) {
 	for _, version := range []string{"1.0.0-alpha.1", "1.0.0-beta.4"} {
 		m := subsetManifest(testManifest(ChannelEdge, version), "linux/amd64")
@@ -237,6 +282,12 @@ func TestClientResolveAndFetchEdge(t *testing.T) {
 	manifest := subsetManifest(testManifest(ChannelEdge, edgeManifestVersion), "linux/amd64")
 	artifactURL := versionRoot(edgeManifestVersion) + "/linux/amd64/vaire"
 	manifest.Artifacts["linux/amd64"] = Artifact{URL: artifactURL, SHA256: hex.EncodeToString(sum[:])}
+	manifest.PSQLArtifacts = map[string]Artifact{
+		"linux/amd64": {URL: versionRoot(edgeManifestVersion) + "/linux/amd64/psql.tar.gz", SHA256: strings.Repeat("a", 64)},
+	}
+	manifest.USQLArtifacts = map[string]Artifact{
+		"linux/amd64": {URL: versionRoot(edgeManifestVersion) + "/linux/amd64/usql", SHA256: strings.Repeat("b", 64)},
+	}
 
 	raw, err := json.Marshal(manifest)
 	if err != nil {
