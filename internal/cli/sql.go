@@ -13,9 +13,15 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mbvlabs/vaire/internal/backup"
 	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/ui"
+	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/rpc"
+	"github.com/mbvlabs/vaire/internal/secrets"
 	"github.com/mbvlabs/vaire/internal/workspaces"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // pgPort is where operator commands connect: the session pooler, which
@@ -80,9 +86,109 @@ func sessionOptions(db string, write bool) string {
 	return "--default_transaction_read_only=on"
 }
 
+func loginOptions(db, role string, write bool) string {
+	if role != "" {
+		return ""
+	}
+
+	return sessionOptions(db, write)
+}
+
+func sqlSessionSetup(db, role string, write bool) (string, string) {
+	if role != "" {
+		return "", "BEGIN"
+	}
+
+	if write {
+		return "SET ROLE " + pg.Quote(ownerRole(db)), "BEGIN READ WRITE"
+	}
+
+	return "SET default_transaction_read_only = on", "BEGIN READ ONLY"
+}
+
 // ownerRole is db's owner role. A restore's or drill's copy
 // (<db>__restoring) holds the live database's roles, so it is <db>_owner.
 func ownerRole(db string) string { return backup.LiveDatabase(db) + "_owner" }
+
+// sessionRole validates the explicit application credential path before any
+// connection or prompt. An omitted flag retains the administrator behavior.
+func sessionRole(cmd *cobra.Command) (string, error) {
+	if !cmd.Flags().Changed("role") {
+		return "", nil
+	}
+
+	role := stringFlag(cmd, "role")
+	if role != "ro" && role != "app" && role != "migrate" {
+		return "", output.NewError(output.CodeUsage, "--role must be ro, app, or migrate", output.ExitUsage, "")
+	}
+
+	if flagTrue(cmd, "write") {
+		return "", output.NewError(output.CodeUsage, "--role cannot be combined with --write", output.ExitUsage,
+			"The selected database role determines its own privileges.")
+	}
+
+	if MustNotPrompt(cmd) {
+		return "", output.NewError(output.CodeInputRequired, "--role needs a terminal for the database password", output.ExitInput, "")
+	}
+
+	return role, nil
+}
+
+func databaseSessionLogin(cmd *cobra.Command, s *session, p *progress, db, role string, write bool) (string, string, error) {
+	if role == "" {
+		if err := requireDatabaseAdmin(cmd, s, p); err != nil {
+			return "", "", err
+		}
+
+		return sessionLogin(cmd, s, p, db, write)
+	}
+
+	defer ui.Suspend()()
+
+	user := databaseRoleUser(db, role)
+	if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "Password for %s: ", user); err != nil {
+		return "", "", err
+	}
+
+	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	_, _ = fmt.Fprintln(cmd.ErrOrStderr())
+
+	if err != nil {
+		return "", "", output.WrapError(output.CodeInputRequired, err, output.ExitInput, "")
+	}
+
+	password := string(raw)
+	secrets.Add(password)
+
+	return user, password, nil
+}
+
+func requireDatabaseAdmin(cmd *cobra.Command, s *session, p *progress) error {
+	if !s.ctx.Managed {
+		return nil
+	}
+
+	reply, err := p.call(commandContext(cmd), s.node, "whoami", nil, remote.CallOptions{OnEvent: p.event})
+	if err != nil {
+		return err
+	}
+
+	var who rpc.WhoamiReply
+	if err := reply.Decode(&who); err != nil {
+		return err
+	}
+
+	if who.Role != config.AccessRoleOwner {
+		return output.NewError(output.CodeInputRequired, "a database role is required for member sessions", output.ExitInput,
+			"Pass --role ro, --role app, or --role migrate and use that role's database password.")
+	}
+
+	return nil
+}
+
+func databaseRoleUser(db, role string) string {
+	return backup.LiveDatabase(db) + "_" + role
+}
 
 // sqlQuery resolves the query from the argument, --file, or stdin.
 func sqlQuery(cmd *cobra.Command, args []string) (string, error) {
@@ -115,6 +221,11 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	db := stringFlag(cmd, "db")
 	write := flagTrue(cmd, "write")
 
+	role, err := sessionRole(cmd)
+	if err != nil {
+		return err
+	}
+
 	query, err := sqlQuery(cmd, args)
 	if err != nil {
 		return err
@@ -137,7 +248,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
 
-	user, password, err := sessionLogin(cmd, s, p, db, write)
+	user, password, err := databaseSessionLogin(cmd, s, p, db, role, write)
 	if err != nil {
 		return err
 	}
@@ -151,7 +262,7 @@ func runSQL(cmd *cobra.Command, args []string) error {
 
 	conn, err := pg.Connect(ctx, s.dialer, pg.Params{
 		Host: at.WGAddress, Port: pgPort, ServerName: at.Hostname, TLSMode: s.ctx.TLSMode,
-		User: user, Password: password, Database: db,
+		User: user, Password: password, Database: db, ClearOptions: role != "",
 	})
 	if err != nil {
 		return output.WrapError(output.CodeRemoteUnreachable, fmt.Errorf("connect to PostgreSQL: %w", err), output.ExitTransport,
@@ -165,18 +276,10 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	if s.ctx.TLSMode == "self-signed" {
 		warnings = append(warnings, output.Warning{Code: "tls_unverified", Message: "the cluster uses a self-signed certificate; the connection is encrypted but not verified"})
 	}
-	// One transaction per call; read-only unless --write, which acts as the
-	// database's owner role (see sessionOptions).
-	begin := "BEGIN READ ONLY"
-	setup := "SET default_transaction_read_only = on"
-
-	if write {
-		begin = "BEGIN READ WRITE"
-		setup = "SET ROLE " + pg.Quote(ownerRole(db))
-	}
-
-	if _, err := conn.Exec(ctx, setup); err != nil {
-		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
+	// Application credentials keep their own server-side role and privileges.
+	setup, begin := sqlSessionSetup(db, role, write)
+	if err := execSQLSetup(ctx, conn, setup); err != nil {
+		return err
 	}
 
 	if _, err := conn.Exec(ctx, begin); err != nil {
@@ -213,6 +316,18 @@ func runSQL(cmd *cobra.Command, args []string) error {
 	data := newSQLData(results)
 
 	return output.Success(cmd, output.Result{Data: data, Message: data.render(), Warnings: warnings})
+}
+
+func execSQLSetup(ctx context.Context, conn *pg.Remote, setup string) error {
+	if setup == "" {
+		return nil
+	}
+
+	if _, err := conn.Exec(ctx, setup); err != nil {
+		return output.WrapError(output.CodeExternalCommand, err, output.ExitExternal, "")
+	}
+
+	return nil
 }
 
 // sqlData is vaire sql's result: the last statement's columns, rows and tag at

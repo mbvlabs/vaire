@@ -111,6 +111,8 @@ case "${url}" in
   */vaire) cp "${TEST_WORK}/fixtures/vaire" "${out}" ;;
   */usql.sigstore.json) cp "${TEST_WORK}/fixtures/usql-bundle" "${out}" ;;
   */usql) cp "${TEST_WORK}/fixtures/usql" "${out}" ;;
+  */psql.tar.gz.sigstore.json) cp "${TEST_WORK}/fixtures/psql-bundle" "${out}" ;;
+  */psql.tar.gz) cp "${TEST_WORK}/fixtures/psql.tar.gz" "${out}" ;;
   *) exit 1 ;;
 esac
 EOF
@@ -289,6 +291,84 @@ printf 'user usql' >"${work}/dest/usql"
 VAIRE_INSTALL_DIR="${work}/dest" VAIRE_INSTALL_ONLY=1 bash "${work}/edge.sh" >"${work}/out" 2>&1
 [ ! -e "${work}/dest/.vaire-usql" ]
 [ "$(cat "${work}/dest/usql")" = 'user usql' ]
+
+# The full psql archive is signed and hashed before extraction or replacement.
+make_fixture edge-abcdef012345 edge
+cp "${PSQL_BUNDLE_DIR}/linux/amd64/psql.tar.gz" "${work}/fixtures/psql.tar.gz"
+cp "${work}/fixtures/bundle" "${work}/fixtures/psql-bundle"
+set_psql_hash() {
+  local hash
+  hash="$("${real_sha256}" "${work}/fixtures/psql.tar.gz" | awk '{print $1}')"
+  jq --arg hash "${hash}" '.psqlArtifacts = {"linux/amd64": {"sha256": $hash}}' \
+    "${work}/fixtures/immutable-manifest" >"${work}/fixture-new"
+  cp "${work}/fixture-new" "${work}/fixtures/immutable-manifest"
+  cp "${work}/fixture-new" "${work}/fixtures/channel-manifest"
+}
+set_psql_hash
+run_install "${work}/edge.sh"
+[ "$("${work}/dest/.vaire-psql" --version)" = 'psql (PostgreSQL) 18.7' ]
+installed_bundle="$(dirname "$(readlink -f "${work}/dest/.vaire-psql")")"
+for client in pg_dump pg_restore; do
+  [ "$("${installed_bundle}/${client}" --version)" = "${client} (PostgreSQL) 18.7" ]
+done
+printf 'old vaire' >"${work}/dest/vaire"
+old_psql="$(readlink "${work}/dest/.vaire-psql")"
+tar -czf "${work}/fixtures/psql.tar.gz" -C "${fixture_dir}/psql-src" psql pg_dump lib licenses dependencies.txt
+set_psql_hash
+if VAIRE_INSTALL_DIR="${work}/dest" VAIRE_INSTALL_ONLY=1 bash "${work}/edge.sh" >"${work}/out" 2>&1; then
+  echo 'accepted a bundle missing pg_restore' >&2; exit 1
+fi
+grep -Fq 'no executable pg_restore' "${work}/out"
+[ "$(readlink "${work}/dest/.vaire-psql")" = "${old_psql}" ]
+mkdir -p "${work}/mismatched"
+cp -R "${fixture_dir}/psql-src/." "${work}/mismatched/"
+printf '#!/bin/sh\necho "pg_dump (PostgreSQL) 18.6"\n' >"${work}/mismatched/pg_dump"
+tar -czf "${work}/fixtures/psql.tar.gz" -C "${work}/mismatched" psql pg_dump pg_restore lib licenses dependencies.txt
+set_psql_hash
+if VAIRE_INSTALL_DIR="${work}/dest" VAIRE_INSTALL_ONLY=1 bash "${work}/edge.sh" >"${work}/out" 2>&1; then
+  echo 'accepted mismatched client versions' >&2; exit 1
+fi
+grep -Fq 'bundled client versions do not match' "${work}/out"
+[ "$(readlink "${work}/dest/.vaire-psql")" = "${old_psql}" ]
+cp "${PSQL_BUNDLE_DIR}/linux/amd64/psql.tar.gz" "${work}/fixtures/psql.tar.gz"
+set_psql_hash
+printf 'bad signature' >"${work}/fixtures/psql-bundle"
+if VAIRE_INSTALL_DIR="${work}/dest" VAIRE_INSTALL_ONLY=1 bash "${work}/edge.sh" >"${work}/out" 2>&1; then
+  echo 'accepted an invalid psql signature' >&2; exit 1
+fi
+grep -Fq 'psql signature verification failed' "${work}/out"
+[ "$(cat "${work}/dest/vaire")" = 'old vaire' ]
+[ "$(readlink "${work}/dest/.vaire-psql")" = "${old_psql}" ]
+cp "${work}/fixtures/bundle" "${work}/fixtures/psql-bundle"
+printf 'tampered' >>"${work}/fixtures/psql.tar.gz"
+if VAIRE_INSTALL_DIR="${work}/dest" VAIRE_INSTALL_ONLY=1 bash "${work}/edge.sh" >"${work}/out" 2>&1; then
+  echo 'accepted a bad psql checksum' >&2; exit 1
+fi
+grep -Fq 'psql checksum verification failed' "${work}/out"
+[ "$(cat "${work}/dest/vaire")" = 'old vaire' ]
+mkdir -p "${work}/unsafe"
+ln -s /etc/passwd "${work}/unsafe/psql"
+tar -czf "${work}/fixtures/psql.tar.gz" -C "${work}/unsafe" psql
+set_psql_hash
+if VAIRE_INSTALL_DIR="${work}/dest" VAIRE_INSTALL_ONLY=1 bash "${work}/edge.sh" >"${work}/out" 2>&1; then
+  echo 'accepted a symlink in the psql archive' >&2; exit 1
+fi
+grep -Fq 'unsafe psql archive entry' "${work}/out"
+[ "$(cat "${work}/dest/vaire")" = 'old vaire' ]
+[ "$(readlink "${work}/dest/.vaire-psql")" = "${old_psql}" ]
+rm "${work}/unsafe/psql"
+printf 'escape' >"${work}/unsafe/escape"
+tar -czf "${work}/fixtures/psql.tar.gz" -C "${work}/unsafe" --transform='s|escape|../escape|' escape
+set_psql_hash
+if VAIRE_INSTALL_DIR="${work}/dest" VAIRE_INSTALL_ONLY=1 bash "${work}/edge.sh" >"${work}/out" 2>&1; then
+  echo 'accepted traversal in the psql archive' >&2; exit 1
+fi
+grep -Fq 'unsafe psql archive path' "${work}/out"
+[ ! -e "${work}/escape" ]
+[ "$(cat "${work}/dest/vaire")" = 'old vaire' ]
+make_fixture edge-abcdef012345 edge
+VAIRE_INSTALL_DIR="${work}/dest" VAIRE_INSTALL_ONLY=1 bash "${work}/edge.sh" >"${work}/out" 2>&1
+[ ! -e "${work}/dest/.vaire-psql" ]
 
 # A hash is signed by the edge workflow; alpha, beta, rc and final versions by
 # the exact stable tag identity even when they arrive through another pointer.

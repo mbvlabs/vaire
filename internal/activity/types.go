@@ -153,16 +153,18 @@ type Event struct {
 // store instance that issued it: a recreated store rejects it as a mismatch,
 // and evidence removed by retention reports Coverage.CursorExpired.
 type Query struct {
-	Since       string `json:"since,omitempty"`
-	Until       string `json:"until,omitempty"`
-	OperationID string `json:"operation_id,omitempty"`
-	RequestID   string `json:"request_id,omitempty"`
-	JobID       string `json:"job_id,omitempty"`
-	Database    string `json:"database,omitempty"`
-	Action      string `json:"action,omitempty"`
-	Outcome     string `json:"outcome,omitempty"`
-	Cursor      string `json:"cursor,omitempty"`
-	Limit       int    `json:"limit,omitempty"`
+	// VerifiedOperatorID is a server-supplied access restriction, never an RPC filter.
+	VerifiedOperatorID string `json:"-"`
+	Since              string `json:"since,omitempty"`
+	Until              string `json:"until,omitempty"`
+	OperationID        string `json:"operation_id,omitempty"`
+	RequestID          string `json:"request_id,omitempty"`
+	JobID              string `json:"job_id,omitempty"`
+	Database           string `json:"database,omitempty"`
+	Action             string `json:"action,omitempty"`
+	Outcome            string `json:"outcome,omitempty"`
+	Cursor             string `json:"cursor,omitempty"`
+	Limit              int    `json:"limit,omitempty"`
 }
 
 // Page is one bounded result. Schema is always Schema. NextCursor is empty only

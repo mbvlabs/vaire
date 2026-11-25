@@ -66,6 +66,12 @@ if TEST_BUILD_FAIL=1 build linux/amd64 >/dev/null 2>&1; then
 fi
 [ ! -e "${manifest}" ]
 
+mv "${PSQL_BUNDLE_DIR}/darwin/arm64/psql.tar.gz" "${work}/missing.tar.gz"
+if build '' >/dev/null 2>&1; then
+  echo 'built a release with a missing platform sidecar' >&2; exit 1
+fi
+mv "${work}/missing.tar.gz" "${PSQL_BUNDLE_DIR}/darwin/arm64/psql.tar.gz"
+
 if TEST_BAD_USQL_ARCHIVE=1 build linux/amd64 >/dev/null 2>&1; then
   echo 'accepted an upstream usql archive with a bad checksum' >&2
   exit 1
@@ -78,6 +84,7 @@ cmp "${manifest}" "${root}/edge/manifest.json"
 [ -f "${root}/releases/${version}/linux/amd64/vaire" ]
 [ -f "${root}/releases/${version}/linux/amd64/usql.LICENSE" ]
 [ "$(jq -r '.usqlArtifacts["linux/amd64"].sha256' "${manifest}")" = "$(sha256sum "${root}/releases/${version}/linux/amd64/usql" | awk '{print $1}')" ]
+[ "$(jq -r '.psqlArtifacts["linux/amd64"].sha256' "${manifest}")" = "$(sha256sum "${root}/releases/${version}/linux/amd64/psql.tar.gz" | awk '{print $1}')" ]
 [ ! -e "${root}/releases/${version}/linux/arm64" ]
 [ ! -e "${root}/releases/${version}/darwin" ]
 installer="${root}/releases/${version}/install.sh"
@@ -99,6 +106,7 @@ cat >"${work}/expected-signed" <<EOF
 ${root}/edge/manifest.json
 ${root}/releases/${version}/manifest.json
 ${root}/releases/${version}/linux/amd64/vaire
+${root}/releases/${version}/linux/amd64/psql.tar.gz
 ${root}/releases/${version}/linux/amd64/usql
 EOF
 cmp "${TEST_SIGNED}" "${work}/expected-signed"

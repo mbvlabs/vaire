@@ -57,6 +57,14 @@ func handleConfigGet(_ context.Context, env *Env) (Result, error) {
 			return Result{}, output.NewError(output.CodeConfig, "the node's desired state is invalid", output.ExitConfig, "")
 		}
 
+		if memberRead(env) {
+			// Use the file just read, not an independently loaded snapshot.
+			copyEnv := *env
+			copyEnv.Cluster = cfg
+			cfg = memberConfig(&copyEnv, cfg)
+			revision = ""
+		}
+
 		raw, err = cfg.Encode()
 		if err != nil {
 			return Result{}, err
@@ -426,9 +434,17 @@ func handleConfigValidate(_ context.Context, env *Env) (Result, error) {
 	}
 
 	raw := []byte(p.TOML)
+	if memberRead(env) && p.TOML != "" {
+		return Result{}, deviceAccessDenied()
+	}
+
 	if p.TOML == "" {
 		file, err := os.ReadFile(state.Path)
 		if err != nil {
+			if memberRead(env) {
+				return Result{}, output.NewError(output.CodePrecondition, "server configuration could not be checked", output.ExitPrecondition, "Contact a server administrator.")
+			}
+
 			return Result{}, output.NewError(output.CodeClusterNotInitialized, "this node has no cluster.toml", output.ExitWorkspace, "Run vaire server init first.")
 		}
 
@@ -436,6 +452,9 @@ func handleConfigValidate(_ context.Context, env *Env) (Result, error) {
 	}
 
 	problems := validateProblems(raw)
+	if memberRead(env) && len(problems) != 0 {
+		problems = []string{"server configuration is invalid; contact a server administrator"}
+	}
 
 	return Result{Data: map[string]any{"valid": len(problems) == 0, "problems": problems}}, nil
 }

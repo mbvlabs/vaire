@@ -28,6 +28,8 @@ type Params struct {
 	SimpleProtocol bool
 	// ApplicationName names the session in pg_stat_activity.
 	ApplicationName string
+	// ClearOptions prevents inherited PGOPTIONS from changing the session role.
+	ClearOptions bool
 }
 
 // Remote is a pgx connection to PostgreSQL over a transport.Dialer.
@@ -63,6 +65,10 @@ func Connect(ctx context.Context, dialer transport.Dialer, p Params) (*Remote, e
 	}
 
 	cfg.TLSConfig = tlsConfig(p)
+	if p.ClearOptions {
+		delete(cfg.RuntimeParams, "options")
+	}
+
 	if p.SimpleProtocol {
 		cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	}

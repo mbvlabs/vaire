@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -114,8 +115,19 @@ type jobSpec struct {
 	Secrets map[string]string `json:"secrets,omitempty"`
 	// OperationID and ParentRequestID carry the RPC correlation into the
 	// detached job so its events belong to the same logical operation.
-	OperationID     string `json:"operation_id,omitempty"`
-	ParentRequestID string `json:"parent_request_id,omitempty"`
+	OperationID      string `json:"operation_id,omitempty"`
+	ParentRequestID  string `json:"parent_request_id,omitempty"`
+	OriginOperatorID string `json:"origin_operator_id,omitempty"`
+	OriginToken      string `json:"origin_token,omitempty"`
+}
+
+func newJobSpec(env *Env, job string, secrets map[string]string, operationID string) jobSpec {
+	spec := jobSpec{Job: job, Secrets: secrets, OperationID: operationID, ParentRequestID: env.Req.RequestID, OriginOperatorID: verifiedOperator(env)}
+	if spec.OriginOperatorID != "" {
+		spec.OriginToken = rpc.NewRequestID()
+	}
+
+	return spec
 }
 
 // jobEnv is what a job function gets.
@@ -129,6 +141,8 @@ type jobEnv struct {
 	DB                          string
 	OperationID                 string
 	ParentRequestID             string
+	OriginOperatorID            string
+	OriginToken                 string
 	lease                       *lockedJobLease
 	installID                   string
 	retainedFollowerReservation bool
@@ -362,6 +376,8 @@ func beginJobRun(ctx context.Context, env *jobEnv, act *activityRecorder, opts J
 		// queued until a follower synthesizes a generic crash; the spec is
 		// never recreated or replayed.
 		if rec, ok := activityRefusedJobRecord(opts.ID != "", env.ID, env.Job, db, berr); ok {
+			rec.OriginOperatorID = env.OriginOperatorID
+			rec.OriginToken = env.OriginToken
 			putFinishedJob(rec)
 		}
 
@@ -382,6 +398,7 @@ func beginJobRun(ctx context.Context, env *jobEnv, act *activityRecorder, opts J
 	stateErr := jobUpdateState(func(st *engine.State) error {
 		if old, ok := st.Job(env.ID); ok {
 			rec.CreatedAt, rec.Unit = old.CreatedAt, old.Unit
+			copyJobOrigin(env, old, &rec)
 		}
 
 		if rec.CreatedAt == "" {
@@ -419,6 +436,15 @@ func beginJobRun(ctx context.Context, env *jobEnv, act *activityRecorder, opts J
 	env.installID = installID
 
 	return rec, nil
+}
+
+func copyJobOrigin(env *jobEnv, old engine.JobRecord, rec *engine.JobRecord) {
+	if env.OriginOperatorID != "" && validJobID(env.ID) && old.State == engine.JobQueued &&
+		old.OriginOperatorID == env.OriginOperatorID && env.OriginToken != "" &&
+		old.OriginToken == env.OriginToken && old.Job == env.Job && old.Unit == jobUnit(env.ID) {
+		rec.OriginOperatorID = env.OriginOperatorID
+		rec.OriginToken = env.OriginToken
+	}
 }
 
 func runSpecialJob(ctx context.Context, job string, opts JobOptions, report engine.Reporter, act *activityRecorder, jaOut **jobActivity) (any, string, bool, error) {
@@ -591,6 +617,8 @@ func loadJobSpec(ctx context.Context, env *jobEnv, opts JobOptions, act *activit
 
 	env.Params, env.Secrets = spec.Params, spec.Secrets
 	env.OperationID, env.ParentRequestID = spec.OperationID, spec.ParentRequestID
+	env.OriginOperatorID = spec.OriginOperatorID
+	env.OriginToken = spec.OriginToken
 
 	return nil
 }
@@ -872,10 +900,24 @@ func putJob(rec engine.JobRecord) {
 			rec.CreatedAt, rec.Unit = old.CreatedAt, old.Unit
 		}
 
+		clearUnmatchedJobOrigin(st, &rec)
+
 		st.PutJob(rec)
 
 		return nil
 	})
+}
+
+// A worker may carry attribution forward only while the original queued
+// record still exists and agrees with the identity read from its private spec.
+func clearUnmatchedJobOrigin(st *engine.State, rec *engine.JobRecord) {
+	old, ok := st.Job(rec.ID)
+	if !ok || old.Final() || rec.OriginOperatorID == "" || old.OriginOperatorID != rec.OriginOperatorID ||
+		rec.OriginToken == "" || old.OriginToken != rec.OriginToken ||
+		old.Job != rec.Job || old.Unit != jobUnit(rec.ID) || rec.Unit != old.Unit || !validJobID(rec.ID) {
+		rec.OriginOperatorID = ""
+		rec.OriginToken = ""
+	}
 }
 
 // notRun undoes what the RPC of a skipped job prepared: a restore is
@@ -1107,6 +1149,8 @@ func putFinishedJob(rec engine.JobRecord) {
 			}
 		}
 
+		clearUnmatchedJobOrigin(st, &rec)
+
 		st.PutJob(rec)
 
 		return nil
@@ -1224,6 +1268,53 @@ func validJobID(id string) bool {
 	return true
 }
 
+// writeNewJobSpec never replaces a previous invocation's unread private spec.
+func writeNewJobSpec(path string, raw []byte) error {
+	dir := filepath.Dir(path)
+
+	f, err := os.CreateTemp(dir, ".job-spec-*")
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = os.Remove(f.Name()) }()
+
+	n, err := f.Write(raw)
+	if err == nil && n != len(raw) {
+		err = io.ErrShortWrite
+	}
+
+	if err == nil {
+		err = f.Sync()
+	}
+
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if err := os.Link(f.Name(), path); err != nil {
+		return err
+	}
+
+	d, err := os.Open(dir)
+	if err == nil {
+		err = d.Sync()
+		if closeErr := d.Close(); err == nil {
+			err = closeErr
+		}
+	}
+
+	if err != nil {
+		_ = os.Remove(path)
+	}
+
+	return err
+}
+
 // jobUnit is the transient unit of a detachable job.
 func jobUnit(id string) string { return "vaire-job-" + id + ".service" }
 
@@ -1238,7 +1329,7 @@ func startJob(ctx context.Context, env *Env, job string, params any, jobSecrets 
 		operationID = id
 	}
 
-	spec := jobSpec{Job: job, Secrets: jobSecrets, OperationID: operationID, ParentRequestID: env.Req.RequestID}
+	spec := newJobSpec(env, job, jobSecrets, operationID)
 
 	if params != nil {
 		raw, err := json.Marshal(params)
@@ -1258,14 +1349,19 @@ func startJob(ctx context.Context, env *Env, job string, params any, jobSecrets 
 		return "", err
 	}
 
-	if err := engine.WriteFileAtomic(filepath.Join(JobDir, id+".json"), raw, 0o600); err != nil {
+	specPath := filepath.Join(JobDir, id+".json")
+	if err := writeNewJobSpec(specPath, raw); err != nil {
 		return "", err
 	}
 
 	unit := jobUnit(id)
 
 	if err := engine.UpdateState(func(st *engine.State) error {
-		st.PutJob(engine.JobRecord{ID: id, Job: job, DB: rpcJobDatabase(job, spec.Params), Unit: unit, State: engine.JobQueued, CreatedAt: stamp()})
+		if _, exists := st.Job(id); exists {
+			return output.NewError(output.CodePrecondition, "job id already exists", output.ExitPrecondition, "")
+		}
+
+		st.PutJob(engine.JobRecord{ID: id, Job: job, DB: rpcJobDatabase(job, spec.Params), Unit: unit, State: engine.JobQueued, CreatedAt: stamp(), OriginOperatorID: spec.OriginOperatorID, OriginToken: spec.OriginToken})
 
 		if job == "restore" || job == "recover" || job == "restore-drill" {
 			st.RetainJob(id)
@@ -1273,12 +1369,13 @@ func startJob(ctx context.Context, env *Env, job string, params any, jobSecrets 
 
 		return nil
 	}); err != nil {
+		_ = os.Remove(specPath)
 		return "", err
 	}
 
 	if err := launchJobUnit(ctx, env, unit, job, id); err != nil {
 		_ = os.Remove(filepath.Join(JobDir, id+".json"))
-		finishJob(engine.JobRecord{ID: id, Job: job, Unit: unit}, engine.JobFailed, "systemd-run failed", nil, err)
+		finishJob(engine.JobRecord{ID: id, Job: job, Unit: unit, OriginOperatorID: spec.OriginOperatorID, OriginToken: spec.OriginToken}, engine.JobFailed, "systemd-run failed", nil, err)
 
 		return "", output.WrapError(output.CodeExternalCommand, fmt.Errorf("starting the job unit: %w", err), output.ExitExternal, "")
 	}
@@ -1309,6 +1406,7 @@ var loadJobState = func() (engine.State, error) { return engine.LoadState(engine
 // It is a seam so a test can exercise a state-observation failure without
 // waiting for the production interval.
 var jobFollowPoll = time.Second
+var streamJobJournal = streamJournal
 
 // jobObservationError marks a failure to read a started job's state, as
 // opposed to a terminal job outcome. A caller that has launched a job must
@@ -1393,8 +1491,9 @@ func waitJobEvidence(ctx context.Context, rec engine.JobRecord) (engine.JobRecor
 	}
 }
 
-func awaitJobRecord(ctx context.Context, id string, rec engine.JobRecord) (engine.JobRecord, error) {
+func awaitJobRecord(ctx context.Context, id string, rec engine.JobRecord, memberEnv *Env) (engine.JobRecord, error) {
 	inactiveSince := time.Time{}
+	original := rec
 
 	for !rec.Final() {
 		select {
@@ -1414,9 +1513,22 @@ func awaitJobRecord(ctx context.Context, id string, rec engine.JobRecord) (engin
 
 		var err error
 
+		if memberEnv != nil {
+			st, readErr := loadJobState()
+
+			current, exists := st.Job(id)
+			if readErr != nil || !exists || !sameMemberJob(memberEnv, original, current) {
+				return rec, deviceAccessDenied()
+			}
+		}
+
 		rec, err = refreshFollowedJob(ctx, id, rec, &inactiveSince)
 		if err != nil {
 			return rec, err
+		}
+
+		if memberEnv != nil && !sameMemberJob(memberEnv, original, rec) {
+			return rec, deviceAccessDenied()
 		}
 	}
 
@@ -1539,52 +1651,142 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 			"List the jobs with vaire job list.").WithDetails(map[string]any{"reason": "job_not_found", "job_id": id})
 	}
 
-	args := []string{"-o", "cat", "--no-pager", "-n", "all"}
-
-	switch {
-	case rec.Unit != "":
-		args = append(args, "-u", rec.Unit)
-	case rec.InvocationID != "":
-		args = append(args, "_SYSTEMD_INVOCATION_ID="+rec.InvocationID)
-	default:
-		args = nil
+	member := env.DeviceIdentity != nil && env.DeviceIdentity.Role == config.AccessRoleMember
+	if member && !memberOwnsJob(env, rec) {
+		return Result{}, deviceAccessDenied()
 	}
 
-	if !rec.Final() && args != nil {
-		args = append(args, "-f")
-	}
+	args := jobJournalArgs(rec, member)
 
 	jctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	done := make(chan struct{})
-
 	var warnings jobWarningCollector
 
-	if args != nil {
-		go func() {
-			defer close(done)
+	original := rec
+	done := startFollowJournal(jctx, cancel, env, original, member, args, &warnings)
 
-			streamJournal(jctx, args, warnings.reporter(env.Report))
-		}()
-	} else {
-		close(done)
+	var memberEnv *Env
+	if member {
+		memberEnv = env
 	}
 
-	rec, err = awaitJobRecord(ctx, id, rec)
+	rec, err = awaitJobRecord(jctx, id, rec, memberEnv)
 	if err != nil {
 		return Result{}, err
+	}
+
+	if member && !sameMemberJob(env, original, rec) {
+		return Result{}, deviceAccessDenied()
+	}
+
+	if member && !memberJobCurrent(env, original) {
+		return Result{}, deviceAccessDenied()
 	}
 	// Wait for the final activity write before reading the result: the job
 	// publishes its terminal state first, and a follower that stopped on that
 	// state alone could miss the evidence warning carried with it.
 	rec, unsettled := waitJobEvidence(ctx, rec)
+	if member && !sameMemberJob(env, original, rec) {
+		return Result{}, deviceAccessDenied()
+	}
+
 	if unsettled {
 		rec.Warnings = mergeJobWarnings(rec.Warnings, []output.Warning{activityWarning()})
 	}
-	// Let journalctl catch up: with -f it never ends, so give it a moment;
-	// without -f (the job had finished already) it ends once it has
-	// replayed the log, so give it longer before cutting it off.
+
+	waitFollowJournal(ctx, cancel, args, done)
+
+	if member {
+		if !memberJobCurrent(env, original) {
+			return Result{}, deviceAccessDenied()
+		}
+	} else {
+		cleanupFollowedCopy(ctx, env, rec)
+	}
+
+	res, err := jobOutcome(rec)
+
+	all := mergeJobWarnings(rec.Warnings, warnings.list())
+	if err != nil {
+		return res, attachJobWarnings(err, all)
+	}
+
+	res.Warnings = append(res.Warnings, all...)
+
+	return res, nil
+}
+
+func jobJournalArgs(rec engine.JobRecord, member bool) []string {
+	args := []string{"-o", "cat", "--no-pager", "-n", "all"}
+
+	switch {
+	case member && validInvocationID(rec.InvocationID):
+		args = append(args, "_SYSTEMD_INVOCATION_ID="+rec.InvocationID)
+	case member:
+		// A unit name can be reused; never replay another invocation's log.
+		return nil
+	case rec.Unit != "":
+		args = append(args, "-u", rec.Unit)
+	case rec.InvocationID != "":
+		args = append(args, "_SYSTEMD_INVOCATION_ID="+rec.InvocationID)
+	default:
+		return nil
+	}
+
+	if !rec.Final() {
+		args = append(args, "-f")
+	}
+
+	return args
+}
+
+func memberJobCurrent(env *Env, original engine.JobRecord) bool {
+	state, err := loadJobState()
+	if err != nil {
+		return false
+	}
+
+	current, exists := state.Job(original.ID)
+
+	return exists && sameMemberJob(env, original, current)
+}
+
+func startFollowJournal(ctx context.Context, cancel context.CancelFunc, env *Env, original engine.JobRecord, member bool, args []string, warnings *jobWarningCollector) <-chan struct{} {
+	done := make(chan struct{})
+	if args == nil {
+		close(done)
+		return done
+	}
+
+	go func() {
+		defer close(done)
+
+		report := warnings.reporter(env.Report)
+		if member {
+			if !memberJobCurrent(env, original) {
+				return
+			}
+
+			forward := report
+			report = func(ev output.Event) {
+				if !memberJobCurrent(env, original) {
+					cancel()
+					return
+				}
+
+				forward(ev)
+			}
+		}
+
+		streamJobJournal(ctx, args, report)
+	}()
+
+	return done
+}
+
+func waitFollowJournal(ctx context.Context, cancel context.CancelFunc, args []string, done <-chan struct{}) {
+	// A live follow needs only a moment to catch up; a replay gets longer.
 	catchUp := 30 * time.Second
 	if slices.Contains(args, "-f") {
 		catchUp = 2 * time.Second
@@ -1599,29 +1801,20 @@ func followJob(ctx context.Context, env *Env, id string) (Result, error) {
 	}
 
 	cancel()
-	// The job is over: never let the journal reader hold the reply.
+
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 	}
+}
 
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+func cleanupFollowedCopy(ctx context.Context, env *Env, rec engine.JobRecord) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+
 	for _, warning := range cleanupCopyJobSpecs(cleanupCtx, engine.State{Jobs: []engine.JobRecord{rec}}) {
 		env.Report(output.Event{Type: "warning", Code: warning.Code, Message: warning.Message})
 	}
-
-	cleanupCancel()
-
-	res, err := jobOutcome(rec)
-
-	all := mergeJobWarnings(rec.Warnings, warnings.list())
-	if err != nil {
-		return res, attachJobWarnings(err, all)
-	}
-
-	res.Warnings = append(res.Warnings, all...)
-
-	return res, nil
 }
 
 // attachJobWarnings carries evidence warnings on a failed job result too, so
@@ -1804,7 +1997,28 @@ func handleJobFollow(ctx context.Context, env *Env) (Result, error) {
 	return res, err
 }
 
-func handleJobList(ctx context.Context, _ *Env) (Result, error) {
+func handleJobList(ctx context.Context, env *Env) (Result, error) {
+	if env.DeviceIdentity != nil && env.DeviceIdentity.Role == config.AccessRoleMember {
+		if verifiedOperator(env) == "" {
+			return Result{}, deviceAccessDenied()
+		}
+
+		st, err := loadJobState()
+		if err != nil {
+			return Result{}, output.NewError(output.CodePrecondition, "the job list could not be read", output.ExitPrecondition, "")
+		}
+
+		jobs := make([]engine.JobRecord, 0)
+
+		for _, rec := range slices.Backward(st.Jobs) {
+			if memberOwnsJob(env, rec) {
+				jobs = append(jobs, rec)
+			}
+		}
+
+		return Result{Data: map[string]any{"jobs": jobs}}, nil
+	}
+
 	_ = reapJobs(ctx, "")
 	warnings := pruneCopyWorkspaces(ctx)
 
@@ -1819,6 +2033,36 @@ func handleJobList(ctx context.Context, _ *Env) (Result, error) {
 	}
 
 	return Result{Data: map[string]any{"jobs": jobs}, Warnings: warnings}, nil
+}
+
+func memberOwnsJob(env *Env, rec engine.JobRecord) bool {
+	id := verifiedOperator(env)
+
+	return id != "" && rec.OriginOperatorID == id && validJobID(rec.OriginToken) && validJobID(rec.ID) &&
+		rec.Unit == jobUnit(rec.ID) && knownJob(rec.Job)
+}
+
+func validInvocationID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+
+	for _, c := range id {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func sameMemberJob(env *Env, original, current engine.JobRecord) bool {
+	return memberOwnsJob(env, current) && current.ID == original.ID &&
+		current.Job == original.Job && current.Unit == original.Unit &&
+		current.OriginToken == original.OriginToken &&
+		current.CreatedAt == original.CreatedAt &&
+		(original.InvocationID == "" || current.InvocationID == original.InvocationID) &&
+		(original.StartedAt == "" || current.StartedAt == original.StartedAt)
 }
 
 // queuedGrace is how long a queued job's unit may be missing: the RPC

@@ -396,7 +396,12 @@ func renderDatabases(dbs []DBRow, width int) string {
 			cache = fmt.Sprintf("%.1f%%", *d.CacheHit*100)
 		}
 
-		line := fmt.Sprintf("%-16s %7s %7d %7d %8s %7s %7ds", d.DB, fmt.Sprintf("%d/%d", d.Connections, d.Max), d.Active, d.IdleInTx, tps, cache, d.LongestXact)
+		connections := fmt.Sprintf("%d/%d", d.Connections, d.Max)
+		if d.Max == 0 {
+			connections = fmt.Sprintf("%d/-", d.Connections)
+		}
+
+		line := fmt.Sprintf("%-16s %7s %7d %7d %8s %7s %7ds", d.DB, connections, d.Active, d.IdleInTx, tps, cache, d.LongestXact)
 		if d.Error != "" {
 			line = fmt.Sprintf("%-16s %s", d.DB, d.Error)
 		}

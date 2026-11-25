@@ -691,6 +691,10 @@ func (c Cluster) validatePhase2(add func(string, ...any), scope Scope) {
 
 		for i, spec := range c.Clusters {
 			c.validateExtensionSelection(add, fmt.Sprintf("clusters[%d]", i), spec)
+
+			if spec.CreatorOperatorID != "" && !accessIDPattern.MatchString(spec.CreatorOperatorID) {
+				add("clusters[%d].creator_operator_id is managed by vaire and must be a valid operator ID", i)
+			}
 		}
 
 		c.validateExtensionHost(add)

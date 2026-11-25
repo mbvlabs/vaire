@@ -569,7 +569,7 @@ func startCopyJob(ctx context.Context, env *Env, job string, params any, jobSecr
 		operationID = id
 	}
 
-	spec := jobSpec{Job: job, Secrets: jobSecrets, OperationID: operationID, ParentRequestID: env.Req.RequestID}
+	spec := newJobSpec(env, job, jobSecrets, operationID)
 
 	if params != nil {
 		raw, err := json.Marshal(params)
@@ -590,13 +590,18 @@ func startCopyJob(ctx context.Context, env *Env, job string, params any, jobSecr
 	}
 
 	specPath := filepath.Join(copyJobDir, id+".json")
-	if err := engine.WriteFileAtomic(specPath, raw, 0o600); err != nil {
-		return "", copyJobPreparationError(err, copyRemoveJobSpec(id))
+	if err := writeNewJobSpec(specPath, raw); err != nil {
+		return "", err
 	}
 
 	unit := jobUnit(id)
 	if err := copyUpdateState(func(st *engine.State) error {
-		st.PutJob(engine.JobRecord{ID: id, Job: job, DB: rpcJobDatabase(job, spec.Params), Unit: unit, State: engine.JobQueued, CreatedAt: stamp()})
+		if _, exists := st.Job(id); exists {
+			return output.NewError(output.CodePrecondition, "job id already exists", output.ExitPrecondition, "")
+		}
+
+		st.PutJob(engine.JobRecord{ID: id, Job: job, DB: rpcJobDatabase(job, spec.Params), Unit: unit, State: engine.JobQueued, CreatedAt: stamp(), OriginOperatorID: spec.OriginOperatorID, OriginToken: spec.OriginToken})
+
 		return nil
 	}); err != nil {
 		return "", copyJobPreparationError(err, copyRemoveJobSpec(id))

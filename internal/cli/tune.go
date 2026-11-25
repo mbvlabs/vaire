@@ -103,7 +103,7 @@ func sheetLines(name string, sv tuneServer) []string {
 
 type tuneShowData struct {
 	// Server is the budget sheet: RAM, the reserve, what clusters get.
-	Server tuneServer `json:"server"`
+	Server *tuneServer `json:"server,omitempty"`
 	// The rest is one database's cluster; empty when no database was picked
 	// (none, or several and no --db).
 	Database       string            `json:"database,omitempty"`
@@ -150,10 +150,18 @@ func runTuneShow(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	lines := sheetLines(s.ctx.Name, data.Server)
+	var lines []string
+	if data.Server != nil {
+		lines = sheetLines(s.ctx.Name, *data.Server)
+	}
+
 	if data.Database != "" {
-		lines = append(lines, "", fmt.Sprintf("%d settings for %s (vaire tune explain --db %s shows them)", len(data.Settings), data.Database, data.Database))
-	} else if len(data.Server.Clusters) > 1 {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+
+		lines = append(lines, fmt.Sprintf("%d settings for %s (vaire tune explain --db %s shows them)", len(data.Settings), data.Database, data.Database))
+	} else if data.Server != nil && len(data.Server.Clusters) > 1 {
 		lines = append(lines, "", "vaire tune show --db <name> for a database's settings")
 	}
 
@@ -176,7 +184,7 @@ func runTuneExplain(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	if data.Database == "" && len(data.Server.Clusters) > 1 {
+	if data.Database == "" && data.Server != nil && len(data.Server.Clusters) > 1 {
 		names := make([]string, 0, len(data.Server.Clusters))
 		for _, c := range data.Server.Clusters {
 			names = append(names, c.Name)
@@ -186,12 +194,20 @@ func runTuneExplain(cmd *cobra.Command, _ []string) error {
 			"Pick a database from details.databases.").WithDetails(map[string]any{"flag": "--db", "databases": names})
 	}
 
-	lines := sheetLines(s.ctx.Name, data.Server)
+	var lines []string
+	if data.Server != nil {
+		lines = sheetLines(s.ctx.Name, *data.Server)
+	}
+
 	if data.Database == "" {
 		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(append(lines, "", "no databases yet"), "\n"), Warnings: s.warnings})
 	}
 
-	lines = append(lines, "", "inputs for "+data.Database+":")
+	if len(lines) > 0 {
+		lines = append(lines, "")
+	}
+
+	lines = append(lines, "inputs for "+data.Database+":")
 	for _, key := range sortedKeys(data.Inputs) {
 		lines = append(lines, fmt.Sprintf("  %s = %v", key, data.Inputs[key]))
 	}

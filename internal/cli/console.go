@@ -23,6 +23,11 @@ import (
 // itself: usql talks plaintext to a loopback listener, and vaire makes the
 // verified TLS connection to Postgres over WireGuard.
 func runConsole(cmd *cobra.Command, args []string) error {
+	role, err := sessionRole(cmd)
+	if err != nil {
+		return err
+	}
+
 	db := stringFlag(cmd, "db")
 	if db == "" && len(args) > 0 {
 		db = args[0]
@@ -51,7 +56,7 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
-	user, password, err := sessionLogin(cmd, s, p, db, flagTrue(cmd, "write"))
+	user, password, err := databaseSessionLogin(cmd, s, p, db, role, flagTrue(cmd, "write"))
 	if err != nil {
 		return err
 	}
@@ -78,8 +83,11 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	query := url.Values{
 		"sslmode":          {"disable"},
 		"application_name": {"vaire-console"},
-		"options":          {sessionOptions(db, flagTrue(cmd, "write"))},
 	}
+	if role == "" {
+		query.Set("options", loginOptions(db, role, flagTrue(cmd, "write")))
+	}
+
 	dsn := url.URL{
 		Scheme:   "postgres",
 		User:     url.User(user),
@@ -94,7 +102,7 @@ func runConsole(cmd *cobra.Command, args []string) error {
 	// loopback listener is "127"; name the node instead.
 	child := exec.CommandContext(ctx, usql, "--set", consolePrompt(at.Hostname, s.ctx.Name), dsn.String())
 
-	child.Env = append(os.Environ(), "PGPASSWORD="+password)
+	child.Env = append(os.Environ(), "PGPASSWORD="+password, "PGOPTIONS=")
 	child.Stdin = cmd.InOrStdin()
 	child.Stdout = cmd.OutOrStdout()
 	child.Stderr = cmd.ErrOrStderr()

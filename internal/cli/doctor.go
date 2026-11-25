@@ -23,6 +23,7 @@ import (
 type doctorReply struct {
 	Results []doctor.Result       `json:"results"`
 	Summary map[doctor.Status]int `json:"summary"`
+	Basic   bool                  `json:"basic,omitempty"`
 }
 
 func runDoctor(cmd *cobra.Command, _ []string) error {
@@ -58,7 +59,10 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	data.Results = append(data.Results, operatorChecks(commandContext(cmd), s, only)...)
+	if !data.Basic {
+		data.Results = append(data.Results, operatorChecks(commandContext(cmd), s, only)...)
+	}
+
 	data.Summary = doctor.Summary(data.Results)
 	message := doctorMessage(data.Results)
 

@@ -408,6 +408,20 @@ func handleStatus(ctx context.Context, env *Env) (Result, error) {
 
 	cfg := env.Cluster
 
+	if memberRead(env) {
+		if p.DB != "" && !memberOwns(env, p.DB) {
+			return Result{}, databaseNotFound(p.DB)
+		}
+		// Do not return host-wide budgets, poolers, backup records, errors,
+		// or follower topology through the member summary.
+		rows := []statusDatabase{}
+		for _, snap := range readClusters(ctx, memberDatabases(env), p.DB, false) {
+			rows = append(rows, statusDatabase{Name: snap.Spec.Name, State: snap.State})
+		}
+
+		return Result{Data: statusData{Databases: rows}}, nil
+	}
+
 	reports, markerSnapshot, err := materialisationReports(ctx, cfg)
 	if err != nil {
 		return Result{}, err

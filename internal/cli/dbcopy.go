@@ -221,22 +221,7 @@ func runDBCopy(cmd *cobra.Command, args []string) error {
 		source = &src
 	}
 
-	calls := copyRPC{
-		Preflight: func(ctx context.Context, params map[string]any, sec map[string]string) (remote.Reply, error) {
-			return p.call(ctx, s.node, "db.copy.preflight", params, remote.CallOptions{Secrets: sec, OnEvent: p.event})
-		},
-		Start: func(ctx context.Context, params map[string]any, sec map[string]string, requestID, confirm string, dry bool) (remote.Reply, string, bool, error) {
-			opts := remote.CallOptions{Secrets: sec, Confirm: confirm, RequestID: requestID, DryRun: dry, OnEvent: p.event}
-			if dry {
-				reply, err := p.call(ctx, s.node, "db.copy", params, opts)
-				return reply, "", false, err
-			}
-
-			return callJob(ctx, s, p, "db.copy", params, opts)
-		},
-	}
-
-	return executeDBCopy(cmd, p, s.ctx.Name, cfg, dest, source, s.warnings, calls)
+	return runWorkstationCopy(cmd, p, s, cfg, dest, source)
 }
 
 // copyName takes the new database name from the positional argument or, only
@@ -588,9 +573,10 @@ func readCopyCAFile(cmd *cobra.Command) (string, error) {
 	return content, nil
 }
 
-// executeDBCopy is the node-independent orchestration: dry run, real
-// read-only preflight, confirmation, one-time credentials and the detached
-// job. Tests drive it through copyRPC; production's copyRPC uses the session.
+// executeDBCopy is retained for regression tests of the legacy detached RPC.
+// The public command uses runWorkstationCopy and must not fall back to it.
+//
+//nolint:unparam // The legacy test fixture uses the same workspace name.
 func executeDBCopy(cmd *cobra.Command, p *progress, workspaceName string, cfg config.Cluster, dest copyDestination, source *copySourceInput, ownWarnings []output.Warning, calls copyRPC) error {
 	if dryRun(cmd) {
 		return executeDBCopyDryRun(cmd, cfg, dest, ownWarnings, calls)

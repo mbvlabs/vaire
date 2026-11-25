@@ -228,6 +228,7 @@ func normalizeQuery(q Query, now time.Time) (normalizedQuery, error) {
 		{"job_id", q.JobID, maxTokenLen},
 		{"database", q.Database, maxDatabaseLen},
 		{"action", q.Action, maxActionLen},
+		{"operator_id", q.VerifiedOperatorID, maxTokenLen},
 	} {
 		if checkToken(field.name, field.value, field.max, false) != nil {
 			return nq, errInvalidQuery
@@ -289,7 +290,7 @@ func normalizeCursorQuery(nq normalizedQuery) (normalizedQuery, error) {
 	if cur.SinceRaw != q.Since || cur.UntilRaw != q.Until ||
 		cur.OperationID != q.OperationID || cur.RequestID != q.RequestID ||
 		cur.JobID != q.JobID || cur.Database != q.Database ||
-		cur.Action != q.Action || cur.Outcome != q.Outcome ||
+		cur.Action != q.Action || cur.Outcome != q.Outcome || cur.VerifiedOperatorID != q.VerifiedOperatorID ||
 		cur.Limit != nq.limit {
 		return nq, errCursorMismatch
 	}

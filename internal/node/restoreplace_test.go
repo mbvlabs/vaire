@@ -261,6 +261,7 @@ func TestPlacementsMatchTheWriters(t *testing.T) {
 		masterbackup.OperatorsPath:          {"root", "root", 0o640},
 		masterbackup.RecordsPath:            {"root", "root", 0o600},
 		masterbackup.ProtectPath:            {"root", "root", 0o600},
+		masterbackup.ClusterSeedPath:        {"root", "root", 0o600},
 		masterbackup.WGKeyPath:              {"root", "root", 0o600},
 		"/etc/ssh/ssh_host_ed25519_key":     {"root", "root", 0o600},
 		"/etc/ssh/ssh_host_ed25519_key.pub": {"root", "root", 0o644},
@@ -277,6 +278,19 @@ func TestPlacementsMatchTheWriters(t *testing.T) {
 	assertBundlePlacements(t, specs, want)
 	assertPlacementScripts(t)
 	assertPlacementDirectories(t, specs)
+}
+
+func TestRestoreRejectsInvalidBundledSeed(t *testing.T) {
+	b := masterbackup.Bundle{Files: []masterbackup.File{
+		masterbackup.NewFile(masterbackup.ClusterSeedPath, "root", "root", 0o600, []byte(`{"admin":"password"}`)),
+	}}
+	if err := validateBundleSeed(b); err == nil {
+		t.Fatal("accepted an invalid seed")
+	}
+
+	if err := validateBundleSeed(masterbackup.Bundle{}); err != nil {
+		t.Fatalf("old bundle refused: %v", err)
+	}
 }
 
 func assertBundlePlacements(t *testing.T, specs []masterbackup.Spec, want map[string]placement) {
@@ -382,7 +396,7 @@ func TestPlaceDirGivesEachDirectoryItsMode(t *testing.T) {
 	old := syscall.Umask(0o077)
 	defer syscall.Umask(old)
 
-	for _, d := range []string{steps.ACMEDir, steps.TLSDir, config.Dir, "/etc/wireguard", "/var/lib/vaire", "/etc/ssh"} {
+	for _, d := range []string{steps.ACMEDir, steps.TLSDir, steps.RuntimeDir, config.Dir, "/etc/wireguard", "/var/lib/vaire", "/etc/ssh"} {
 		if err := placeDir(root, d); err != nil {
 			t.Fatal(err)
 		}

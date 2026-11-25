@@ -88,22 +88,22 @@ func authorizeDeviceCaller(uid, method string) (*rpc.WhoamiReply, error) {
 // the recovery account's host authority.
 func managedDeviceMethod(role, method string) bool {
 	switch method {
-	case "whoami", "status", "config.get", "db.list", "db.access.show", "ext.list",
+	case "whoami", "status", "config.get", "config.validate", "db.list", "db.create", "db.access.show", "ext.list",
 		"tune.show", "tls.status", "backup.list", "restore.status",
-		"activity.list", "activity.show", "activity.health", "protect.status":
+		"activity.list", "activity.show", "protect.status", "doctor.run", "job.list", "job.follow", "maint.report", "queries.top":
 		return role == config.AccessRoleOwner || role == config.AccessRoleMember
 	case "user.add", "user.list", "user.revoke", "device.add", "device.list", "device.revoke", "access.recovery-issue", "access.complete-setup",
-		"plan", "db.create", "db.recover", "db.write-access", "auth.status", "auth.setup", "protect.verify",
+		"plan", "db.recover", "db.write-access", "auth.status", "auth.setup", "protect.verify", "activity.health",
 		"backup.now", "master-backup.now", "master-backup.list", "master-backup.get", "upgrade.install":
 		return role == config.AccessRoleOwner
 	// Normal operator RPCs beyond the member and existing owner permissions.
 	// Bootstrap, node-internal and obsolete RPCs remain outside this list.
-	case "apply", "config.set", "config.validate", "db.copy.preflight", "db.copy",
+	case "apply", "config.set",
 		"db.drop", "db.resize", "db.credentials", "tune.apply", "ext.add", "ext.remove",
-		"logs", "backup.verify", "job.list", "job.follow", "restore.start", "restore.promote",
+		"logs", "backup.verify", "restore.start", "restore.promote",
 		"restore.undo", "restore.abort", "restore.cleanup", "restore.drill", "db.fork",
-		"db.follow", "db.unfollow", "sql", "metrics.show", "doctor.run", "queries.top",
-		"maint.report", "maint.run", "maint.kill", "queries.reset", "metrics.rotate":
+		"db.follow", "db.unfollow", "sql", "metrics.show",
+		"maint.run", "maint.kill", "queries.reset", "metrics.rotate":
 		return role == config.AccessRoleOwner
 	default:
 		return false

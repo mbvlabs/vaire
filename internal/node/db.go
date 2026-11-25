@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -85,6 +86,9 @@ type dbCreateParams struct {
 	// AllowOvercommit creates it even when its size pushes the databases'
 	// sizes past the budget, with the memory_overcommitted warning.
 	AllowOvercommit bool `json:"allow_overcommit,omitempty"`
+	// CopySourceBytes is an estimated uncompressed source database footprint,
+	// supplied only by workstation copy. It is not a disk quota.
+	CopySourceBytes *int64 `json:"copy_source_bytes,omitempty"`
 }
 
 type dbDropParams struct {
@@ -98,6 +102,18 @@ type dbCredentialsParams struct {
 }
 
 func handleDBList(ctx context.Context, env *Env) (Result, error) {
+	if memberRead(env) {
+		snapshots := readClusters(ctx, memberDatabases(env), "", false)
+		rows := make([]databaseInfo, 0, len(snapshots))
+
+		for _, snap := range snapshots {
+			rows = append(rows, databaseInfo{Name: snap.Spec.Name, Node: snap.Spec.Node,
+				State: snap.State, InConfig: true, Exists: snap.State == stateRunning, Protected: snap.Spec.Protected})
+		}
+
+		return Result{Data: map[string]any{"databases": rows}}, nil
+	}
+
 	databases, err := listDatabases(ctx, env)
 	if err != nil {
 		return Result{}, err
@@ -264,6 +280,10 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 
+	if err := checkMemberCreate(env, p); err != nil {
+		return Result{}, err
+	}
+
 	if p.Protected {
 		if err := checkProtectionAvailable([]string{p.Name}, env); err != nil {
 			return Result{}, err
@@ -281,13 +301,50 @@ func handleDBCreate(ctx context.Context, env *Env) (Result, error) {
 	}
 
 	spec := config.ClusterSpec{Name: p.Name, Size: p.Size, Memory: p.Memory, Profile: p.Profile, StatementTimeout: timeout, Extensions: extensions, Protected: p.Protected}
+	if env.DeviceIdentity != nil && env.DeviceIdentity.Role == config.AccessRoleMember {
+		spec.CreatorOperatorID = env.DeviceIdentity.OperatorID
+	}
 
-	db, warnings, err := createDatabase(ctx, env, spec, p.AllowOvercommit, createCommand(p))
+	if p.CopySourceBytes != nil && (*p.CopySourceBytes <= 0 || *p.CopySourceBytes > (math.MaxInt64-(3<<30))/2) {
+		return Result{}, output.NewError(output.CodePrecondition, "invalid copy source size estimate", output.ExitPrecondition, "Retry the copy with a valid source size.").WithDetails(map[string]any{"reason": "invalid_copy_size"})
+	}
+
+	db, warnings, err := createDatabaseWithOptions(ctx, env, spec, p.AllowOvercommit, createCommand(p), createOptions{copySourceBytes: p.CopySourceBytes})
 	if err != nil {
 		return Result{}, err
 	}
 
 	return Result{Data: map[string]any{"database": db}, Warnings: warnings}, nil
+}
+
+var memberCreateCredentialCheck = steps.CheckClusterSeed
+
+func checkMemberCreate(env *Env, p dbCreateParams) error {
+	if env.DeviceIdentity == nil || env.DeviceIdentity.Role != config.AccessRoleMember {
+		return nil
+	}
+
+	if p.AllowOvercommit {
+		return deviceAccessDenied()
+	}
+
+	allowed := make(map[string]bool, len(steps.DatabaseRoles))
+	for _, role := range steps.DatabaseRoles {
+		allowed[steps.SecretDatabaseRole(p.Name, role)] = true
+	}
+
+	for key := range env.Req.Secrets {
+		if !allowed[key] {
+			return deviceAccessDenied()
+		}
+	}
+
+	if err := memberCreateCredentialCheck(); err != nil {
+		return output.NewError(output.CodePrecondition, "node cluster credentials are unavailable or inconsistent", output.ExitPrecondition,
+			"Contact a trusted administrator before creating a database.").WithDetails(map[string]any{"reason": "cluster_seed_unavailable"})
+	}
+
+	return nil
 }
 
 // createCommand is the db create command of p at another size: what the
@@ -322,9 +379,10 @@ type createOptions struct {
 	// and timers to the caller. vaire db copy runs them after the import so
 	// the backup reflects the copied data, not an empty database.
 	deferInitialBackup bool
+	copySourceBytes    *int64
 }
 
-// createDatabase adds db to cluster.toml and creates its cluster: the
+// createDatabaseWithOptions adds db to cluster.toml and creates its cluster: the
 // kernel's huge pages, the cluster's own step instances with the role
 // passwords from the request's secrets, both poolers, and the other
 // databases' configuration whose share of the server changed. A cluster
@@ -332,14 +390,15 @@ type createOptions struct {
 // server (memory_overcommitted, unless allowOvercommit) is refused first.
 // The warnings are the server's oversubscription and any restart the other
 // databases' configuration left pending.
-func createDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowOvercommit bool, suggest func(size string) string) (config.ClusterSpec, []output.Warning, error) {
-	return createDatabaseWithOptions(ctx, env, db, allowOvercommit, suggest, createOptions{})
-}
-
-// createDatabaseWithOptions is createDatabase with explicit copy-only
-// provisioning options.
 func createDatabaseWithOptions(ctx context.Context, env *Env, db config.ClusterSpec, allowOvercommit bool, suggest func(size string) string, opts createOptions) (config.ClusterSpec, []output.Warning, error) {
-	cfg, previous, db, err := addDatabase(ctx, env, db, allowOvercommit, suggest)
+	var beforeSave func(config.Cluster, config.ClusterSpec) error
+	if opts.copySourceBytes != nil {
+		beforeSave = func(cfg config.Cluster, _ config.ClusterSpec) error {
+			return checkWorkstationCopySpace(cfg.Server.DataRoot, *opts.copySourceBytes)
+		}
+	}
+
+	cfg, previous, db, err := addDatabaseFrom(ctx, env, func(config.Cluster) (config.ClusterSpec, error) { return db, nil }, allowOvercommit, suggest, beforeSave)
 	if err != nil {
 		return db, nil, err
 	}
@@ -415,23 +474,13 @@ var (
 	createFirstBackup       = firstBackup
 )
 
-// addDatabase checks db's name and role passwords, places it (node, port,
-// stanza, the default size), refuses a cluster that could not start or
-// whose size overcommits the server (unless allowOvercommit; suggest is the
-// command at a size that fits), and saves it in cluster.toml without
-// creating anything. It returns the saved configuration and the previous
-// file for a rollback. db create and db fork share it.
-func addDatabase(ctx context.Context, env *Env, db config.ClusterSpec, allowOvercommit bool, suggest func(size string) string) (config.Cluster, []byte, config.ClusterSpec, error) {
-	return addDatabaseFrom(ctx, env, func(config.Cluster) (config.ClusterSpec, error) { return db, nil }, allowOvercommit, suggest, nil)
-}
-
 // addDatabaseCheckStarts refuses a proposal PostgreSQL would not start. It is
 // a variable so handler tests can use deterministic host facts.
 var addDatabaseCheckStarts = checkStarts
 
-// addDatabaseFrom is addDatabase with the entry built from the freshly loaded
-// configuration and an optional check of the exact placed proposal before it
-// is saved. A fresh follow uses both: its entry derives from the source's
+// addDatabaseFrom validates and places an entry built from the freshly loaded
+// configuration, then runs an optional check before saving the proposal.
+// A fresh follow uses both: its entry derives from the source's
 // current values, and its floors are compared with the target present exactly
 // once under the preparation lock.
 func addDatabaseFrom(ctx context.Context, env *Env, build func(config.Cluster) (config.ClusterSpec, error), allowOvercommit bool, suggest func(size string) string, beforeSave func(config.Cluster, config.ClusterSpec) error) (config.Cluster, []byte, config.ClusterSpec, error) {

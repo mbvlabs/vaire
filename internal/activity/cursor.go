@@ -36,12 +36,13 @@ type cursorState struct {
 	SinceAt  string `json:"sa,omitempty"`
 	UntilAt  string `json:"ua,omitempty"`
 
-	OperationID string `json:"op,omitempty"`
-	RequestID   string `json:"rq,omitempty"`
-	JobID       string `json:"jb,omitempty"`
-	Database    string `json:"db,omitempty"`
-	Action      string `json:"ac,omitempty"`
-	Outcome     string `json:"oc,omitempty"`
+	OperationID        string `json:"op,omitempty"`
+	RequestID          string `json:"rq,omitempty"`
+	JobID              string `json:"jb,omitempty"`
+	Database           string `json:"db,omitempty"`
+	Action             string `json:"ac,omitempty"`
+	Outcome            string `json:"oc,omitempty"`
+	VerifiedOperatorID string `json:"oi,omitempty"`
 
 	Limit int `json:"l"`
 }
@@ -118,6 +119,7 @@ func (c cursorState) validate() error {
 		{"job_id", c.JobID, maxTokenLen},
 		{"database", c.Database, maxDatabaseLen},
 		{"action", c.Action, maxActionLen},
+		{"operator_id", c.VerifiedOperatorID, maxTokenLen},
 	} {
 		if checkToken(field.name, field.value, field.max, false) != nil {
 			return errInvalidCursor
@@ -176,19 +178,20 @@ func cursorFor(nq normalizedQuery, after, snapshot uint64, storeID string) strin
 	}
 
 	c := cursorState{
-		Version:     cursorVersion,
-		StoreID:     storeID,
-		After:       after,
-		Snapshot:    snapshot,
-		SinceRaw:    nq.filter.Since,
-		UntilRaw:    nq.filter.Until,
-		OperationID: nq.filter.OperationID,
-		RequestID:   nq.filter.RequestID,
-		JobID:       nq.filter.JobID,
-		Database:    nq.filter.Database,
-		Action:      nq.filter.Action,
-		Outcome:     nq.filter.Outcome,
-		Limit:       nq.limit,
+		Version:            cursorVersion,
+		StoreID:            storeID,
+		After:              after,
+		Snapshot:           snapshot,
+		SinceRaw:           nq.filter.Since,
+		UntilRaw:           nq.filter.Until,
+		OperationID:        nq.filter.OperationID,
+		RequestID:          nq.filter.RequestID,
+		JobID:              nq.filter.JobID,
+		Database:           nq.filter.Database,
+		Action:             nq.filter.Action,
+		Outcome:            nq.filter.Outcome,
+		VerifiedOperatorID: nq.filter.VerifiedOperatorID,
+		Limit:              nq.limit,
 	}
 	if !nq.since.IsZero() {
 		c.SinceAt = formatTime(nq.since)

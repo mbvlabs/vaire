@@ -413,6 +413,19 @@ type ProtectedDatabase struct {
 }
 
 func handleProtectStatus(_ context.Context, env *Env) (Result, error) {
+	if memberRead(env) {
+		cfg := memberDatabases(env)
+		protected, databases := protectionOf(cfg)
+
+		for i := range databases {
+			if !memberOwns(env, databases[i].Follows) {
+				databases[i].Follows = ""
+			}
+		}
+
+		return Result{Data: protectStatus{Protected: protected, Databases: databases}}, nil
+	}
+
 	factors, err := operatorFactorStatus(env)
 	if err != nil {
 		return Result{}, err

@@ -51,6 +51,9 @@ type ClusterSpec struct {
 	// it takes a current code from the TOTP authenticator that vaire protect
 	// init set up.
 	Protected bool `toml:"protected,omitempty"`
+	// CreatorOperatorID is the server-assigned stable access operator ID.
+	// Empty means unowned, including databases created before this field.
+	CreatorOperatorID string `toml:"creator_operator_id,omitempty"`
 	// Follows names the database this one is a physical standby of (Phase
 	// 6): a follower has no stanza and no [clusters.backup] while it
 	// follows. Immutable; only db unfollow clears it.
@@ -90,6 +93,32 @@ func (c Cluster) ClusterByName(name string) (ClusterSpec, bool) {
 	}
 
 	return ClusterSpec{}, false
+}
+
+// CreatedByOperator fails closed for unowned or malformed identities. The
+// caller must independently authenticate the operator against the registry.
+func (s ClusterSpec) CreatedByOperator(operatorID string) bool {
+	return accessIDPattern.MatchString(operatorID) &&
+		accessIDPattern.MatchString(s.CreatorOperatorID) && s.CreatorOperatorID == operatorID
+}
+
+// DatabaseCreatedByOperator requires exactly one matching database entry.
+func (c Cluster) DatabaseCreatedByOperator(name, operatorID string) bool {
+	found := false
+
+	for _, s := range c.Clusters {
+		if s.Name != name {
+			continue
+		}
+
+		if found || !s.CreatedByOperator(operatorID) {
+			return false
+		}
+
+		found = true
+	}
+
+	return found
 }
 
 // RoutingView returns c without the databases that have no cluster of their
@@ -194,6 +223,10 @@ func (c Cluster) validateClusters(add func(string, ...any)) {
 // validateClusterIdentity checks the entry's name, its node and the keys only
 // db follow may write.
 func (c Cluster) validateClusterIdentity(add func(string, ...any), at string, s ClusterSpec, master string, names map[string]bool) {
+	if s.CreatorOperatorID != "" && !accessIDPattern.MatchString(s.CreatorOperatorID) {
+		add("%s.creator_operator_id is managed by vaire and must be a valid operator ID", at)
+	}
+
 	if err := CheckDatabaseName(s.Name); err != nil {
 		add("%s.name %q %v", at, s.Name, err)
 	}

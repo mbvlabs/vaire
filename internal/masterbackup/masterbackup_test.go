@@ -133,6 +133,50 @@ func TestBuildIsDeterministicAndRoundTrips(t *testing.T) {
 	}
 }
 
+func TestSeedIsBundledWithoutRuntimePasswords(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		ClusterPath: "cluster", NodePath: "node", ClusterSeedPath: "verifiers-only",
+		"/etc/vaire/runtime/pgbouncer_auth.pass": "auth-plaintext",
+		"/etc/vaire/runtime/monitor.pass":        "monitor-plaintext",
+	})
+
+	files, err := Snapshot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, _, err := Build(meta(), files)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sealed, err := Seal(raw, id.Recipient().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bundle, err := Open(sealed, id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seed, ok := bundle.File(ClusterSeedPath)
+	if !ok || string(seed.Data) != "verifiers-only" {
+		t.Fatal("seed not round-tripped")
+	}
+
+	for _, path := range []string{"/etc/vaire/runtime/pgbouncer_auth.pass", "/etc/vaire/runtime/monitor.pass"} {
+		if _, ok := bundle.File(path); ok {
+			t.Fatalf("bundled plaintext %s", path)
+		}
+	}
+}
+
 func tarOf(t *testing.T, entries ...[2]string) []byte {
 	t.Helper()
 

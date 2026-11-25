@@ -293,6 +293,10 @@ func handleBackupList(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 
+	if memberRead(env) {
+		return memberBackupStatus(env, p.Database)
+	}
+
 	if err := requireBackups(env.Cluster); err != nil {
 		return Result{}, err
 	}
@@ -307,6 +311,61 @@ func handleBackupList(ctx context.Context, env *Env) (Result, error) {
 	}
 
 	return backupListAll(ctx, env.Cluster, rs)
+}
+
+// memberBackupStatus uses cached facts bound to the current stanza. It never
+// returns repository contents, errors, paths, or records for dropped names.
+func memberBackupStatus(env *Env, db string) (Result, error) {
+	if db != "" && !memberOwns(env, db) {
+		return Result{}, databaseNotFound(db)
+	}
+
+	rs, err := backup.LoadRecords()
+	if err != nil {
+		return Result{}, memberRecordsUnavailable()
+	}
+
+	rows := make([]backupRow, 0)
+
+	for _, spec := range env.Cluster.Clusters {
+		if (db != "" && spec.Name != db) || !memberOwns(env, spec.Name) {
+			continue
+		}
+
+		row := backupRow{Database: spec.Name, Status: "unknown"}
+		switch {
+		case spec.IsFollower():
+			row.Status = "not applicable"
+		case !env.Cluster.BackupConfigured():
+			row.Status = "not configured"
+		case spec.Stanza != "":
+			facts, ok := rs.Repo[spec.Name]
+			if ok && facts.Stanza == spec.Stanza && facts.Sets >= 0 {
+				row.Sets = facts.Sets
+				row.Status = "no backups"
+
+				if facts.Sets > 0 {
+					row.Status = "available"
+				}
+			}
+		}
+
+		rows = append(rows, row)
+	}
+
+	if db != "" {
+		row := rows[0]
+
+		return Result{Data: map[string]any{
+			"status_only": true, "database": row.Database, "status": row.Status, "backup_count": row.Sets,
+		}}, nil
+	}
+
+	return Result{Data: map[string]any{"databases": rows, "status_only": true}}, nil
+}
+
+func memberRecordsUnavailable() error {
+	return output.NewError(output.CodePrecondition, "backup and restore status is unavailable", output.ExitPrecondition, "")
 }
 
 // backupListAll is one row per database, from one pgbackrest info over every

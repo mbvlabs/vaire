@@ -251,7 +251,7 @@ postgres://app_migrate:…@db1.example.com:5432/app?sslmode=verify-full&sslrootc
 
 Creating, forking, restoring, resizing or dropping a database does not require any DNS or certificate changes.
 
-For an external PostgreSQL source, `vaire db copy` imports a snapshot into a new database without overwriting an existing one or importing source roles and settings. The VPS must be able to reach the source. For unattended use, pass the source URL via `--source-url-stdin` and confirm the destination name with `--confirm`.
+For a trusted external PostgreSQL source, `vaire db copy` makes a private temporary dump on your workstation, checks it, and restores it into a new database over verified TLS and WireGuard. Admins and members use the same flow. Your workstation must be able to reach the source; the VPS does not connect to it. The temporary dump is limited to 10 GiB. Copy does not overwrite an existing database or import source ownership, grants, or tablespaces. For unattended use, pass the source URL via `--source-url-stdin` and confirm the destination name with `--confirm`.
 
 ### Limits, said plainly
 
@@ -451,7 +451,7 @@ Protection is opt-in and requires a factor set up with `vaire auth setup`. Prote
    └──────────── userspace WireGuard ──▶ 10.42.0.1:5432  session pooler → app
 ```
 
-`vaire sql`, `vaire psql` and `vaire console` all connect over the tunnel to the session pooler on 5432 of the node that holds the database, which routes by `--db`, and verify the certificate (`verify-full`). They log in as `vaire_admin`, never as an application role, and are read-only unless `--write` is passed; with `--write` they act as `<db>_owner`, so new objects get the same owner and default grants as a migration. `vaire tunnel --db app --target postgres` forwards a local port to that pooler, which is how a migration tool on your machine reaches the database as `<db>_migrate` without opening 5432 to the internet. `vaire console` prefers the installed usql sidecar, then usql from PATH, or downloads a pinned release and checks its SHA-256. The release includes the upstream usql license alongside the artifact. `psql` is not bundled and must be installed separately. Arguments after `--` go to `psql` as they are (`vaire psql --db app -- -c "select 1"`); put psql's flags after `--`.
+`vaire sql`, `vaire psql` and `vaire console` connect over WireGuard to the session pooler on port 5432 and verify the server certificate in ACME mode. Members select `--role ro`, `--role app`, or `--role migrate` and enter that database role's password. The selected role determines their privileges; `--write` is not used with `--role`. Admins can also use the default `vaire_admin` path, which is read-only unless `--write` is passed. `vaire tunnel --db app --target postgres` forwards a local port for other clients. Signed releases install `psql` and `usql` alongside Vaire. Arguments after `--` go directly to `psql`, for example `vaire psql --db app -- -c "select 1"`.
 
 ## Backups and restores
 
@@ -590,8 +590,8 @@ No ACME client (certbot and the like) is installed: vaire issues certificates it
 | --- | --- | --- |
 | `vaire` | Everything | `install.sh`, cosign-verified; `vaire upgrade` afterwards |
 | WireGuard, SSH | Every remote command | Built into vaire (userspace WireGuard, in-process SSH). Nothing to install and no root needed |
-| `psql` ≥ 16 | `vaire psql` only | Your package manager; vaire offers the install command |
-| `usql` | `vaire console` only | On PATH, or vaire downloads a pinned release (v0.21.4) into `~/.cache/vaire/tools` and checks its SHA-256 |
+| `psql` | `vaire psql` | Installed with signed releases; older or development installs can use `psql` on PATH |
+| `usql` | `vaire console` | Installed with signed releases; older or development installs can use PATH or Vaire's pinned download |
 
 ### Built into the binary
 

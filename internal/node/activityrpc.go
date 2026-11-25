@@ -31,6 +31,10 @@ func handleActivityList(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 
+	if err := restrictActivityQuery(env, &q); err != nil {
+		return Result{}, err
+	}
+
 	if err := normalizeActivityQuery(&q); err != nil {
 		return Result{}, err
 	}
@@ -40,7 +44,7 @@ func handleActivityList(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, activityQueryError(err)
 	}
 
-	return Result{Data: decorateActivityPage(page)}, nil
+	return Result{Data: activityPageFor(env, page)}, nil
 }
 
 // handleActivityShow returns one operation, request or job and its steps and
@@ -54,6 +58,10 @@ func handleActivityShow(ctx context.Context, env *Env) (Result, error) {
 
 	if q.Limit == 0 {
 		q.Limit = min(activityShowDefaultLimit, activity.MaxLimit)
+	}
+
+	if err := restrictActivityQuery(env, &q); err != nil {
+		return Result{}, err
 	}
 
 	if err := normalizeActivityQuery(&q); err != nil {
@@ -82,10 +90,14 @@ func handleActivityShow(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, activityQueryError(err)
 	}
 
-	return Result{Data: decorateActivityPage(page)}, nil
+	return Result{Data: activityPageFor(env, page)}, nil
 }
 
 func handleActivityHealth(ctx context.Context, env *Env) (Result, error) {
+	if env.DeviceIdentity != nil && env.DeviceIdentity.Role == config.AccessRoleMember {
+		return Result{}, deviceAccessDenied()
+	}
+
 	var p struct{}
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
@@ -109,6 +121,36 @@ func handleActivityHealth(ctx context.Context, env *Env) (Result, error) {
 	}
 
 	return Result{Data: health}, nil
+}
+
+func restrictActivityQuery(env *Env, q *activity.Query) error {
+	if env.DeviceIdentity == nil || env.DeviceIdentity.Role != config.AccessRoleMember {
+		return nil
+	}
+
+	id := verifiedOperator(env)
+	if id == "" {
+		return deviceAccessDenied()
+	}
+
+	q.VerifiedOperatorID = id
+
+	return nil
+}
+
+func activityPageFor(env *Env, page activity.Page) activity.Page {
+	if env.DeviceIdentity == nil || env.DeviceIdentity.Role != config.AccessRoleMember {
+		return decorateActivityPage(page)
+	}
+
+	c := page.Coverage
+	page.Coverage = activity.Coverage{
+		Available: c.Available, Partial: c.Partial, Truncated: c.Truncated,
+		LimitReached: c.LimitReached, CursorExpired: c.CursorExpired,
+		EventsReturned: c.EventsReturned, FirstReturnedAt: c.FirstReturnedAt, LastReturnedAt: c.LastReturnedAt,
+	}
+
+	return page
 }
 
 // decorateActivityPage names the node whose retained evidence the page

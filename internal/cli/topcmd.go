@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/cli/top"
 	"github.com/mbvlabs/vaire/internal/pg"
+	"github.com/mbvlabs/vaire/internal/remote"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -35,7 +37,11 @@ type topCollector struct {
 	prev  map[string]top.Sample
 	// includeVaire shows vaire's own sessions (its roles, or an application_name
 	// beginning with "vaire"), left out by default.
-	includeVaire bool
+	includeVaire  bool
+	memberSession *session
+	progress      *progress
+	memberDB      string
+	err           error
 }
 
 func openTop(ctx context.Context, s *session, p *progress, dbs []string) (*topCollector, error) {
@@ -93,6 +99,31 @@ func (c *topCollector) close(ctx context.Context) {
 // previous round.
 func (c *topCollector) sample(ctx context.Context, filter string) top.Snapshot {
 	cur := map[string]top.Sample{}
+
+	if c.memberSession != nil {
+		params := map[string]any{"sample": true}
+		if c.memberDB != "" {
+			params["db"] = c.memberDB
+		}
+
+		reply, err := c.progress.call(ctx, c.memberSession.node, "queries.top", params, remote.CallOptions{OnEvent: c.progress.event})
+		if err == nil {
+			err = reply.Decode(&cur)
+		}
+
+		c.err = err
+		if err != nil {
+			for db := range c.prev {
+				cur[db] = top.Sample{DB: db, Error: "diagnostic request failed"}
+			}
+		}
+
+		snap := top.Build(c.prev, cur, nil, filter, time.Now())
+		c.prev = cur
+
+		return snap
+	}
+
 	for _, tc := range c.conns {
 		cur[tc.db] = c.sampleConn(ctx, tc)
 	}
@@ -157,19 +188,20 @@ func runTop(cmd *cobra.Command, _ []string) error {
 	defer s.Close()
 
 	ctx := commandContext(cmd)
+
+	member, err := diagnosticMember(cmd, s, p)
+	if err != nil {
+		return err
+	}
+
+	if member {
+		return runMemberTop(cmd, s, p)
+	}
+
 	dbs := topDatabases(ctx, s, p)
 
 	filter := stringFlag(cmd, "db")
-	if filter != "" {
-		found := false
-		for _, db := range dbs {
-			found = found || db == filter
-		}
-
-		if !found {
-			dbs = append(dbs, filter)
-		}
-	}
+	dbs = includeTopFilter(dbs, filter)
 
 	if len(dbs) == 0 {
 		return output.Success(cmd, output.Result{Data: top.Snapshot{At: time.Now()}, Message: "no databases yet (vaire db create <name>)", Warnings: s.warnings})
@@ -218,6 +250,71 @@ func runTop(cmd *cobra.Command, _ []string) error {
 	m.snap = c.sample(ctx, filter)
 
 	_, err = tea.NewProgram(m, tea.WithContext(ctx)).Run()
+	if err != nil && ctx.Err() != nil {
+		return nil
+	}
+
+	return err
+}
+
+func includeTopFilter(dbs []string, filter string) []string {
+	if filter == "" {
+		return dbs
+	}
+
+	if slices.Contains(dbs, filter) {
+		return dbs
+	}
+
+	return append(dbs, filter)
+}
+
+func runMemberTop(cmd *cobra.Command, s *session, p *progress) error {
+	if flagTrue(cmd, "all-sessions") {
+		return output.NewError(output.CodeUsage, "--all-sessions is not available to members", output.ExitUsage, "")
+	}
+
+	ctx := commandContext(cmd)
+	filter := stringFlag(cmd, "db")
+	c := &topCollector{memberSession: s, progress: p, memberDB: filter}
+	first := c.sample(ctx, filter)
+
+	if c.err != nil {
+		return c.err
+	}
+
+	if len(first.Databases) == 0 {
+		return output.Success(cmd, output.Result{Data: first, Message: "no owned databases yet", Warnings: s.warnings})
+	}
+
+	if flagTrue(cmd, "once") || MustNotPrompt(cmd) || !term.IsTerminal(int(os.Stdout.Fd())) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(topRefresh):
+		}
+
+		snap := c.sample(ctx, filter)
+		if c.err != nil {
+			return c.err
+		}
+
+		return output.Success(cmd, output.Result{Data: snap, Message: top.Render(snap, filter, "time", 0, 1000) + "\nmember view: pooler and host data are not available", Warnings: s.warnings})
+	}
+
+	dbs := []string{""}
+	for _, row := range first.Databases {
+		dbs = append(dbs, row.DB)
+	}
+
+	m := &topModel{ctx: ctx, c: c, dbs: dbs, sortKey: "time", width: 120, height: 40, snap: first}
+	for i, db := range dbs {
+		if db == filter {
+			m.filter = i
+		}
+	}
+
+	_, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
 	if err != nil && ctx.Err() != nil {
 		return nil
 	}

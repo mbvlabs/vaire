@@ -48,17 +48,18 @@ const (
 
 // Bundled paths (D1). They are absolute node paths; a test passes a root.
 const (
-	ClusterPath    = "/etc/vaire/cluster.toml"
-	NodePath       = "/etc/vaire/node.toml"
-	OperatorsPath  = "/etc/vaire/operators.toml"
-	RecordsPath    = "/var/lib/vaire/records.json"
-	ProtectPath    = "/etc/vaire/protect.json"
-	WGKeyPath      = "/etc/wireguard/vaire.key"
-	TLSCertPath    = "/etc/vaire/tls/server.crt"
-	TLSKeyPath     = "/etc/vaire/tls/server.key"
-	HostKeyGlob    = "/etc/ssh/ssh_host_*_key"
-	HostKeyPubGlob = "/etc/ssh/ssh_host_*_key.pub"
-	ACMEGlob       = "/etc/vaire/acme/*"
+	ClusterPath     = "/etc/vaire/cluster.toml"
+	NodePath        = "/etc/vaire/node.toml"
+	OperatorsPath   = "/etc/vaire/operators.toml"
+	RecordsPath     = "/var/lib/vaire/records.json"
+	ProtectPath     = "/etc/vaire/protect.json"
+	ClusterSeedPath = "/etc/vaire/runtime/cluster-verifiers.json"
+	WGKeyPath       = "/etc/wireguard/vaire.key"
+	TLSCertPath     = "/etc/vaire/tls/server.crt"
+	TLSKeyPath      = "/etc/vaire/tls/server.key"
+	HostKeyGlob     = "/etc/ssh/ssh_host_*_key"
+	HostKeyPubGlob  = "/etc/ssh/ssh_host_*_key.pub"
+	ACMEGlob        = "/etc/vaire/acme/*"
 )
 
 // Spec is one path, or glob, of the bundle.
@@ -76,6 +77,7 @@ func Specs() []Spec {
 		{Path: OperatorsPath},
 		{Path: RecordsPath},
 		{Path: ProtectPath},
+		{Path: ClusterSeedPath},
 		{Path: WGKeyPath},
 		{Path: HostKeyGlob, Glob: true},
 		{Path: HostKeyPubGlob, Glob: true},

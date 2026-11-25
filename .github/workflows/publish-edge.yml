@@ -13,7 +13,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  psql:
+    uses: ./.github/workflows/psql-candidates.yml
   publish:
+    needs: psql
     runs-on: ubuntu-24.04
     environment: edge
     steps:
@@ -46,9 +49,28 @@ jobs:
           bash tests/versioned-installer.sh
           bash tests/release-platforms.sh
           bash tests/release-channels.sh
+      - name: Download tested psql bundles
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: psql-*
+          path: dist/psql-artifacts
+      - name: Check psql artifact boundaries
+        run: |
+          set -euo pipefail
+          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            artifact="dist/psql-artifacts/psql-${platform/\//-}"
+            test -f "${artifact}/psql.tar.gz"
+            test -f "${artifact}/psql.tar.gz.sha256"
+            test "$(find "${artifact}" -type f | wc -l)" -eq 2
+            (cd "${artifact}" && sha256sum -c psql.tar.gz.sha256)
+            mkdir -p "dist/psql-bundles/${platform}"
+            cp "${artifact}/psql.tar.gz" "dist/psql-bundles/${platform}/psql.tar.gz"
+          done
+          test "$(find dist/psql-artifacts -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 4
       - name: Build edge release
         env:
           RELEASE_BASE_URL: ${{ vars.RELEASE_BASE_URL }}
+          PSQL_BUNDLE_DIR: dist/psql-bundles
         run: scripts/build-release.sh "edge-${GITHUB_SHA::12}" edge "${RELEASE_BASE_URL}"
       - name: Sign and verify edge release
         run: scripts/sign-release.sh dist/release-edge

@@ -244,6 +244,10 @@ func handleExtList(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 
+	if memberRead(env) {
+		return memberExtensionList(ctx, env, p.DB)
+	}
+
 	specs, err := extensionListSpecs(env.Cluster, p.DB)
 	if err != nil {
 		return Result{}, err
@@ -288,6 +292,82 @@ func handleExtList(ctx context.Context, env *Env) (Result, error) {
 	}
 
 	extensionListUnmanaged(data.Databases, known)
+
+	return Result{Data: data}, nil
+}
+
+// The full catalog includes server-wide package and custom definition facts.
+// Members see only extension identities associated with their databases.
+//
+//nolint:gocognit // The scoped inventory combines database and extension facts.
+func memberExtensionList(ctx context.Context, env *Env, target string) (Result, error) {
+	if target != "" && !memberOwns(env, target) {
+		return Result{}, deviceAccessDenied()
+	}
+
+	data := extListData{Extensions: []extListEntry{}, Databases: []extListDatabase{}}
+	entries := map[string]int{}
+	resolver := env.Cluster.ExtensionResolver()
+
+	for _, spec := range memberDatabases(env).Clusters {
+		if target != "" && spec.Name != target {
+			continue
+		}
+
+		names, err := resolver.EffectiveNames(spec.Extensions)
+		if err != nil {
+			return Result{}, deviceAccessDenied()
+		}
+
+		enabled, err := resolver.Enabled(names)
+		if err != nil {
+			return Result{}, deviceAccessDenied()
+		}
+
+		db := extListDatabase{DB: spec.Name, State: stateStopped}
+		installed := map[string]extensionInstalledVersion{}
+
+		if extensionClusterRunning(spec) {
+			installed, err = extensionInstalled(ctx, spec)
+			if err != nil {
+				db.State = "unreachable"
+			} else {
+				db.State, db.Available = stateRunning, true
+			}
+		}
+
+		data.Databases = append(data.Databases, db)
+		known := map[string]bool{}
+
+		for _, ext := range enabled {
+			known[ext.ExtName] = true
+			i, ok := entries[ext.Name]
+
+			if !ok {
+				i = len(data.Extensions)
+				entries[ext.Name] = i
+				data.Extensions = append(data.Extensions, extListEntry{Name: ext.Name, ExtName: ext.ExtName, Databases: []extDatabaseState{}})
+			}
+
+			st := extDatabaseState{DB: spec.Name, State: db.State, Available: db.Available, Enabled: true}
+			if got, ok := installed[ext.ExtName]; ok {
+				st.Installed, st.Version = true, got.Version
+			}
+
+			data.Extensions[i].Databases = append(data.Extensions[i].Databases, st)
+		}
+
+		for name, got := range installed {
+			if name != "plpgsql" && !known[name] {
+				got.Default = ""
+				data.Databases[len(data.Databases)-1].Unmanaged = append(data.Databases[len(data.Databases)-1].Unmanaged, got)
+			}
+		}
+
+		sort.Slice(data.Databases[len(data.Databases)-1].Unmanaged, func(i, j int) bool {
+			return data.Databases[len(data.Databases)-1].Unmanaged[i].Name < data.Databases[len(data.Databases)-1].Unmanaged[j].Name
+		})
+	}
 
 	return Result{Data: data}, nil
 }

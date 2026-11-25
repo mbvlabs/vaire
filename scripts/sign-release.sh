@@ -93,6 +93,20 @@ done < <(jq -r '.artifacts | keys_unsorted[]' "${version_manifest}")
 }
 for platform in "${platforms[@]}"; do
   artifacts+=("${version_root}/${platform}/vaire")
+  if jq -e '.psqlArtifacts != null' "${version_manifest}" >/dev/null; then
+    jq -e --arg platform "${platform}" '.psqlArtifacts[$platform] | .sha256 | type == "string" and test("^[0-9a-f]{64}$")' "${version_manifest}" >/dev/null ||
+      { echo "psql artifact is missing for ${platform}" >&2; exit 1; }
+    psql_archive="${version_root}/${platform}/psql.tar.gz"
+    [ -f "${psql_archive}" ] || { echo "release artifact is missing: ${psql_archive}" >&2; exit 1; }
+    if command -v sha256sum >/dev/null 2>&1; then
+      psql_sha="$(sha256sum "${psql_archive}" | awk '{print $1}')"
+    else
+      psql_sha="$(shasum -a 256 "${psql_archive}" | awk '{print $1}')"
+    fi
+    [ "${psql_sha}" = "$(jq -r --arg platform "${platform}" '.psqlArtifacts[$platform].sha256' "${version_manifest}")" ] ||
+      { echo "psql checksum mismatch for ${platform}" >&2; exit 1; }
+    artifacts+=("${psql_archive}")
+  fi
   if jq -e '.usqlArtifacts != null' "${version_manifest}" >/dev/null; then
     jq -e --arg platform "${platform}" '.usqlArtifacts[$platform] | .sha256 | type == "string" and test("^[0-9a-f]{64}$")' "${version_manifest}" >/dev/null ||
       { echo "usql artifact is missing for ${platform}" >&2; exit 1; }

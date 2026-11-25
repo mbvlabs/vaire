@@ -79,6 +79,44 @@ func TestRestoreAccessBindsOriginalOperationWithoutDatabaseOwnership(t *testing.
 	}
 }
 
+func TestRestoreSeedRequiresOwnedRestore(t *testing.T) {
+	cfg := bootstrapOwnershipFixture(t)
+	cfg.Nodes = []config.NodeSpec{{Name: "db1", Role: config.RoleMaster}}
+
+	if err := claimRestoreAccess(cfg, "db1", "original", "restored"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := bootstrapWriteNew(filepath.Join(bootstrapStateDir, "instance"), []byte("restored\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	old := restoreClusterCredentials
+	calls := 0
+	restoreClusterCredentials = func(map[string]string) error { calls++; return nil }
+
+	t.Cleanup(func() { restoreClusterCredentials = old })
+
+	p := bootstrapParams{NodeName: "db1"}
+	env := &Env{Req: rpc.Request{OperationID: "other"}}
+
+	if err := restoreBootstrapCredentials(cfg, p, env); err == nil || calls != 0 {
+		t.Fatalf("foreign restore accepted: %v calls=%d", err, calls)
+	}
+
+	env.Req.OperationID = "original"
+	if err := restoreBootstrapCredentials(cfg, p, env); err != nil || calls != 1 {
+		t.Fatalf("owned restore: %v calls=%d", err, calls)
+	}
+
+	changed := cfg
+	changed.Server.DataRoot += "-other"
+
+	if err := restoreBootstrapCredentials(changed, p, env); err == nil || calls != 1 {
+		t.Fatalf("changed config accepted: %v calls=%d", err, calls)
+	}
+}
+
 func TestCompletedServerBootstrapRPCDoesNotAcquireAccessAuthority(t *testing.T) {
 	_ = bootstrapOwnershipFixture(t)
 	cfg := copyTestConfig(t)

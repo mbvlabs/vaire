@@ -219,6 +219,58 @@ if grep -q '"usqlArtifacts"' "${work_dir}/manifest.json"; then
   [ "$(sha256_hex "${work_dir}/usql")" = "${usql_sha256}" ] || fail "usql checksum verification failed"
 fi
 
+has_psql=0
+if grep -q '"psqlArtifacts"' "${work_dir}/manifest.json"; then
+  has_psql=1
+  psql_sha256="$(awk -v key="\"${os}/${arch}\"" '
+    /"psqlArtifacts":/ { section = 1; next }
+    section && !found && index($0, key) { found = 1; next }
+    found && /}/ { exit }
+    section && !found && /^  }/ { exit }
+    found && match($0, /"sha256": "[0-9a-f]{64}"/) {
+      print substr($0, RSTART + 11, 64); exit
+    }
+  ' "${work_dir}/manifest.json")"
+  [ -n "${psql_sha256}" ] || fail "release manifest is missing psql for ${os}/${arch}"
+  psql_url="${release_base_url}/${os}/${arch}/psql.tar.gz"
+  curl -fsSL --proto '=https' --tlsv1.2 "${psql_url}" -o "${work_dir}/psql.tar.gz"
+  curl -fsSL --proto '=https' --tlsv1.2 "${psql_url}.sigstore.json" -o "${work_dir}/psql.tar.gz.sigstore.json"
+  if ! verify_out="$("${work_dir}/cosign" verify-blob "${work_dir}/psql.tar.gz" \
+    --bundle "${work_dir}/psql.tar.gz.sigstore.json" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-identity "${identity}" 2>&1)"; then
+    fail "psql signature verification failed: ${verify_out}"
+  fi
+  [ "$(sha256_hex "${work_dir}/psql.tar.gz")" = "${psql_sha256}" ] || fail "psql checksum verification failed"
+  # Only regular files and directories in the bundle's fixed, flat layout.
+  # In particular, never allow links or path traversal during extraction.
+  tar -tzf "${work_dir}/psql.tar.gz" >"${work_dir}/psql.names" || fail "invalid psql archive"
+  tar -tvzf "${work_dir}/psql.tar.gz" >"${work_dir}/psql.types" || fail "invalid psql archive"
+  awk '
+    !/^(psql|pg_dump|pg_restore|dependencies[.]txt|lib\/|licenses\/|lib\/[A-Za-z0-9_.+-]+|licenses\/[A-Za-z0-9_.+-]+)$/ { exit 1 }
+    /(^|\/)[.][.]?($|\/)/ { exit 1 }
+    seen[$0]++ { exit 1 }
+    END { if (NR == 0) exit 1 }
+  ' "${work_dir}/psql.names" || fail "unsafe psql archive path"
+  awk 'substr($0, 1, 1) != "-" && substr($0, 1, 1) != "d" { exit 1 }' \
+    "${work_dir}/psql.types" || fail "unsafe psql archive entry"
+  mkdir "${work_dir}/psql-bundle"
+  (umask 077; tar -xzf "${work_dir}/psql.tar.gz" --no-same-owner --no-same-permissions -C "${work_dir}/psql-bundle") || fail "invalid psql archive"
+  client_version=""
+  for client in psql pg_dump pg_restore; do
+    [ -f "${work_dir}/psql-bundle/${client}" ] && [ -x "${work_dir}/psql-bundle/${client}" ] ||
+      fail "psql archive has no executable ${client}"
+    version_output="$("${work_dir}/psql-bundle/${client}" --version)" || fail "bundled ${client} failed to run"
+    version="${version_output#* (PostgreSQL) }"
+    [ "${version}" != "${version_output}" ] || fail "invalid bundled ${client} version"
+    [ -z "${client_version}" ] || [ "${version}" = "${client_version}" ] || fail "bundled client versions do not match"
+    client_version="${version}"
+  done
+  find "${work_dir}/psql-bundle" -type d -exec chmod 0755 {} +
+  find "${work_dir}/psql-bundle" -type f -exec chmod 0644 {} +
+  chmod 0755 "${work_dir}/psql-bundle/psql" "${work_dir}/psql-bundle/pg_dump" "${work_dir}/psql-bundle/pg_restore"
+fi
+
 if [ "$(id -u)" -eq 0 ]; then
   dest_dir="/usr/local/bin"
 else
@@ -226,6 +278,16 @@ else
   mkdir -p "${dest_dir}"
 fi
 dest="${dest_dir}/vaire"
+if [ "${has_psql}" = 1 ]; then
+  # A fresh directory avoids mutating libraries used by running sessions.
+  psql_dest="$(mktemp -d "${dest_dir}/.vaire-psql-bundle.XXXXXXXX")"
+  cp -R "${work_dir}/psql-bundle/." "${psql_dest}/"
+  chmod 0755 "${psql_dest}"
+  ln -s "${psql_dest##*/}/psql" "${dest_dir}/.vaire-psql-new.$$"
+  mv -f "${dest_dir}/.vaire-psql-new.$$" "${dest_dir}/.vaire-psql"
+else
+  rm -f "${dest_dir}/.vaire-psql"
+fi
 if [ "${has_usql}" = 1 ]; then
   cp "${work_dir}/usql" "${dest_dir}/.vaire-usql-new.$$"
   chmod 0755 "${dest_dir}/.vaire-usql-new.$$"

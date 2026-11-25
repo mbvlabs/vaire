@@ -89,6 +89,14 @@ if [ "${#platforms[@]}" -eq 0 ]; then
   platforms=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64)
 fi
 
+# The release workflow must supply tested, relocatable archives for every
+# selected platform. Never silently publish a release with missing sidecars.
+psql_bundles="${PSQL_BUNDLE_DIR:?PSQL_BUNDLE_DIR must contain OS/ARCH/psql.tar.gz for every release platform}"
+for platform in "${platforms[@]}"; do
+  [ -f "${psql_bundles}/${platform}/psql.tar.gz" ] ||
+    { echo "missing psql bundle for ${platform}" >&2; exit 1; }
+done
+
 channel_root="${base_url}"
 if [ "${channel}" = edge ]; then
   channel_root="${base_url}/edge"
@@ -134,6 +142,7 @@ build_one() {
 release_base_url="${base_url}/releases/${version}"
 artifacts_json='{}'
 usql_json='{}'
+psql_json='{}'
 usql_version=v0.21.4
 for platform in "${platforms[@]}"; do
   sha="$(build_one "${platform%/*}" "${platform#*/}")"
@@ -149,6 +158,12 @@ for platform in "${platforms[@]}"; do
     darwin/arm64) upstream_sha=cee9fd2117c17fd622fe0df37b334c356b80cf48d6e9bb164084830ae4ce6d05 ;;
   esac
   platform_dir="${out}/releases/${version}/${platform}"
+  cp "${psql_bundles}/${platform}/psql.tar.gz" "${platform_dir}/psql.tar.gz"
+  psql_sha="$(sha256_hex "${platform_dir}/psql.tar.gz")"
+  printf '%s  psql.tar.gz\n' "${psql_sha}" >"${platform_dir}/psql.tar.gz.sha256"
+  psql_json="$(jq -c --arg platform "${platform}" --arg sha "${psql_sha}" \
+    --arg url "${release_base_url}/${platform}/psql.tar.gz" \
+    '. + {($platform): {"url": $url, "sha256": $sha}}' <<<"${psql_json}")"
   archive="${platform_dir}/usql.tar.bz2"
   curl -fsSL --proto '=https' --tlsv1.2 \
     "https://github.com/xo/usql/releases/download/${usql_version}/usql-${usql_version#v}-${platform%/*}-${platform#*/}.tar.bz2" -o "${archive}"
@@ -170,13 +185,15 @@ jq -n \
   --arg releaseBaseUrl "${release_base_url}" \
   --argjson artifacts "${artifacts_json}" \
   --argjson usqlArtifacts "${usql_json}" \
+  --argjson psqlArtifacts "${psql_json}" \
   '{
     schemaVersion: 1,
     channel: $channel,
     version: $version,
     releaseBaseUrl: $releaseBaseUrl,
     artifacts: $artifacts,
-    usqlArtifacts: $usqlArtifacts
+    usqlArtifacts: $usqlArtifacts,
+    psqlArtifacts: $psqlArtifacts
   }' >"${out}/releases/${version}/manifest.json"
 
 if [ "${channel}" = edge ]; then

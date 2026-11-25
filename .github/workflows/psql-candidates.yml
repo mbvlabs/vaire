@@ -1,0 +1,88 @@
+name: Build native psql candidates
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  psql:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-24.04
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - os: darwin
+            arch: amd64
+            runner: macos-15-intel
+          - os: darwin
+            arch: arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Linux build and test dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison flex libedit-dev libpq-dev libssl-dev patchelf postgresql
+      - name: Install macOS test server
+        if: matrix.os == 'darwin'
+        run: brew install postgresql@18
+      - name: Build native bundle
+        env:
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          case "$(uname -s)/$(uname -m)/${OS}/${ARCH}" in
+            Linux/x86_64/linux/amd64 | Linux/aarch64/linux/arm64 | Darwin/x86_64/darwin/amd64 | Darwin/arm64/darwin/arm64) ;;
+            *) echo "runner architecture does not match target" >&2; exit 1 ;;
+          esac
+          if [ "${OS}" = linux ]; then
+            bash scripts/build-psql.sh "${RUNNER_TEMP}/psql-bundle"
+          else
+            bash scripts/build-psql-darwin.sh "${RUNNER_TEMP}/psql-bundle"
+          fi
+          mkdir -p "dist/psql-bundles/${OS}/${ARCH}"
+          tar -C "${RUNNER_TEMP}/psql-bundle" -czf "dist/psql-bundles/${OS}/${ARCH}/psql.tar.gz" psql pg_dump pg_restore lib licenses dependencies.txt
+      - name: Test archived bundle after relocation
+        env:
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          archive="dist/psql-bundles/${OS}/${ARCH}/psql.tar.gz"
+          tar -tzf "${archive}" | awk '
+            !/^(psql|pg_dump|pg_restore|dependencies[.]txt|lib\/|licenses\/|lib\/[A-Za-z0-9_.+-]+|licenses\/[A-Za-z0-9_.+-]+)$/ { exit 1 }
+            seen[$0]++ { exit 1 }
+            END { if (NR == 0) exit 1 }
+          '
+          tar -tvzf "${archive}" | awk 'substr($0, 1, 1) != "-" && substr($0, 1, 1) != "d" { exit 1 }'
+          mkdir "${RUNNER_TEMP}/relocated-psql"
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}/relocated-psql"
+          client="${RUNNER_TEMP}/relocated-psql/psql"
+          for tool in psql pg_dump pg_restore; do
+            env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH -u DYLD_FALLBACK_LIBRARY_PATH "${RUNNER_TEMP}/relocated-psql/${tool}" --version | grep -F '18.7'
+          done
+          if [ "${OS}" = linux ]; then
+            pgbin="$(pg_config --bindir)"
+          else
+            pgbin="$(brew --prefix postgresql@18)/bin"
+          fi
+          bash scripts/test-psql-tls.sh "${client}" "${pgbin}"
+          (cd "dist/psql-bundles/${OS}/${ARCH}" && shasum -a 256 psql.tar.gz > psql.tar.gz.sha256)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: psql-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/psql-bundles/${{ matrix.os }}/${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 1

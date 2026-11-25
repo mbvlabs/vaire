@@ -1032,6 +1032,34 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 
 	warnings := append(s.warnings, reply.Warnings...)
 
+	var memberStatus struct {
+		StatusOnly  bool   `json:"status_only"`
+		Database    string `json:"database"`
+		Status      string `json:"status"`
+		BackupCount int    `json:"backup_count"`
+		Databases   []struct {
+			Database string `json:"database"`
+			Status   string `json:"status"`
+			Sets     int    `json:"sets"`
+		} `json:"databases"`
+	}
+	if err := reply.Decode(&memberStatus); err != nil {
+		return err
+	}
+
+	if memberStatus.StatusOnly {
+		lines := []string{"Backup status (last recorded observation):"}
+		if db != "" {
+			lines = append(lines, memberBackupStatusLine(memberStatus.Database, memberStatus.Status, memberStatus.BackupCount))
+		} else {
+			for _, row := range memberStatus.Databases {
+				lines = append(lines, memberBackupStatusLine(row.Database, row.Status, row.Sets))
+			}
+		}
+
+		return output.Success(cmd, output.Result{Data: memberStatus, Message: strings.Join(lines, "\n"), Warnings: warnings})
+	}
+
 	if db == "" {
 		var data backupRowsData
 		if err := reply.Decode(&data); err != nil {
@@ -1070,6 +1098,14 @@ func runBackupList(cmd *cobra.Command, _ []string) error {
 	}
 
 	return output.Success(cmd, output.Result{Data: data, Message: strings.Join(lines, "\n"), Warnings: warnings})
+}
+
+func memberBackupStatusLine(db, status string, count int) string {
+	if status == "available" || status == "no backups" {
+		return fmt.Sprintf("%s: %s (%d backup sets)", db, status, count)
+	}
+
+	return db + ": " + status
 }
 
 // backupRowLines renders backup list without --db: a row per database, then

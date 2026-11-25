@@ -2653,6 +2653,10 @@ func handleRestoreStatus(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 
+	if memberRead(env) {
+		return memberRestoreStatus(env, p.Database)
+	}
+
 	bs, err := backup.LoadRecords()
 	if err != nil {
 		return Result{}, err
@@ -2685,6 +2689,48 @@ func handleRestoreStatus(ctx context.Context, env *Env) (Result, error) {
 	}
 
 	return Result{Data: map[string]any{"restores": out, "leftovers": bs.LeftoversOf(p.Database)}}, nil
+}
+
+func memberRestoreStatus(env *Env, db string) (Result, error) {
+	if db != "" && !memberOwns(env, db) {
+		return Result{}, databaseNotFound(db)
+	}
+
+	rs, err := backup.LoadRecords()
+	if err != nil {
+		return Result{}, memberRecordsUnavailable()
+	}
+
+	type memberRestore struct {
+		Database string `json:"database"`
+		Phase    string `json:"phase"`
+	}
+
+	rows := []memberRestore{}
+
+	for _, spec := range env.Cluster.Clusters {
+		if (db != "" && spec.Name != db) || !memberOwns(env, spec.Name) || spec.Stanza == "" {
+			continue
+		}
+
+		r, ok := rs.Restores[spec.Name]
+		// A name alone cannot bind a historical restore to a recreated
+		// database. Legacy and not-yet-bound records remain unreported.
+		if !ok || r.Database != spec.Name || r.Attempt == nil || r.Attempt.Stanza != spec.Stanza {
+			continue
+		}
+
+		phase := "unknown"
+
+		switch r.Phase {
+		case backup.PhaseRestoring, backup.PhaseReady, backup.PhaseFailed:
+			phase = r.Phase
+		}
+
+		rows = append(rows, memberRestore{Database: spec.Name, Phase: phase})
+	}
+
+	return Result{Data: map[string]any{"restores": rows, "leftovers": []any{}, "status_only": true}}, nil
 }
 
 const rowEstimateSQL = `SELECT n.nspname || '.' || c.relname AS t, c.reltuples::bigint AS r
@@ -2940,6 +2986,7 @@ func forkSpec(src config.ClusterSpec, name string) config.ClusterSpec {
 	spec.Node, spec.Port, spec.Stanza = "", 0, ""
 	spec.Backup = config.ClusterBackup{}
 	spec.Follows, spec.FollowGeneration = "", ""
+	spec.CreatorOperatorID = ""
 	spec.Protected = false
 
 	return spec

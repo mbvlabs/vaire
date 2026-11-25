@@ -5,7 +5,9 @@ import (
 	"strings"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/remote"
+	"github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/spf13/cobra"
 )
 
@@ -52,6 +54,15 @@ func runQueries(cmd *cobra.Command, _ []string) error {
 	}
 	defer s.Close()
 
+	member, err := diagnosticMember(cmd, s, p)
+	if err != nil {
+		return err
+	}
+
+	if member && (flagTrue(cmd, "reset") || flagTrue(cmd, "all-sessions")) {
+		return output.NewError(output.CodeUsage, "--reset and --all-sessions are not available to members", output.ExitUsage, "")
+	}
+
 	params := map[string]any{"order": order, "limit": limit}
 	if db != "" {
 		params["db"] = db
@@ -62,27 +73,7 @@ func runQueries(cmd *cobra.Command, _ []string) error {
 	}
 
 	if flagTrue(cmd, "reset") {
-		server := s.ctx.Server
-		if server == "" {
-			server = s.ctx.Name
-		}
-
-		token := statsToken(server, db)
-		if err := Confirm(cmd, token); err != nil {
-			return err
-		}
-
-		reply, err := p.call(commandContext(cmd), s.node, "queries.reset", params, remote.CallOptions{Confirm: token, OnEvent: p.event})
-		if err != nil {
-			return err
-		}
-
-		var data map[string]any
-
-		_ = reply.Decode(&data)
-
-		return output.Success(cmd, output.Result{Data: data, Message: fmt.Sprintf("reset pg_stat_statements in %v", data["reset"]),
-			Warnings: append(s.warnings, reply.Warnings...)})
+		return runQueriesReset(cmd, s, p, params, db)
 	}
 
 	reply, err := p.call(commandContext(cmd), s.node, "queries.top", params, remote.CallOptions{OnEvent: p.event})
@@ -95,7 +86,54 @@ func runQueries(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	return output.Success(cmd, output.Result{Data: data, Message: queriesMessage(data, flagTrue(cmd, "all-sessions")), Warnings: append(s.warnings, reply.Warnings...)})
+	message := queriesMessage(data, flagTrue(cmd, "all-sessions") || member)
+	if member && len(data.Statements) > 0 {
+		message += "\ninternal/administrative roles are hidden in the member view"
+	}
+
+	return output.Success(cmd, output.Result{Data: data, Message: message, Warnings: append(s.warnings, reply.Warnings...)})
+}
+
+func runQueriesReset(cmd *cobra.Command, s *session, p *progress, params map[string]any, db string) error {
+	server := s.ctx.Server
+	if server == "" {
+		server = s.ctx.Name
+	}
+
+	token := statsToken(server, db)
+	if err := Confirm(cmd, token); err != nil {
+		return err
+	}
+
+	reply, err := p.call(commandContext(cmd), s.node, "queries.reset", params, remote.CallOptions{Confirm: token, OnEvent: p.event})
+	if err != nil {
+		return err
+	}
+
+	var data map[string]any
+
+	_ = reply.Decode(&data)
+
+	return output.Success(cmd, output.Result{Data: data, Message: fmt.Sprintf("reset pg_stat_statements in %v", data["reset"]),
+		Warnings: append(s.warnings, reply.Warnings...)})
+}
+
+func diagnosticMember(cmd *cobra.Command, s *session, p *progress) (bool, error) {
+	if !s.ctx.Managed {
+		return false, nil
+	}
+
+	reply, err := p.call(commandContext(cmd), s.node, "whoami", nil, remote.CallOptions{OnEvent: p.event})
+	if err != nil {
+		return false, err
+	}
+
+	var who rpc.WhoamiReply
+	if err := reply.Decode(&who); err != nil {
+		return false, err
+	}
+
+	return who.Role == config.AccessRoleMember, nil
 }
 
 func queriesMessage(d queriesData, allSessions bool) string {

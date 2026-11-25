@@ -671,8 +671,8 @@ ALTER ROLE vaire_monitor SET lock_timeout = '1s';
 
 // serviceVerifier is the SCRAM verifier for a service role in spec's
 // cluster. Service passwords are setup-wide (RFC 12): another cluster's
-// verifier is copied, so every cluster holds the same one, and only the
-// first cluster computes it from the request's secret.
+// verifier is copied, so every cluster holds the same one. A fresh setup
+// uses its node-owned seed; older nodes can still use the request's secret.
 func serviceVerifier(ctx context.Context, cfg config.Cluster, spec config.ClusterSpec, rt engine.Runtime, role, secretKey string) (string, error) {
 	for _, other := range cfg.Clusters {
 		if other.Name == spec.Name {
@@ -683,6 +683,19 @@ func serviceVerifier(ctx context.Context, cfg config.Cluster, spec config.Cluste
 		if err == nil && len(rows) == 1 && strings.HasPrefix(rows[0], "SCRAM-SHA-256$") {
 			secrets.Add(rows[0])
 			return rows[0], nil
+		}
+	}
+
+	// A fresh node has no PostgreSQL cluster to copy from. Bootstrap keeps
+	// only the verifiers for that case, never the shared admin plaintext.
+	if seed, err := readClusterSeed(); err == nil {
+		switch secretKey {
+		case SecretAdminPassword:
+			return seed.Admin, nil
+		case SecretPgbouncerAuth:
+			return seed.Auth, nil
+		case SecretMonitor:
+			return seed.Monitor, nil
 		}
 	}
 

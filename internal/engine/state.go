@@ -48,19 +48,21 @@ type State struct {
 // (unit vaire-job-<id>) or a timer run. PID is the vaire node run process, so a
 // record still running whose process was killed can be told from a live job.
 type JobRecord struct {
-	ID           string            `json:"id"`
-	Job          string            `json:"job"`
-	DB           string            `json:"db,omitempty"`
-	Unit         string            `json:"unit,omitempty"`
-	InvocationID string            `json:"invocation_id,omitempty"`
-	PID          int               `json:"pid,omitempty"`
-	State        string            `json:"state"`
-	Detail       string            `json:"detail,omitempty"`
-	CreatedAt    string            `json:"created_at"`
-	StartedAt    string            `json:"started_at,omitempty"`
-	FinishedAt   string            `json:"finished_at,omitempty"`
-	Result       json.RawMessage   `json:"result,omitempty"`
-	Error        *output.ErrorBody `json:"error,omitempty"`
+	ID               string            `json:"id"`
+	OriginOperatorID string            `json:"origin_operator_id,omitempty"`
+	OriginToken      string            `json:"origin_token,omitempty"`
+	Job              string            `json:"job"`
+	DB               string            `json:"db,omitempty"`
+	Unit             string            `json:"unit,omitempty"`
+	InvocationID     string            `json:"invocation_id,omitempty"`
+	PID              int               `json:"pid,omitempty"`
+	State            string            `json:"state"`
+	Detail           string            `json:"detail,omitempty"`
+	CreatedAt        string            `json:"created_at"`
+	StartedAt        string            `json:"started_at,omitempty"`
+	FinishedAt       string            `json:"finished_at,omitempty"`
+	Result           json.RawMessage   `json:"result,omitempty"`
+	Error            *output.ErrorBody `json:"error,omitempty"`
 	// ActivityPending is set while the job's final activity record is still
 	// being written. A follower waits for it so a missing evidence warning is
 	// not reported after the result it qualifies.

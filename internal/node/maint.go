@@ -187,6 +187,10 @@ func handleMaintReport(ctx context.Context, env *Env) (Result, error) {
 			"Use one of "+strings.Join(maint.ReportKinds, ", ")+".")
 	}
 
+	if memberRead(env) {
+		return handleMemberMaintReport(ctx, env, p)
+	}
+
 	if p.Exact {
 		return exactMaintReport(ctx, env, p)
 	}
@@ -213,6 +217,56 @@ func handleMaintReport(ctx context.Context, env *Env) (Result, error) {
 	}
 
 	return Result{Data: map[string]any{"kind": p.Kind, "databases": out}}, nil
+}
+
+func handleMemberMaintReport(ctx context.Context, env *Env, p maintReportParams) (Result, error) {
+	if p.DB == "" {
+		visible := memberDatabases(env)
+		if len(visible.Clusters) != 1 {
+			return Result{}, deviceAccessDenied()
+		}
+
+		p.DB = visible.Clusters[0].Name
+	}
+
+	if !memberOwns(env, p.DB) {
+		return Result{}, deviceAccessDenied()
+	}
+
+	spec, ok := env.Cluster.ClusterByName(p.DB)
+	if !ok || spec.IsFollower() {
+		return Result{}, deviceAccessDenied()
+	}
+
+	if p.Exact {
+		result, err := exactMaintReport(ctx, env, p)
+		if err != nil {
+			return Result{}, output.NewError(output.CodePrecondition, "the exact maintenance report could not be completed", output.ExitPrecondition, "")
+		}
+
+		return result, nil
+	}
+
+	if p.Table != "" {
+		return Result{}, output.NewError(output.CodeUsage, "--table is only for maint report bloat --exact", output.ExitUsage, "")
+	}
+
+	older, err := maintReportOlder(p.OlderThan)
+	if err != nil {
+		return Result{}, err
+	}
+
+	sql, err := maint.MemberReportSQL(p.Kind, older)
+	if err != nil {
+		return Result{}, output.NewError(output.CodePrecondition, "the maintenance report could not be scoped", output.ExitPrecondition, "")
+	}
+
+	report := runMaintReport(ctx, spec, p, sql)
+	if report.Error != "" {
+		report.Error = "the maintenance report could not be completed"
+	}
+
+	return Result{Data: map[string]any{"kind": p.Kind, "databases": []maintReportDB{report}}}, nil
 }
 
 func maintReportOlder(value string) (int, error) {

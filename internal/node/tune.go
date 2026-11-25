@@ -22,6 +22,10 @@ func handleTuneShow(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 
+	if memberRead(env) {
+		return handleMemberTuneShow(ctx, env, p)
+	}
+
 	rt := runtimeFor(env, true)
 	data := map[string]any{"server": serverBudget(env.Cluster, rt.Host)}
 
@@ -70,6 +74,79 @@ func handleTuneShow(ctx context.Context, env *Env) (Result, error) {
 	data["pending_restart"] = pendingNames
 
 	return Result{Data: data, Warnings: warnings}, nil
+}
+
+// Members may inspect only their own database, not the server budget or
+// calculator inputs and explanations that expose shared host resources.
+func handleMemberTuneShow(ctx context.Context, env *Env, p tuneShowParams) (Result, error) {
+	if p.DB == "" {
+		visible := memberDatabases(env)
+		if len(visible.Clusters) != 1 {
+			return Result{}, deviceAccessDenied()
+		}
+
+		p.DB = visible.Clusters[0].Name
+	}
+
+	if !memberOwns(env, p.DB) {
+		return Result{}, deviceAccessDenied()
+	}
+
+	spec, err := onlyCluster(env.Cluster, p.DB)
+	if err != nil {
+		return Result{}, deviceAccessDenied()
+	}
+
+	rt := runtimeFor(env, true)
+	res := steps.TuningFor(env.Cluster, spec, rt.Host)
+
+	current := make(map[string]string, len(res.Settings))
+	for i := range res.Settings {
+		setting := &res.Settings[i]
+		current[setting.Name] = ""
+		// These explanations use only this database's memory, connection limit,
+		// or profile. Other reasons can include shared CPU or disk facts.
+		switch setting.Name {
+		case "shared_buffers", "effective_cache_size", "work_mem",
+			"maintenance_work_mem", "autovacuum_work_mem", "huge_pages",
+			"max_parallel_workers_per_gather", "jit", "default_statistics_target",
+			"log_min_duration_statement":
+		default:
+			setting.Reason = "calculated for this database"
+		}
+	}
+
+	local := snapshotPG(spec)
+
+	rows, err := local.Query(ctx, "postgres", "SELECT name, current_setting(name) AS setting FROM pg_settings", nil)
+	if err == nil {
+		for _, row := range rows {
+			if _, ok := current[row["name"]]; ok {
+				current[row["name"]] = row["setting"]
+			}
+		}
+	}
+
+	pending, err := local.Query(ctx, "postgres", "SELECT name FROM pg_settings WHERE pending_restart ORDER BY name", nil)
+
+	var pendingNames []string
+
+	if err == nil {
+		for _, row := range pending {
+			if _, ok := current[row["name"]]; ok {
+				pendingNames = append(pendingNames, row["name"])
+			}
+		}
+	}
+
+	inputs := tuneInputs(env.Cluster, spec, rt.Host)
+
+	return Result{Data: map[string]any{
+		"database": spec.Name, "inputs": map[string]any{
+			"memory_mib": inputs["memory_mib"], "max_connections": inputs["max_connections"], "profile": inputs["profile"],
+		}, "settings": res.Settings,
+		"current": current, "pending_restart": pendingNames,
+	}}, nil
 }
 
 // tuneJournalPath is the journal tune.apply uses. Empty means the node's

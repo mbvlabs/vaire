@@ -60,6 +60,7 @@ var placements = []struct {
 	{masterbackup.OperatorsPath, placement{"root", "root", config.FileMode}},
 	{masterbackup.RecordsPath, placement{"root", "root", backup.RecordsMode}},
 	{masterbackup.ProtectPath, placement{"root", "root", protectStateMode}},
+	{masterbackup.ClusterSeedPath, placement{"root", "root", 0o600}},
 	{masterbackup.WGKeyPath, placement{"root", "root", steps.WGPrivateKeyMode}},
 	// OpenSSH's own: private keys root 0600, public keys 0644.
 	{masterbackup.HostKeyGlob, placement{"root", "root", 0o600}},
@@ -84,6 +85,7 @@ func placementOf(p string) (placement, bool) {
 // owners create them. Every one is root's.
 var placeDirs = map[string]os.FileMode{
 	config.Dir:                       config.DirMode,
+	steps.RuntimeDir:                 0o700,
 	steps.TLSDir:                     steps.TLSDirMode,
 	steps.ACMEDir:                    steps.ACMEDirMode,
 	path.Dir(steps.WGPrivateKeyPath): steps.WGDirMode,
@@ -200,6 +202,10 @@ func placementFresh(instance string) error {
 // and awaiting recovery, protect.json's failures and lockout reset, and every
 // SSH key checked.
 func restoreFiles(b masterbackup.Bundle, cfg config.Cluster, clusterTOML string, now time.Time) ([]masterbackup.File, []backup.PrunedRecord, error) {
+	if err := validateBundleSeed(b); err != nil {
+		return nil, nil, err
+	}
+
 	var (
 		out    []masterbackup.File
 		pruned []backup.PrunedRecord
@@ -257,6 +263,14 @@ func restoreFiles(b masterbackup.Bundle, cfg config.Cluster, clusterTOML string,
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 
 	return out, pruned, nil
+}
+
+func validateBundleSeed(b masterbackup.Bundle) error {
+	if file, ok := b.File(masterbackup.ClusterSeedPath); ok && steps.ValidateClusterSeed(file.Data) != nil {
+		return errors.New("cluster verifier seed in the bundle is invalid")
+	}
+
+	return nil
 }
 
 func awaitingOf(cfg config.Cluster) []backup.AwaitingDatabase {

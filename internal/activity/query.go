@@ -577,7 +577,7 @@ func (ps *pageScan) collector() func(Event) bool {
 			return true
 		}
 
-		if !matchesQuery(ps.nq, ev) {
+		if !matchesVerifiedOperator(ps.nq.filter.VerifiedOperatorID, ev) || !matchesQuery(ps.nq, ev) {
 			return true
 		}
 
@@ -845,6 +845,10 @@ func windowBeforeRetained(nq normalizedQuery, ret retainedBounds, segmentCount i
 
 // matchesQuery applies the exact filters and the inclusive/exclusive time
 // window.
+func matchesVerifiedOperator(id string, ev Event) bool {
+	return id == "" || ev.ActorVerified && ev.OperatorID == id
+}
+
 func matchesQuery(nq normalizedQuery, ev Event) bool {
 	q := nq.filter
 	if q.OperationID != "" && ev.OperationID != q.OperationID {

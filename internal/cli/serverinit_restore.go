@@ -686,11 +686,48 @@ func (r *initRun) restoreSecrets() error {
 		}
 	}
 
+	if err := checkRestoreClusterCredentials(rr.bundle, r.sec.Database); err != nil {
+		return err
+	}
+
 	if err := r.ensureDatabaseSecrets(); err != nil {
 		return err
 	}
 
 	addRecoveryKit(r.dbSecrets, r.sec.Backup)
+
+	return nil
+}
+
+func requireRestoreClusterCredentials(creds *workspaces.DatabaseCreds) error {
+	if creds == nil || creds.Admin.Password == "" || creds.Services["pgbouncer_auth"].Password == "" || creds.Services["vaire_monitor"].Password == "" {
+		return output.NewError(output.CodeInputRequired, "the original database service credentials are missing", output.ExitInput,
+			"Restore with the original server credentials; new passwords cannot replace them.").
+			WithDetails(map[string]any{"reason": "cluster_seed_unavailable"})
+	}
+
+	return nil
+}
+
+func checkRestoreClusterCredentials(bundle masterbackup.Bundle, creds *workspaces.DatabaseCreds) error {
+	seed, ok := bundle.File(masterbackup.ClusterSeedPath)
+	if !ok {
+		return nil
+	}
+
+	if err := requireRestoreClusterCredentials(creds); err != nil {
+		return err
+	}
+
+	values := map[string]string{
+		steps.SecretAdminPassword: creds.Admin.Password,
+		steps.SecretPgbouncerAuth: creds.Services["pgbouncer_auth"].Password,
+		steps.SecretMonitor:       creds.Services["vaire_monitor"].Password,
+	}
+	if err := steps.VerifyClusterSeed(seed.Data, values); err != nil {
+		return output.NewError(output.CodePrecondition, "the recovery credentials do not match the backup's cluster seed", output.ExitPrecondition,
+			"Restore with the original server credentials.").WithDetails(map[string]any{"reason": "cluster_seed_unavailable"})
+	}
 
 	return nil
 }
@@ -708,6 +745,10 @@ func (r *initRun) saveRestoreSecrets() error {
 		if err != nil {
 			return err
 		}
+	}
+
+	if err := checkRestoreClusterCredentials(r.restore.bundle, creds.Database); err != nil {
+		return err
 	}
 
 	wg, _, err := transport.GenerateWGKey()

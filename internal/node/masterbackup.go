@@ -277,6 +277,12 @@ func localBundleExists(name string) bool {
 // buildLocalBundle builds, seals and writes a bundle and its sidecar to the
 // local directory.
 func buildLocalBundle(cfg config.Cluster, files []masterbackup.File, epoch int64, recipient string, now time.Time) (string, int64, error) {
+	for _, f := range files {
+		if f.Path == masterbackup.ClusterSeedPath && (f.Owner != "root" || f.Mode != 0o600 || steps.ValidateClusterSeed(f.Data) != nil) {
+			return "", 0, errors.New("cluster verifier seed is unsafe or invalid")
+		}
+	}
+
 	nodeName := ""
 	if n, err := config.LoadNode(config.NodePath); err == nil {
 		nodeName = n.NodeName

@@ -383,11 +383,13 @@ func phase1Commands() []cmdSpec {
 			flags: []fl{
 				flagString("db", "", "Database name"),
 				flagString("file", "", "Read the query from a file"),
+				flagString("role", "", "Use database credentials for ro, app, or migrate (prompts for password)"),
 				flagBool("write", "Allow a statement that modifies data"),
 			},
 			meta: CommandMeta{
-				Summary: "Run SQL as vaire_admin. Read-only unless --write is set",
+				Summary: "Run SQL as vaire_admin or with an existing database role",
 				WhenToUse: []string{"Inspect data or, with --write, change it. vaire keeps no application database passwords, so it connects as vaire_admin through the session pooler on 5432 of the node the database runs on, which routes by --db.",
+					"Use --role ro, app, or migrate to authenticate with that database role's existing password, prompted without echo. Its privileges apply even on a protected database; do not combine with --write.",
 					"Several statements separated by semicolons run in order in one transaction; human output prints each statement's rows or command tag, and --json keeps the last statement's columns, rows and command_tag at the top with every statement's result under results.",
 					"On a protected database a read needs nothing; --write asks once per command, without echo, for the master password or a current authenticator code, before it connects, and the node checks it and hands out a short-lived write login (protect_code_rejected when wrong, reused or locked out). With --yes, without a terminal or with structured output it is refused (database_protected, reason write_requires_human): agents get read-only access to a protected database."},
 				WhenNotToUse:     []string{"Interactive exploration; use vaire psql.", "Agents: --write on a protected database. Ask the human to run it at their terminal."},
@@ -404,11 +406,13 @@ func phase1Commands() []cmdSpec {
 			run:  runPsql,
 			flags: []fl{
 				flagString("db", "", "Database name"),
+				flagString("role", "", "Use database credentials for ro, app, or migrate (prompts for password)"),
 				flagBool("write", "Allow statements that modify data"),
 			},
 			meta: CommandMeta{
-				Summary: "Open psql as vaire_admin through the WireGuard tunnel, read-only unless --write",
+				Summary: "Open psql as vaire_admin or with an existing database role",
 				WhenToUse: []string{"Use an interactive SQL session with verify-full TLS, through the session pooler on 5432, which routes by --db.", "Arguments after -- go to psql as they are; use -- before psql's -c and other flags.",
+					"Use --role ro, app, or migrate with its existing password, prompted without echo. Its privileges apply even on a protected database; do not combine with --write.",
 					"On a protected database --write asks once, when it starts and before psql connects, for the current 6-digit code from the authenticator app; the session stays writable for its whole length. Without a terminal, with --yes or structured output it is refused (database_protected, reason write_requires_human). Reads need no code."},
 				Prerequisites: []string{"psql 16 or newer on PATH"},
 				Examples:      []string{"vaire psql --db app", "vaire psql --db app --write", `vaire psql --db app -- -c "select 1"`},
@@ -421,11 +425,13 @@ func phase1Commands() []cmdSpec {
 			run:  runConsole,
 			flags: []fl{
 				flagString("db", "", "Database name (or pass it as the argument)"),
+				flagString("role", "", "Use database credentials for ro, app, or migrate (prompts for password)"),
 				flagBool("write", "Allow statements that modify data"),
 			},
 			meta: CommandMeta{
-				Summary: "Open a usql console on a database as vaire_admin through the WireGuard tunnel, read-only unless --write",
+				Summary: "Open a usql console as vaire_admin or with an existing database role",
 				WhenToUse: []string{"Explore a database interactively without installing psql. vaire verifies the server certificate itself.",
+					"Use --role ro, app, or migrate with its existing password, prompted without echo. Its privileges apply even on a protected database; do not combine with --write.",
 					"On a protected database --write asks once, when it starts and before the console connects, for the current 6-digit code from the authenticator app; the session stays writable for its whole length. Without a terminal, with --yes or structured output it is refused (database_protected, reason write_requires_human). Reads need no code."},
 				WhenNotToUse:  []string{"Agents and scripts; use vaire sql."},
 				Prerequisites: []string{"installed usql sidecar, usql on PATH, or let vaire download its pinned copy"},
@@ -1001,7 +1007,7 @@ func dbCommands() cmdSpec {
 				run:  runDBCopy,
 				flags: []fl{
 					flagBool("source-url-stdin", "Read one newline-terminated source PostgreSQL URL from stdin (never from argv)"),
-					flagString("source-ca-file", "", "Read a PEM CA certificate for the source from this local file; only its content is sent, as a secret"),
+					flagString("source-ca-file", "", "Read a PEM CA certificate for the source from this local file"),
 					flagString("size", "", "Size of the new database's cluster: nano, small, medium, large, xlarge or custom (default [postgres] default_size)"),
 					flagString("memory", "", "Memory for the cluster, such as 768MiB or 2GiB; overrides the size's (custom needs it)"),
 					flagString("profile", "", "Workload profile for its tuning: oltp, mixed or analytics (default [postgres] profile)"),
@@ -1010,9 +1016,9 @@ func dbCommands() cmdSpec {
 				meta: CommandMeta{
 					Summary: "Copy an external PostgreSQL database into a new vaire database",
 					WhenToUse: []string{
-						"Import one external PostgreSQL database as a brand-new vaire database with its own size, roles, passwords, ownership and normal app/read-only access. The source is one consistent read-only snapshot: it is not replicated or cut over, and it is not modified apart from normal read/export load and locks. The destination node runs pg_dump and pg_restore, so the source must be reachable from that server (provider/firewall allowlists). Size means memory, CPU and connections, never a storage quota. Ask interactively for a masked URL or the individual host, port, database, user, password and TLS fields; without a terminal pass one newline-terminated URL on stdin with --source-url-stdin (there is no URL argument or password flag). --source-ca-file supplies certificate content for the node, not a remote path. The summary is redacted and confirmed with --confirm <name>; --yes never confirms it. Source roles, passwords, grants, tablespaces and cluster settings are not imported. A database dump can contain executable SQL, so only copy a trusted source. An existing database or cluster name is never an import target: choose a new name or drop the old one explicitly first. A failed copy may leave a partial target that is retained, never replayed or automatically dropped. The new role passwords are printed once; if the connection is lost, the job starts ambiguously or its outcome is unknown, vaire keeps and prints them with the job id because they may already be in use. job follow shows progress and outcomes only, never passwords.",
+						"Import an external PostgreSQL database into a new vaire database. The workstation exports a consistent snapshot and restores it over WireGuard with verified TLS; the source must be reachable from the workstation. The source is not modified apart from normal read/export load and locks. Currently only the built-in plpgsql extension is accepted on the source. Use --source-url-stdin for a newline-terminated URL, and optionally --source-ca-file for a local source CA. Confirm with --confirm <name>; --yes never confirms it. Only copy trusted sources: dumps can contain executable SQL. Source roles, grants and tablespaces are not imported. The copy does not overwrite or resume an existing database. On failure the destination is retained, never automatically dropped or replayed; keep the displayed credentials and inspect the database before deciding what to do.",
 					},
-					WhenNotToUse: []string{"To replace, overwrite or resume into an existing database; for continuous replication or application cutover; for a source reachable only from the operator machine; or for non-PostgreSQL sources. Use vaire restore for a vaire backup, and vaire db fork for a copy of a vaire-managed database."},
+					WhenNotToUse: []string{"To replace, overwrite or resume into an existing database; for continuous replication or application cutover; or for non-PostgreSQL sources. Use vaire restore for a vaire backup, and vaire db fork for a copy of a vaire-managed database."},
 					Examples: []string{
 						"vaire db copy app --source-url-stdin --size small --confirm app < source-url.txt",
 						"printf '%s\\n' \"$SOURCE_URL\" | vaire db copy app --source-url-stdin --size small --confirm app",
@@ -1029,7 +1035,7 @@ func dbCommands() cmdSpec {
 						"input_required", "validation_failed", "unsafe_action_requires_confirmation",
 						"precondition_failed", "transport_failed", "missing_tool", "step_failed", "error",
 					},
-					Next: []string{"vaire db list", "vaire job follow <job-id>"},
+					Next: []string{"vaire db list"},
 				},
 			},
 			{

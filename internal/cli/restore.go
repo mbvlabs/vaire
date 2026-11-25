@@ -223,6 +223,34 @@ func restoreReadyResult(cmd *cobra.Command, db string, params map[string]any, jr
 	})
 }
 
+type restoreStatusData struct {
+	backup.Restore
+	Restoring        string `json:"restoring_database"`
+	OnPromote        string `json:"on_promote"`
+	ApplicationReady *bool  `json:"application_ready,omitempty"`
+	AccessCoverage   string `json:"access_coverage,omitempty"`
+	AccessNotice     string `json:"access_notice,omitempty"`
+	Tables           []struct {
+		Table     string `json:"table"`
+		Live      *int64 `json:"live_rows"`
+		Restoring *int64 `json:"restoring_rows"`
+	} `json:"tables"`
+}
+
+func memberRestoreStatusLines(restores []restoreStatusData) []string {
+	lines := make([]string, 0, len(restores))
+
+	for _, r := range restores {
+		lines = append(lines, fmt.Sprintf("%s: %s", r.Database, r.Phase))
+	}
+
+	if len(lines) == 0 {
+		return []string{"no restore status verified for the current database"}
+	}
+
+	return lines
+}
+
 func runRestoreStatus(cmd *cobra.Command, args []string) error {
 	params := map[string]string{}
 	if len(args) > 0 {
@@ -243,23 +271,16 @@ func runRestoreStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	var data struct {
-		Restores []struct {
-			backup.Restore
-			Restoring        string `json:"restoring_database"`
-			OnPromote        string `json:"on_promote"`
-			ApplicationReady *bool  `json:"application_ready,omitempty"`
-			AccessCoverage   string `json:"access_coverage,omitempty"`
-			AccessNotice     string `json:"access_notice,omitempty"`
-			Tables           []struct {
-				Table     string `json:"table"`
-				Live      *int64 `json:"live_rows"`
-				Restoring *int64 `json:"restoring_rows"`
-			} `json:"tables"`
-		} `json:"restores"`
-		Leftovers []backup.Leftover `json:"leftovers"`
+		StatusOnly bool                `json:"status_only,omitempty"`
+		Restores   []restoreStatusData `json:"restores"`
+		Leftovers  []backup.Leftover   `json:"leftovers"`
 	}
 	if err := reply.Decode(&data); err != nil {
 		return err
+	}
+
+	if data.StatusOnly {
+		return output.Success(cmd, output.Result{Data: data, Message: strings.Join(memberRestoreStatusLines(data.Restores), "\n"), Warnings: append(s.warnings, reply.Warnings...)})
 	}
 
 	var lines []string

@@ -119,6 +119,44 @@ func ReportSQL(kind string, olderThanSeconds int) (string, error) {
 	return "", fmt.Errorf("unknown report %q", kind)
 }
 
+// MemberReportSQL restricts shared PostgreSQL catalogs to the connected
+// database. Other report queries already read database-local catalogs.
+func MemberReportSQL(kind string, olderThanSeconds int) (string, error) {
+	sql, err := ReportSQL(kind, olderThanSeconds)
+	if err != nil {
+		return "", err
+	}
+
+	var from, to string
+
+	switch kind {
+	case ReportWraparound:
+		from, to = "WHERE datallowconn", "WHERE datallowconn AND datname = current_database()"
+	case ReportLongQueries:
+		from, to = "WHERE backend_type = 'client backend'", "WHERE datname = current_database() AND backend_type = 'client backend'"
+	case ReportLocks:
+		from, to = "WHERE cardinality(pg_blocking_pids(a.pid)) > 0", "WHERE a.datname = current_database() AND cardinality(pg_blocking_pids(a.pid)) > 0"
+		// A blocker may belong to another database; do not expose its PID.
+		const blockers = "array_to_string(pg_blocking_pids(a.pid), ',')"
+
+		if !strings.Contains(sql, blockers) {
+			return "", fmt.Errorf("cannot scope locks report")
+		}
+
+		sql = strings.Replace(sql, blockers, `array_to_string(ARRAY(SELECT b.pid FROM pg_stat_activity b WHERE b.pid = ANY(pg_blocking_pids(a.pid)) AND b.datname = current_database()), ',')`, 1)
+	}
+
+	if from != "" {
+		if !strings.Contains(sql, from) {
+			return "", fmt.Errorf("cannot scope %s report", kind)
+		}
+
+		sql = strings.Replace(sql, from, to, 1)
+	}
+
+	return sql, nil
+}
+
 // WraparoundStatus is pass, warn or fail for a transaction ID age.
 func WraparoundStatus(age int64) string {
 	switch {

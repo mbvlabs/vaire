@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
+	"github.com/mbvlabs/vaire/internal/steps"
 )
 
 // Restore owns its setup access but must not claim the databases as fresh
@@ -54,4 +56,31 @@ func claimRestoreAccess(cfg config.Cluster, node, operation, instance string) er
 	}
 
 	return bootstrapWriteNew(filepath.Join(bootstrapStateDir, restoreAccessManifest), append(raw, '\n'))
+}
+
+var restoreClusterCredentials = steps.RestoreClusterCredentials
+
+// A restore manifest owns only this setup, not any recovered database.
+func restoreBootstrapCredentials(cfg config.Cluster, p bootstrapParams, env *Env) error {
+	owner, err := readBootstrapOwnership(restoreAccessManifest)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	if err != nil {
+		return deviceAccessDenied()
+	}
+
+	hash, err := bootstrapHash(cfg)
+	if err != nil || hash != owner.ConfigHash || len(owner.Targets) != 0 ||
+		authorizeBootstrapOperation(cfg.Name(), p.NodeName, env.Req.OperationID) != nil {
+		return deviceAccessDenied()
+	}
+
+	if err := restoreClusterCredentials(env.Req.Secrets); err != nil {
+		return output.NewError(output.CodePrecondition, "recovery credentials do not match the node cluster seed", output.ExitPrecondition,
+			"Resume restore with the original server credentials.").WithDetails(map[string]any{"reason": "cluster_seed_unavailable"})
+	}
+
+	return nil
 }

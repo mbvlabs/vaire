@@ -14,6 +14,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/health"
 	"github.com/mbvlabs/vaire/internal/node"
 	"github.com/mbvlabs/vaire/internal/remote"
+	noderpc "github.com/mbvlabs/vaire/internal/rpc"
 	"github.com/mbvlabs/vaire/internal/steps"
 	"github.com/mbvlabs/vaire/internal/tune"
 	"github.com/spf13/cobra"
@@ -210,17 +211,10 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	service, creds, generated, err := serviceSecrets(s.ctx.Name)
-	if err != nil {
+	if err := addCreateServiceSecrets(cmd, s, p, rpc); err != nil {
 		return err
 	}
 
-	maps.Copy(rpc, service)
-	// With backups on, the new database's stanza needs the bucket keys and
-	// cipher pass on the node; the kit rides along for a node without them.
-	addRecoveryKit(rpc, creds.Backup)
-
-	s.warnings = append(s.warnings, staleWarning(generated)...)
 	params := map[string]any{
 		"name":              name,
 		"statement_timeout": timeout,
@@ -265,6 +259,34 @@ func runDBCreate(cmd *cobra.Command, args []string) error {
 		Human:    human,
 		Warnings: append(s.warnings, reply.Warnings...),
 	})
+}
+
+func addCreateServiceSecrets(cmd *cobra.Command, s *session, p *progress, values map[string]string) error {
+	reply, err := p.call(commandContext(cmd), s.node, "whoami", nil, remote.CallOptions{OnEvent: p.event})
+	if err != nil {
+		return err
+	}
+
+	var identity noderpc.WhoamiReply
+	if err := reply.Decode(&identity); err != nil {
+		return err
+	}
+
+	if identity.Role == config.AccessRoleMember {
+		return nil
+	}
+
+	service, creds, generated, err := serviceSecrets(s.ctx.Name)
+	if err != nil {
+		return err
+	}
+
+	maps.Copy(values, service)
+	addRecoveryKit(values, creds.Backup)
+
+	s.warnings = append(s.warnings, staleWarning(generated)...)
+
+	return nil
 }
 
 // previewDBCreate asks the node to apply its complete topology and host

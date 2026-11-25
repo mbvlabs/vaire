@@ -56,6 +56,15 @@ func bootstrapDatabase(ctx context.Context, env *Env, p bootstrapParams) (Result
 		return Result{}, err
 	}
 
+	if owned {
+		if err := steps.SeedClusterCredentials(env.Req.Secrets); err != nil {
+			return Result{}, output.NewError(output.CodePrecondition, "node cluster credentials could not be seeded", output.ExitPrecondition,
+				"Resume setup with the original server credentials.").WithDetails(map[string]any{"reason": "cluster_seed_unavailable"})
+		}
+	} else if err := restoreBootstrapCredentials(cfg, p, env); err != nil {
+		return Result{}, err
+	}
+
 	raw, err := cfg.Encode()
 	if err != nil {
 		return Result{}, err
@@ -201,6 +210,10 @@ func bootstrapDatabaseNoAuthority(cfg config.Cluster) error {
 // handleTLSStatus reports the served certificate's state, so init can wait for
 // the real certificate without re-running the database phase.
 func handleTLSStatus(_ context.Context, env *Env) (Result, error) {
+	if memberRead(env) {
+		return Result{}, deviceAccessDenied()
+	}
+
 	return Result{Data: inspectTLS(env.Cluster)}, nil
 }
 

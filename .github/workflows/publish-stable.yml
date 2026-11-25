@@ -34,8 +34,11 @@ jobs:
               ;;
           esac
           printf '%s\n' "${route}" >> "${GITHUB_OUTPUT}"
-  publish:
+  psql:
     needs: route
+    uses: ./.github/workflows/psql-candidates.yml
+  publish:
+    needs: [route, psql]
     runs-on: ubuntu-24.04
     environment: ${{ needs.route.outputs.environment }}
     permissions:
@@ -71,10 +74,29 @@ jobs:
           just lint
           go test ./internal/release/... ./internal/remote ./internal/upgrade
           bash tests/release-channels.sh
+      - name: Download tested psql bundles
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: psql-*
+          path: dist/psql-artifacts
+      - name: Check psql artifact boundaries
+        run: |
+          set -euo pipefail
+          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            artifact="dist/psql-artifacts/psql-${platform/\//-}"
+            test -f "${artifact}/psql.tar.gz"
+            test -f "${artifact}/psql.tar.gz.sha256"
+            test "$(find "${artifact}" -type f | wc -l)" -eq 2
+            (cd "${artifact}" && sha256sum -c psql.tar.gz.sha256)
+            mkdir -p "dist/psql-bundles/${platform}"
+            cp "${artifact}/psql.tar.gz" "dist/psql-bundles/${platform}/psql.tar.gz"
+          done
+          test "$(find dist/psql-artifacts -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 4
       - name: Build the tagged release
         env:
           RELEASE_BASE_URL: ${{ vars.RELEASE_BASE_URL }}
           CHANNEL: ${{ needs.route.outputs.channel }}
+          PSQL_BUNDLE_DIR: dist/psql-bundles
         run: |
           version="${GITHUB_REF_NAME#v}"
           scripts/build-release.sh "${version}" "${CHANNEL}" "${RELEASE_BASE_URL}"

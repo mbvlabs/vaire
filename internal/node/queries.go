@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
+	"github.com/mbvlabs/vaire/internal/cli/top"
 	"github.com/mbvlabs/vaire/internal/config"
 	"github.com/mbvlabs/vaire/internal/pg"
 	"github.com/mbvlabs/vaire/internal/steps"
@@ -54,6 +56,11 @@ type queriesParams struct {
 	// AllSessions includes vaire's own sessions (its roles), which are left
 	// out by default.
 	AllSessions bool `json:"all_sessions,omitempty"`
+	Sample      bool `json:"sample,omitempty"`
+}
+
+var queriesLocalQuery = func(ctx context.Context, spec config.ClusterSpec, sql string) ([]map[string]string, error) {
+	return steps.ClusterPG(spec).Query(ctx, spec.DatabaseName(), sql, nil)
 }
 
 // queriesData is queries.top's result.
@@ -64,12 +71,23 @@ type queriesData struct {
 	Missing []string `json:"missing,omitempty"`
 }
 
-// handleQueriesTop reads pg_stat_statements in one or every database as
-// vaire_admin (pg_monitor reads every role's statements) and merges them.
+// handleQueriesTop reads and merges statements from authorized databases.
 func handleQueriesTop(ctx context.Context, env *Env) (Result, error) {
 	var p queriesParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
+	}
+
+	if err := authorizeQueries(env, p); err != nil {
+		return Result{}, err
+	}
+
+	if p.Sample {
+		if !memberRead(env) {
+			return Result{}, deviceAccessDenied()
+		}
+
+		return memberTopSamples(ctx, env, p.DB)
 	}
 
 	if p.Order == "" {
@@ -84,40 +102,17 @@ func handleQueriesTop(ctx context.Context, env *Env) (Result, error) {
 		p.Limit = 20
 	}
 
-	specs, err := targetClusters(env.Cluster, p.DB)
+	cfg := env.Cluster
+	if memberRead(env) {
+		cfg = memberDatabases(env)
+	}
+
+	specs, err := targetClusters(cfg, p.DB)
 	if err != nil {
 		return Result{}, err
 	}
 
-	data := queriesData{Order: p.Order, Statements: []statement{}}
-	perDB := map[string][]statement{}
-
-	var warnings []output.Warning
-
-	for _, spec := range specs {
-		local := steps.AdminPG(spec)
-
-		rows, err := local.Query(ctx, spec.DatabaseName(), hasStatementsSQL, nil)
-		if err != nil {
-			warnings = append(warnings, output.Warning{Code: "database_unreachable", Message: spec.Name + ": " + err.Error()})
-			continue
-		}
-
-		if len(rows) == 0 || rows[0]["n"] == "0" {
-			data.Missing = append(data.Missing, spec.Name)
-			continue
-		}
-
-		rows, err = local.Query(ctx, spec.DatabaseName(), statementsSQL(p.Order, p.Limit, p.AllSessions), nil)
-		if err != nil {
-			warnings = append(warnings, output.Warning{Code: "database_unreachable", Message: spec.Name + ": " + err.Error()})
-			continue
-		}
-
-		perDB[spec.Name] = parseStatements(spec.Name, rows, p.AllSessions)
-	}
-
-	data.Statements = mergeStatements(perDB, p.Order, p.Limit)
+	data, warnings := collectQueryStatements(ctx, env, specs, p)
 	if len(data.Missing) > 0 {
 		if p.DB != "" {
 			return Result{}, statementsMissing(p.DB)
@@ -129,6 +124,149 @@ func handleQueriesTop(ctx context.Context, env *Env) (Result, error) {
 	return Result{Data: data, Warnings: warnings}, nil
 }
 
+func collectQueryStatements(ctx context.Context, env *Env, specs []config.ClusterSpec, p queriesParams) (queriesData, []output.Warning) {
+	data := queriesData{Order: p.Order, Statements: []statement{}}
+	perDB := map[string][]statement{}
+
+	var warnings []output.Warning
+
+	for _, spec := range specs {
+		rows, missing, err := queryDatabaseStatements(ctx, env, spec, p)
+		if err != nil {
+			message := spec.Name + ": " + err.Error()
+			if memberRead(env) {
+				message = spec.Name + ": diagnostic query failed"
+			}
+
+			warnings = append(warnings, output.Warning{Code: "database_unreachable", Message: message})
+
+			continue
+		}
+
+		if missing {
+			data.Missing = append(data.Missing, spec.Name)
+			continue
+		}
+
+		perDB[spec.Name] = parseStatements(spec.Name, rows, p.AllSessions)
+	}
+
+	data.Statements = mergeStatements(perDB, p.Order, p.Limit)
+
+	return data, warnings
+}
+
+func authorizeQueries(env *Env, p queriesParams) error {
+	if !memberRead(env) {
+		return nil
+	}
+
+	if p.AllSessions {
+		return deviceAccessDenied()
+	}
+
+	if p.DB != "" && !memberOwns(env, p.DB) {
+		return databaseNotFound(p.DB)
+	}
+
+	return nil
+}
+
+func queryDatabaseStatements(ctx context.Context, env *Env, spec config.ClusterSpec, p queriesParams) ([]map[string]string, bool, error) {
+	query := func(sql string) ([]map[string]string, error) {
+		if memberRead(env) {
+			return queriesLocalQuery(ctx, spec, sql)
+		}
+
+		return steps.AdminPG(spec).Query(ctx, spec.DatabaseName(), sql, nil)
+	}
+
+	rows, err := query(hasStatementsSQL)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if len(rows) == 0 || rows[0]["n"] == "0" {
+		return nil, true, nil
+	}
+
+	rows, err = query(statementsSQL(p.Order, p.Limit, p.AllSessions))
+
+	return rows, false, err
+}
+
+// memberTopSamples uses local postgres only after selecting owned clusters.
+// It returns no pooler or host data, and never exposes cross-database blockers.
+func memberTopSamples(ctx context.Context, env *Env, db string) (Result, error) {
+	specs, err := targetClusters(memberDatabases(env), db)
+	if err != nil {
+		return Result{}, err
+	}
+
+	samples := map[string]top.Sample{}
+	for _, spec := range specs {
+		samples[spec.Name] = memberTopSample(ctx, spec)
+	}
+
+	return Result{Data: samples}, nil
+}
+
+func memberTopSample(ctx context.Context, spec config.ClusterSpec) top.Sample {
+	s := top.Sample{DB: spec.Name, At: time.Now()}
+	rows, err := queriesLocalQuery(ctx, spec, `SELECT (xact_commit + xact_rollback)::text AS xacts, blks_hit::text AS blks_hit, blks_read::text AS blks_read FROM pg_stat_database WHERE datname = current_database()`)
+
+	if err != nil || len(rows) != 1 {
+		s.Error = "diagnostic query failed"
+
+		return s
+	}
+
+	s.Counters = top.ParseCounters(rows[0])
+
+	rows, err = queriesLocalQuery(ctx, spec, top.ActivitySQL)
+	if err != nil {
+		s.Error = "diagnostic query failed"
+
+		return s
+	}
+
+	s.Sessions = memberTopSessions(spec.Name, rows)
+	rows, err = queriesLocalQuery(ctx, spec, top.HasStatementsSQL)
+
+	if err == nil && len(rows) == 1 && rows[0]["n"] != "0" {
+		if rows, err = queriesLocalQuery(ctx, spec, top.StatementsSQL(false)); err == nil {
+			s.Statements = top.ParseStatements(rows)
+		}
+	}
+
+	return s
+}
+
+func memberTopSessions(db string, rows []map[string]string) []top.Session {
+	var sessions []top.Session
+
+	visible := map[int]bool{}
+
+	for _, session := range top.ParseSessions(db, rows) {
+		if !pg.IsVaireSession(session.Role, session.App) {
+			sessions = append(sessions, session)
+			visible[session.PID] = true
+		}
+	}
+
+	for i := range sessions {
+		blocked := sessions[i].BlockedBy
+		sessions[i].BlockedBy = nil
+
+		for _, pid := range blocked {
+			if visible[pid] {
+				sessions[i].BlockedBy = append(sessions[i].BlockedBy, pid)
+			}
+		}
+	}
+
+	return sessions
+}
 func statementsMissing(db string) error {
 	return output.NewError(output.CodePrecondition, "pg_stat_statements is not installed in "+db, output.ExitPrecondition,
 		"Add it to the database's extensions (vaire config set clusters."+db+".extensions pg_stat_statements, then vaire apply --db "+db+"); vaire ext add arrives in Phase 7.").
@@ -222,6 +360,10 @@ func statsToken(cfg config.Cluster, params json.RawMessage) string {
 // handleQueriesReset clears pg_stat_statements in one or every database.
 // The reset function is superuser-only, so it runs as postgres.
 func handleQueriesReset(ctx context.Context, env *Env) (Result, error) {
+	if memberRead(env) {
+		return Result{}, deviceAccessDenied()
+	}
+
 	var p queriesParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err

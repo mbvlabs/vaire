@@ -53,12 +53,12 @@ func (c *Cluster) Set(key, value string) error {
 
 // immutableHint names the keys vaire refuses to change.
 const immutableHint = "schema, name, nodes.*.wg_address, transport.* and clusters.*.name, .port, .stanza and .follows " +
-	"cannot be changed once they exist. follow_generation is managed by vaire. A cluster's port and stanza are assigned by vaire db create."
+	"cannot be changed once they exist. follow_generation and creator_operator_id are managed by vaire. A cluster's port and stanza are assigned by vaire db create."
 
 // immutableClusterKeys are the [[clusters]] keys fixed at create. follows
 // is cleared only by db unfollow (Phase 6); follow_generation is written and
 // cleared only by the follow jobs.
-var immutableClusterKeys = map[string]bool{"name": true, "port": true, "stanza": true, "follows": true, "follow_generation": true}
+var immutableClusterKeys = map[string]bool{"name": true, "port": true, "stanza": true, "follows": true, "follow_generation": true, "creator_operator_id": true}
 
 // immutableKey reports whether a dotted key names a value vaire refuses to change.
 func immutableKey(segs []string) bool {
@@ -131,6 +131,10 @@ func addedClusterKeys(old, updated Cluster) []string {
 		if u.FollowGeneration != "" {
 			changed = append(changed, "clusters."+u.Name+".follow_generation")
 		}
+
+		if u.CreatorOperatorID != "" {
+			changed = append(changed, "clusters."+u.Name+".creator_operator_id")
+		}
 	}
 
 	return changed
@@ -161,6 +165,10 @@ func changedClusterKeys(old, updated Cluster) []string {
 
 		if u.FollowGeneration != cl.FollowGeneration {
 			changed = append(changed, "clusters."+cl.Name+".follow_generation")
+		}
+
+		if u.CreatorOperatorID != cl.CreatorOperatorID {
+			changed = append(changed, "clusters."+cl.Name+".creator_operator_id")
 		}
 	}
 

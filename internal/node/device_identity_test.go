@@ -132,14 +132,14 @@ func TestDeviceAuthorization(t *testing.T) {
 	}
 
 	for _, name := range []string{"apply", "sql", "ssh.confirm", "upgrade.install", "user.add", "device.list", "unknown",
-		"db.create", "db.write-access", "auth.setup", "protect.verify", "db.drop", "db.resize", "job.list", "job.follow", "metrics.show", "queries.top", "maint.report", "backup.now", "backup.verify"} {
+		"db.write-access", "auth.setup", "protect.verify", "db.drop", "db.resize", "metrics.show", "queries.reset", "maint.run", "maint.kill", "backup.now", "backup.verify"} {
 		if _, err := authorizeDeviceCaller("123", name); err == nil {
 			t.Errorf("member allowed %s", name)
 		}
 	}
 
-	for _, name := range []string{"whoami", "status", "config.get", "db.list", "db.access.show", "ext.list", "tune.show",
-		"tls.status", "backup.list", "restore.status", "activity.list", "activity.show", "activity.health", "protect.status"} {
+	for _, name := range []string{"whoami", "status", "config.get", "db.list", "db.create", "db.access.show", "ext.list", "tune.show",
+		"tls.status", "backup.list", "restore.status", "activity.list", "activity.show", "protect.status", "job.list", "job.follow"} {
 		if _, err := authorizeDeviceCaller("123", name); err != nil {
 			t.Errorf("member denied %s: %v", name, err)
 		}
@@ -215,26 +215,26 @@ func TestDeviceAuthorization(t *testing.T) {
 // here as well as in managedDeviceMethod; unknown methods remain denied.
 func TestManagedDeviceMethodCoverage(t *testing.T) {
 	member := []string{
-		"whoami", "status", "config.get", "db.list", "db.access.show", "ext.list",
+		"whoami", "status", "config.get", "config.validate", "db.list", "db.create", "db.access.show", "ext.list",
 		"tune.show", "tls.status", "backup.list", "restore.status", "activity.list",
-		"activity.show", "activity.health", "protect.status",
+		"activity.show", "protect.status", "doctor.run", "job.list", "job.follow", "maint.report", "queries.top",
 	}
 	owner := []string{
 		"user.add", "user.list", "user.revoke", "device.add", "device.list", "device.revoke",
-		"access.recovery-issue", "access.complete-setup", "plan", "db.create", "db.recover",
-		"db.write-access", "auth.status", "auth.setup", "protect.verify", "backup.now",
+		"access.recovery-issue", "access.complete-setup", "plan", "db.recover",
+		"db.write-access", "auth.status", "auth.setup", "protect.verify", "backup.now", "activity.health",
 		"master-backup.now", "master-backup.list", "master-backup.get", "upgrade.install",
-		"apply", "config.set", "config.validate", "db.copy.preflight", "db.copy", "db.drop",
+		"apply", "config.set", "db.drop",
 		"db.resize", "db.credentials", "tune.apply", "ext.add", "ext.remove", "logs",
-		"backup.verify", "job.list", "job.follow", "restore.start", "restore.promote",
+		"backup.verify", "restore.start", "restore.promote",
 		"restore.undo", "restore.abort", "restore.cleanup", "restore.drill", "db.fork",
-		"db.follow", "db.unfollow", "sql", "metrics.show", "doctor.run", "queries.top",
-		"maint.report", "maint.run", "maint.kill", "queries.reset", "metrics.rotate",
+		"db.follow", "db.unfollow", "sql", "metrics.show",
+		"maint.run", "maint.kill", "queries.reset", "metrics.rotate",
 	}
-	// Setup-only, node-internal and obsolete protection setup RPCs.
+	// Setup-only, node-internal and obsolete RPCs.
 	denied := []string{"selfcheck", "access.bootstrap-owner", "cluster.bootstrap",
 		"cluster.confirm-secrets", "ssh.lockdown", "ssh.confirm", "ssh.status",
-		"protect.init", "protect.confirm"}
+		"protect.init", "protect.confirm", "db.copy.preflight", "db.copy"}
 
 	table := methods()
 	seen := make(map[string]bool)

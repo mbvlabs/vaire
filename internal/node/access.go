@@ -83,9 +83,17 @@ func handleDBAccessShow(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, err
 	}
 
+	if memberRead(env) && !memberOwns(env, p.Name) {
+		return Result{}, databaseNotFound(p.Name)
+	}
+
 	spec, ok := env.Cluster.ClusterByName(p.Name)
 	if !ok {
 		return Result{}, databaseNotFound(p.Name)
+	}
+
+	if memberRead(env) && spec.IsFollower() {
+		return Result{}, deviceAccessDenied()
 	}
 
 	name := spec.DatabaseName()

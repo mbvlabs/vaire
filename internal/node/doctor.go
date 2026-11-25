@@ -581,6 +581,7 @@ type doctorParams struct {
 type doctorData struct {
 	Results []doctor.Result       `json:"results"`
 	Summary map[doctor.Status]int `json:"summary"`
+	Basic   bool                  `json:"basic,omitempty"`
 }
 
 // handleDoctorRun runs the node's checks (Phase 4). Failing checks are not an
@@ -589,6 +590,10 @@ func handleDoctorRun(ctx context.Context, env *Env) (Result, error) {
 	var p doctorParams
 	if err := decodeParams(env.Req.Params, &p); err != nil {
 		return Result{}, err
+	}
+
+	if env.DeviceIdentity != nil && env.DeviceIdentity.Role == config.AccessRoleMember {
+		return handleMemberDoctor(ctx, env.Cluster, p)
 	}
 
 	if err := guardMaterialisationApply(ctx, env.Cluster, ""); err != nil {
@@ -609,6 +614,40 @@ func handleDoctorRun(ctx context.Context, env *Env) (Result, error) {
 	results := runDoctor(ctx, env.Cluster, runtimeFor(env, true), false, p.Only, p.DB)
 
 	return Result{Data: doctorData{Results: results, Summary: doctor.Summary(results)}}, nil
+}
+
+// Members receive only an aggregate availability check, never detailed
+// diagnostics or the persisted administrative report.
+func handleMemberDoctor(ctx context.Context, cfg config.Cluster, p doctorParams) (Result, error) {
+	if p.DB != "" || (p.Only != "" && p.Only != doctor.CatPostgres) {
+		return Result{}, output.NewError(output.CodePrecondition, "members can run the server-wide PostgreSQL availability check only", output.ExitPrecondition,
+			"Run vaire doctor without a database or category filter.")
+	}
+
+	if err := guardMaterialisationApply(ctx, cfg, ""); err != nil {
+		return Result{}, output.NewError(output.CodePrecondition, "doctor is unavailable while database state is incomplete",
+			output.ExitPrecondition, "Contact a server administrator.")
+	}
+
+	results := memberDoctorResults(readClusters(ctx, cfg, "", false))
+
+	return Result{Data: doctorData{Results: results, Summary: doctor.Summary(results), Basic: true}}, nil
+}
+
+func memberDoctorResults(clusters []clusterSnapshot) []doctor.Result {
+	r := doctor.Result{ID: "postgres.availability", Category: doctor.CatPostgres, Status: doctor.Pass, Detail: "databases are available"}
+	if len(clusters) == 0 {
+		r.Status, r.Detail = doctor.Skip, "no databases to check"
+	}
+
+	for _, cluster := range clusters {
+		if cluster.State != "running" {
+			r.Status, r.Detail, r.Fix = doctor.Fail, "a database is unavailable", "Contact a server administrator."
+			break
+		}
+	}
+
+	return []doctor.Result{r}
 }
 
 // runDoctor gathers the facts, runs the checks and, for a full run, records

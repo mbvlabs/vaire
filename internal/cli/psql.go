@@ -25,13 +25,19 @@ func psqlArgs(cmd *cobra.Command, args []string) error {
 }
 
 func runPsql(cmd *cobra.Command, args []string) error {
+	role, err := sessionRole(cmd)
+	if err != nil {
+		return err
+	}
+
 	db := stringFlag(cmd, "db")
 	if db == "" {
 		return output.NewError(output.CodeInputRequired, "vaire psql needs --db", output.ExitInput,
 			"Pass --db with one of the server's databases.").WithDetails(map[string]any{"flag": "--db"})
 	}
 
-	if err := localenv.RequireTool(cmd, localenv.ToolPsql); err != nil {
+	psqlPath, err := localenv.PsqlPath(cmd)
+	if err != nil {
 		return err
 	}
 
@@ -43,7 +49,7 @@ func runPsql(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
-	user, password, err := sessionLogin(cmd, s, p, db, flagTrue(cmd, "write"))
+	user, password, err := databaseSessionLogin(cmd, s, p, db, role, flagTrue(cmd, "write"))
 	if err != nil {
 		return err
 	}
@@ -60,11 +66,6 @@ func runPsql(cmd *cobra.Command, args []string) error {
 
 	at := databaseEndpoint(ctx, s, p, db)
 	go proxy(ctx, ln, s.dialer, at.addr(pgPort))
-
-	psqlPath, err := exec.LookPath("psql")
-	if err != nil {
-		return output.NewError(output.CodeMissingTool, "psql is not on PATH", output.ExitMissingTool, "Install postgresql-client.")
-	}
 
 	sslMode := "verify-full"
 
@@ -84,7 +85,7 @@ func runPsql(cmd *cobra.Command, args []string) error {
 		env = env[:7]
 	}
 
-	env = append(env, "PGOPTIONS="+sessionOptions(db, flagTrue(cmd, "write")))
+	env = append(env, "PGOPTIONS="+loginOptions(db, role, flagTrue(cmd, "write")))
 	// Arguments after -- go to psql as they are; the connection comes from
 	// the PG* environment.
 	child := exec.CommandContext(ctx, psqlPath, args...)

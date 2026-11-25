@@ -58,9 +58,12 @@ func assertContractFields(t *testing.T, schema *contractSchema, value any) {
 	expected := make(map[string]bool, typ.NumField())
 	for field := range typ.Fields() {
 		tag := field.Tag.Get("json")
+		if tag == "-" {
+			continue // Server-only fields are deliberately absent from the wire contract.
+		}
 
 		name, _, _ := strings.Cut(tag, ",")
-		if name == "" || name == "-" {
+		if name == "" {
 			t.Fatalf("%T.%s has no explicit JSON field", value, field.Name)
 		}
 
