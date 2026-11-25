@@ -3,6 +3,7 @@ package rpc
 type DeviceAddParams struct {
 	User  string `json:"user"`
 	Label string `json:"label"`
+	Fresh bool   `json:"fresh,omitempty"`
 }
 
 type DeviceListParams struct {

@@ -17,7 +17,8 @@ func deviceCommands() cmdSpec {
 		meta: CommandMeta{Summary: "Manage workspace devices", WhenToUse: []string{"Issue setup codes and revoke individual devices."}, Examples: []string{"vaire device add alice laptop", "vaire device list"}, Remote: true},
 		children: []cmdSpec{
 			{use: "add <user> <device>", args: cobra.ExactArgs(2), run: runDeviceAdd,
-				meta: CommandMeta{Summary: "Issue a one-time device setup code", WhenToUse: []string{"Share the code through a trusted channel."}, Examples: []string{"vaire device add alice laptop"}, Mutating: true, Remote: true, SkipDryRunCheck: true, SkipDryRunReason: "issuing a setup code has no host step to preview"}},
+				flags: []fl{flagBool("fresh", "Replace an unused or expired setup code")},
+				meta:  CommandMeta{Summary: "Issue a one-time device setup code", WhenToUse: []string{"Share the code through a trusted channel. Use --fresh for an unused or expired code, not an enrolled device."}, Examples: []string{"vaire device add alice laptop", "vaire device add alice laptop --fresh"}, Mutating: true, Remote: true, SkipDryRunCheck: true, SkipDryRunReason: "issuing a setup code has no host step to preview"}},
 			{use: "list", args: cobra.NoArgs, run: runDeviceList, flags: []fl{flagString("user", "", "Only devices belonging to this user")},
 				meta: CommandMeta{Summary: "List workspace devices", WhenToUse: []string{"See pending, active and revoked devices."}, Examples: []string{"vaire device list", "vaire device list --user alice"}, Remote: true}},
 			{use: "revoke <user> <device>", args: cobra.ExactArgs(2), run: runDeviceRevoke,
@@ -44,7 +45,7 @@ func runDeviceAdd(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 	// The code belongs only in the final issuing response, never in progress.
-	reply, err := p.call(commandContext(cmd), s.node, "device.add", rpc.DeviceAddParams{User: args[0], Label: args[1]}, remote.CallOptions{OnEvent: func(output.Event) {}})
+	reply, err := p.call(commandContext(cmd), s.node, "device.add", rpc.DeviceAddParams{User: args[0], Label: args[1], Fresh: flagTrue(cmd, "fresh")}, remote.CallOptions{OnEvent: func(output.Event) {}})
 	if err != nil {
 		return err
 	}

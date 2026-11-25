@@ -12,6 +12,7 @@ func TestDeviceWireContract(t *testing.T) {
 		want  string
 	}{
 		{DeviceAddParams{User: "alice", Label: "laptop"}, `{"user":"alice","label":"laptop"}`},
+		{DeviceAddParams{User: "alice", Label: "laptop", Fresh: true}, `{"user":"alice","label":"laptop","fresh":true}`},
 		{DeviceListParams{User: "alice"}, `{"user":"alice"}`},
 		{DeviceRevokeParams{User: "alice", Label: "laptop", ID: "dev-1"}, `{"user":"alice","label":"laptop","id":"dev-1"}`},
 		{UserRevokeParams{User: "alice"}, `{"user":"alice"}`},

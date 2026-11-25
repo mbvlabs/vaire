@@ -359,8 +359,8 @@ func loginEnrollmentWithCredentials(cmd *cobra.Command, code string, credentials
 
 	verified := resumed && verify() == nil
 	if !verified {
-		if !setup.ExpiresAt.IsZero() && time.Now().After(setup.ExpiresAt) {
-			return fmt.Errorf("access setup code has expired; request a new code")
+		if err := checkSetupExpiry(setup, time.Now()); err != nil {
+			return err
 		}
 
 		ctx, cancel := context.WithTimeout(commandContext(cmd), timeoutFlag(cmd))
@@ -384,6 +384,19 @@ func loginEnrollmentWithCredentials(cmd *cobra.Command, code string, credentials
 
 	return output.Success(cmd, output.Result{Data: map[string]any{"workspace": name, "current": current == name, "path": workspaces.Dir(name)},
 		Message: fmt.Sprintf("Connected to %s / %s as %s / %s.", name, setup.Node, setup.User, setup.Label)})
+}
+
+func checkSetupExpiry(setup rpc.AccessSetup, now time.Time) error {
+	if setup.ExpiresAt.IsZero() || now.Before(setup.ExpiresAt) {
+		return nil
+	}
+
+	expiresAt := setup.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	checkedAt := now.UTC().Format(time.RFC3339Nano)
+
+	return output.NewError(output.CodePrecondition, "access setup code has expired", output.ExitPrecondition,
+		fmt.Sprintf("Invite %s expires at %s; this device checked it at %s. Request a new code.", setup.ID, expiresAt, checkedAt)).
+		WithDetails(map[string]any{"device_id": setup.ID, "expires_at": expiresAt, "checked_at": checkedAt})
 }
 
 func installEnrollment(name string, setup rpc.AccessSetup, keys enrollmentKeys, credentials *workspaces.Credentials) error {

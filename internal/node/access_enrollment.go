@@ -24,7 +24,7 @@ import (
 	"github.com/mbvlabs/vaire/internal/transport"
 )
 
-const setupTTL = 15 * time.Minute
+const setupTTL = 30 * time.Minute
 
 func accessInvalid(message string) error {
 	return output.NewError(output.CodeValidation, message, output.ExitPrecondition, "")
@@ -138,8 +138,8 @@ func handleDeviceAdd(ctx context.Context, env *Env) (Result, error) {
 		return Result{}, accessInvalid("active workspace user not found")
 	}
 
-	if index := accessDevice(r, r.Operators[user].ID, p.Label); index >= 0 && r.Devices[index].State != config.DeviceRevoked {
-		return Result{}, accessInvalid("this device label is already registered; revoke the existing device first")
+	if err := prepareDeviceInvite(&r, r.Operators[user].ID, p.Label, p.Fresh); err != nil {
+		return Result{}, err
 	}
 
 	n, err := accessNode(env.Cluster)
@@ -180,6 +180,43 @@ func handleDeviceAdd(ctx context.Context, env *Env) (Result, error) {
 	row.SetupCode = code
 
 	return Result{Data: row}, nil
+}
+
+// Supersede only an unused enrollment and only on explicit request.
+// The old digest and peer are retained
+// for rejection and timer cleanup, respectively. The caller saves this state
+// together with the replacement under the exclusive device.add lock.
+func prepareDeviceInvite(r *config.AccessRegistry, operatorID, label string, fresh bool) error {
+	index := accessDevice(*r, operatorID, label)
+	if index < 0 {
+		if fresh {
+			return accessInvalid("no existing setup code; use device add without --fresh")
+		}
+
+		return nil
+	}
+
+	d := &r.Devices[index]
+
+	unused := !d.Recovery && d.SSHPublicKey == "" && d.WGPublicKey == "" && d.UnixUID == "" &&
+		(d.State == config.DeviceRevoked || d.State == config.DevicePending && d.TemporaryAddress != "")
+	if !unused {
+		if !fresh && d.State == config.DeviceRevoked {
+			return nil
+		}
+
+		return accessInvalid("this device label is already registered; --fresh cannot replace an enrolled, in-progress or recovery device")
+	}
+
+	if !fresh {
+		return accessInvalid("this device label already has a setup code; use device add with --fresh")
+	}
+
+	if d.State == config.DevicePending {
+		d.State, d.Cleanup = config.DeviceRevoked, true
+	}
+
+	return nil
 }
 
 func issueDeviceSetup(cfg config.Cluster, n config.NodeSpec, r config.AccessRegistry, user config.AccessOperator, label string) (config.AccessDevice, rpc.AccessSetup, error) {

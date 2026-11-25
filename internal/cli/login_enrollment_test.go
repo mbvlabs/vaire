@@ -18,6 +18,29 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func TestSetupExpiryUsesEncodedDeadline(t *testing.T) {
+	expiry := time.Date(2026, 11, 25, 15, 39, 27, 0, time.UTC)
+	setup := rpc.AccessSetup{Version: 1, ID: "test-invite", ExpiresAt: expiry, Token: "test-secret"}
+
+	code, err := setup.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := rpc.DecodeAccessSetup(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := checkSetupExpiry(decoded, expiry.Add(-6*time.Minute)); err != nil {
+		t.Fatalf("valid code rejected: %v", err)
+	}
+
+	if err := checkSetupExpiry(decoded, expiry); err == nil {
+		t.Fatal("code accepted at its deadline")
+	}
+}
+
 func TestEnrollmentRedeemSendsBearer(t *testing.T) {
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
