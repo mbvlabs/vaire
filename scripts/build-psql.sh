@@ -41,8 +41,10 @@ cp "$src/COPYRIGHT" "$work/bundle/licenses/postgresql.txt"
   ./configure --prefix="$work/unused-prefix" --disable-rpath --with-openssl \
     --with-libedit-preferred --without-icu --without-zlib --without-gssapi
   make -C src/backend generated-headers
-  make -j"${JOBS:-2}" -C src/bin/psql
-  make -j"${JOBS:-2}" -C src/bin/pg_dump
+  # Separate recursive targets can race when rebuilding shared frontend
+  # libraries. Serialize these small client builds.
+  make -j1 -C src/bin/psql
+  make -j1 -C src/bin/pg_dump
 )
 cp "$src/src/bin/psql/psql" "$work/bundle/psql"
 cp "$src/src/bin/pg_dump/pg_dump" "$src/src/bin/pg_dump/pg_restore" "$work/bundle/"

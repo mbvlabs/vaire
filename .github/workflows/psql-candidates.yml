@@ -33,7 +33,11 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y bison flex libedit-dev libpq-dev libssl-dev patchelf postgresql
+          sudo apt-get install -y bison flex libedit-dev libssl-dev patchelf postgresql-common
+          if [ ! -f /etc/apt/sources.list.d/pgdg.sources ] && [ ! -f /etc/apt/sources.list.d/pgdg.list ]; then
+            sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          fi
+          sudo apt-get install -y postgresql-18
       - name: Install macOS test server
         if: matrix.os == 'darwin'
         run: brew install postgresql@18
@@ -74,7 +78,7 @@ jobs:
             env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH -u DYLD_FALLBACK_LIBRARY_PATH "${RUNNER_TEMP}/relocated-psql/${tool}" --version | grep -F '18.7'
           done
           if [ "${OS}" = linux ]; then
-            pgbin="$(pg_config --bindir)"
+            pgbin="/usr/lib/postgresql/18/bin"
           else
             pgbin="$(brew --prefix postgresql@18)/bin"
           fi
