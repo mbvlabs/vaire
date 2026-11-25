@@ -133,6 +133,8 @@ build_one() {
 
 release_base_url="${base_url}/releases/${version}"
 artifacts_json='{}'
+usql_json='{}'
+usql_version=v0.21.4
 for platform in "${platforms[@]}"; do
   sha="$(build_one "${platform%/*}" "${platform#*/}")"
   artifacts_json="$(jq -c \
@@ -140,6 +142,26 @@ for platform in "${platforms[@]}"; do
     --arg url "${release_base_url}/${platform}/vaire" \
     --arg sha "${sha}" \
     '. + {($platform): {"url": $url, "sha256": $sha}}' <<<"${artifacts_json}")"
+  case "${platform}" in
+    linux/amd64) upstream_sha=78bd9b221e223d7a954d41f51e9eca98bdd94b401618367ba0f3887abebd44fc ;;
+    linux/arm64) upstream_sha=ccad89d6f4c67a9bf595df0aa8a550e0a9e3d6a6f9356356ba1e164e311335e4 ;;
+    darwin/amd64) upstream_sha=60feb0d73b2e29e4ecf6b36bf34b23c230d8233c778893b0b56811036d16d17e ;;
+    darwin/arm64) upstream_sha=cee9fd2117c17fd622fe0df37b334c356b80cf48d6e9bb164084830ae4ce6d05 ;;
+  esac
+  platform_dir="${out}/releases/${version}/${platform}"
+  archive="${platform_dir}/usql.tar.bz2"
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    "https://github.com/xo/usql/releases/download/${usql_version}/usql-${usql_version#v}-${platform%/*}-${platform#*/}.tar.bz2" -o "${archive}"
+  [ "$(sha256_hex "${archive}")" = "${upstream_sha}" ] || { echo "usql archive checksum mismatch for ${platform}" >&2; exit 1; }
+  tar -xjf "${archive}" -C "${platform_dir}" usql LICENSE
+  rm "${archive}"
+  mv "${platform_dir}/LICENSE" "${platform_dir}/usql.LICENSE"
+  chmod 0755 "${platform_dir}/usql"
+  usql_sha="$(sha256_hex "${platform_dir}/usql")"
+  printf '%s  usql\n' "${usql_sha}" >"${platform_dir}/usql.sha256"
+  usql_json="$(jq -c --arg platform "${platform}" --arg sha "${usql_sha}" \
+    --arg url "${release_base_url}/${platform}/usql" \
+    '. + {($platform): {"url": $url, "sha256": $sha}}' <<<"${usql_json}")"
 done
 
 jq -n \
@@ -147,12 +169,14 @@ jq -n \
   --arg version "${version}" \
   --arg releaseBaseUrl "${release_base_url}" \
   --argjson artifacts "${artifacts_json}" \
+  --argjson usqlArtifacts "${usql_json}" \
   '{
     schemaVersion: 1,
     channel: $channel,
     version: $version,
     releaseBaseUrl: $releaseBaseUrl,
-    artifacts: $artifacts
+    artifacts: $artifacts,
+    usqlArtifacts: $usqlArtifacts
   }' >"${out}/releases/${version}/manifest.json"
 
 if [ "${channel}" = edge ]; then

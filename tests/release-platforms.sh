@@ -41,6 +41,7 @@ esac
 EOF
 chmod +x "${work}"/mock/*
 export PATH="${work}/mock:${PATH}"
+source "${source_root}/tests/release-usql-fixture.sh"
 cd "${work}"
 
 version=edge-abcdef012345
@@ -65,10 +66,18 @@ if TEST_BUILD_FAIL=1 build linux/amd64 >/dev/null 2>&1; then
 fi
 [ ! -e "${manifest}" ]
 
+if TEST_BAD_USQL_ARCHIVE=1 build linux/amd64 >/dev/null 2>&1; then
+  echo 'accepted an upstream usql archive with a bad checksum' >&2
+  exit 1
+fi
+[ ! -e "${manifest}" ]
+
 build ' linux/amd64 ' >/dev/null
 [ "$(jq -r '.artifacts | keys | join(" ")' "${manifest}")" = linux/amd64 ]
 cmp "${manifest}" "${root}/edge/manifest.json"
 [ -f "${root}/releases/${version}/linux/amd64/vaire" ]
+[ -f "${root}/releases/${version}/linux/amd64/usql.LICENSE" ]
+[ "$(jq -r '.usqlArtifacts["linux/amd64"].sha256' "${manifest}")" = "$(sha256sum "${root}/releases/${version}/linux/amd64/usql" | awk '{print $1}')" ]
 [ ! -e "${root}/releases/${version}/linux/arm64" ]
 [ ! -e "${root}/releases/${version}/darwin" ]
 installer="${root}/releases/${version}/install.sh"
@@ -90,6 +99,7 @@ cat >"${work}/expected-signed" <<EOF
 ${root}/edge/manifest.json
 ${root}/releases/${version}/manifest.json
 ${root}/releases/${version}/linux/amd64/vaire
+${root}/releases/${version}/linux/amd64/usql
 EOF
 cmp "${TEST_SIGNED}" "${work}/expected-signed"
 

@@ -46,6 +46,7 @@ set -euo pipefail
 EOF
 chmod +x "${work}"/mock/*
 export PATH="${work}/mock:${PATH}" TEST_WORK="${work}"
+source "${source_root}/tests/release-usql-fixture.sh"
 cd "${work}"
 for channel in stable-1.x edge; do
   version=1.2.0

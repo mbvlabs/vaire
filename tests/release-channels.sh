@@ -109,11 +109,14 @@ case "${url}" in
   */manifest.json) cp "${TEST_WORK}/fixtures/channel-manifest" "${out}" ;;
   */vaire.sigstore.json) cp "${TEST_WORK}/fixtures/bundle" "${out}" ;;
   */vaire) cp "${TEST_WORK}/fixtures/vaire" "${out}" ;;
+  */usql.sigstore.json) cp "${TEST_WORK}/fixtures/usql-bundle" "${out}" ;;
+  */usql) cp "${TEST_WORK}/fixtures/usql" "${out}" ;;
   *) exit 1 ;;
 esac
 EOF
 chmod +x "${work}"/bin/* "${work}/fixtures/cosign"
 export PATH="${work}/bin:${PATH}" TEST_WORK="${work}"
+source "${source_root}/tests/release-usql-fixture.sh"
 cd "${work}/repo"
 
 build() { bash scripts/build-release.sh "$1" "$2" https://vaire.example >/dev/null; }
@@ -247,6 +250,45 @@ make_installer stable stable https://vaire.example "${work}/stable.sh"
 make_installer stable stable-1.x https://vaire.example/1.x "${work}/line.sh"
 make_installer stable stable https://vaire.example/releases/1.2.0 "${work}/pinned.sh" 1.2.0
 make_installer edge edge https://vaire.example/releases/edge-abc "${work}/invalid-edge-pin.sh" edge-abc
+
+# Sidecar verification must finish before replacing an existing installation.
+make_fixture edge-abcdef012345 edge
+printf '#!/bin/sh\necho usql\n' >"${work}/fixtures/usql"
+cp "${work}/fixtures/bundle" "${work}/fixtures/usql-bundle"
+usql_hash="$("${real_sha256}" "${work}/fixtures/usql" | awk '{print $1}')"
+jq --arg hash "${usql_hash}" \
+  '.usqlArtifacts = {"linux/amd64": {"url": "https://vaire.example/ignored", "sha256": $hash}}' \
+  "${work}/fixtures/immutable-manifest" >"${work}/fixture-new"
+cp "${work}/fixture-new" "${work}/fixtures/immutable-manifest"
+cp "${work}/fixture-new" "${work}/fixtures/channel-manifest"
+run_install "${work}/edge.sh"
+cmp "${work}/fixtures/usql" "${work}/dest/.vaire-usql"
+[ -x "${work}/dest/.vaire-usql" ]
+printf 'old vaire' >"${work}/dest/vaire"
+printf 'old usql' >"${work}/dest/.vaire-usql"
+printf 'bad signature' >"${work}/fixtures/usql-bundle"
+if VAIRE_INSTALL_DIR="${work}/dest" VAIRE_INSTALL_ONLY=1 bash "${work}/edge.sh" >"${work}/out" 2>&1; then
+  echo 'accepted an invalid usql signature' >&2; exit 1
+fi
+grep -Fq 'usql signature verification failed' "${work}/out"
+[ "$(cat "${work}/dest/vaire")" = 'old vaire' ]
+[ "$(cat "${work}/dest/.vaire-usql")" = 'old usql' ]
+cp "${work}/fixtures/bundle" "${work}/fixtures/usql-bundle"
+printf 'tampered' >"${work}/fixtures/usql"
+if VAIRE_INSTALL_DIR="${work}/dest" VAIRE_INSTALL_ONLY=1 bash "${work}/edge.sh" >"${work}/out" 2>&1; then
+  echo 'accepted a bad usql checksum' >&2; exit 1
+fi
+grep -Fq 'usql checksum verification failed' "${work}/out"
+[ "$(cat "${work}/dest/vaire")" = 'old vaire' ]
+[ "$(cat "${work}/dest/.vaire-usql")" = 'old usql' ]
+
+# Upgrading to an older manifest removes the managed sidecar, without touching
+# an independently installed usql.
+make_fixture edge-abcdef012345 edge
+printf 'user usql' >"${work}/dest/usql"
+VAIRE_INSTALL_DIR="${work}/dest" VAIRE_INSTALL_ONLY=1 bash "${work}/edge.sh" >"${work}/out" 2>&1
+[ ! -e "${work}/dest/.vaire-usql" ]
+[ "$(cat "${work}/dest/usql")" = 'user usql' ]
 
 # A hash is signed by the edge workflow; alpha, beta, rc and final versions by
 # the exact stable tag identity even when they arrive through another pointer.

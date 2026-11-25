@@ -34,10 +34,17 @@ var usqlSHA256 = map[string]string{
 
 const usqlMaxArchive = 200 << 20
 
-// UsqlPath returns a usql binary: the one on PATH, or vaire's pinned copy under
+// UsqlPath returns the installed sidecar, a binary on PATH, or vaire's pinned copy under
 // $XDG_CACHE_HOME/vaire/tools. When neither exists it offers to download the
 // pinned release (or does so with --install-missing) and verifies its SHA-256.
 func UsqlPath(cmd *cobra.Command) (string, error) {
+	if exe, err := os.Executable(); err == nil {
+		managed := filepath.Join(filepath.Dir(exe), ".vaire-usql")
+		if info, err := os.Stat(managed); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+			return managed, nil
+		}
+	}
+
 	if p, err := exec.LookPath("usql"); err == nil {
 		return p, nil
 	}

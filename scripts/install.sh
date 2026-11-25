@@ -192,6 +192,33 @@ smoke_version="$(printf '%s\n' "${smoke}" | sed -n 's/.*"version": *"\([^"]*\)".
 smoke_channel="$(printf '%s\n' "${smoke}" | sed -n 's/.*"channel": *"\([^"]*\)".*/\1/p' | head -1)"
 [ "${smoke_channel}" = "${manifest_channel}" ] || fail "downloaded vaire reported channel ${smoke_channel}, expected ${manifest_channel}"
 
+# Older signed manifests have no sidecar. Never use an unverified sidecar, and
+# verify everything before replacing either installed binary.
+has_usql=0
+if grep -q '"usqlArtifacts"' "${work_dir}/manifest.json"; then
+  has_usql=1
+  usql_sha256="$(awk -v key="\"${os}/${arch}\"" '
+    /"usqlArtifacts":/ { section = 1; next }
+    section && !found && index($0, key) { found = 1; next }
+    found && /}/ { exit }
+    section && !found && /^  }/ { exit }
+    found && match($0, /"sha256": "[0-9a-f]{64}"/) {
+      print substr($0, RSTART + 11, 64); exit
+    }
+  ' "${work_dir}/manifest.json")"
+  [ -n "${usql_sha256}" ] || fail "release manifest is missing usql for ${os}/${arch}"
+  usql_url="${release_base_url}/${os}/${arch}/usql"
+  curl -fsSL --proto '=https' --tlsv1.2 "${usql_url}" -o "${work_dir}/usql"
+  curl -fsSL --proto '=https' --tlsv1.2 "${usql_url}.sigstore.json" -o "${work_dir}/usql.sigstore.json"
+  if ! verify_out="$("${work_dir}/cosign" verify-blob "${work_dir}/usql" \
+    --bundle "${work_dir}/usql.sigstore.json" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-identity "${identity}" 2>&1)"; then
+    fail "usql signature verification failed: ${verify_out}"
+  fi
+  [ "$(sha256_hex "${work_dir}/usql")" = "${usql_sha256}" ] || fail "usql checksum verification failed"
+fi
+
 if [ "$(id -u)" -eq 0 ]; then
   dest_dir="/usr/local/bin"
 else
@@ -199,6 +226,13 @@ else
   mkdir -p "${dest_dir}"
 fi
 dest="${dest_dir}/vaire"
+if [ "${has_usql}" = 1 ]; then
+  cp "${work_dir}/usql" "${dest_dir}/.vaire-usql-new.$$"
+  chmod 0755 "${dest_dir}/.vaire-usql-new.$$"
+  mv "${dest_dir}/.vaire-usql-new.$$" "${dest_dir}/.vaire-usql"
+else
+  rm -f "${dest_dir}/.vaire-usql"
+fi
 tmp_dest="${dest_dir}/.vaire-new.$$"
 cp "${work_dir}/vaire" "${tmp_dest}"
 chmod 0755 "${tmp_dest}"

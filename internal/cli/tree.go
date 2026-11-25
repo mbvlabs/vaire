@@ -428,7 +428,7 @@ func phase1Commands() []cmdSpec {
 				WhenToUse: []string{"Explore a database interactively without installing psql. vaire verifies the server certificate itself.",
 					"On a protected database --write asks once, when it starts and before the console connects, for the current 6-digit code from the authenticator app; the session stays writable for its whole length. Without a terminal, with --yes or structured output it is refused (database_protected, reason write_requires_human). Reads need no code."},
 				WhenNotToUse:  []string{"Agents and scripts; use vaire sql."},
-				Prerequisites: []string{"usql on PATH, or let vaire download its pinned copy"},
+				Prerequisites: []string{"installed usql sidecar, usql on PATH, or let vaire download its pinned copy"},
 				Examples:      []string{"vaire console app", "vaire console app --write"},
 				ErrorCodes:    []string{"database_protected", "protect_code_rejected"},
 			},

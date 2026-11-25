@@ -93,6 +93,11 @@ done < <(jq -r '.artifacts | keys_unsorted[]' "${version_manifest}")
 }
 for platform in "${platforms[@]}"; do
   artifacts+=("${version_root}/${platform}/vaire")
+  if jq -e '.usqlArtifacts != null' "${version_manifest}" >/dev/null; then
+    jq -e --arg platform "${platform}" '.usqlArtifacts[$platform] | .sha256 | type == "string" and test("^[0-9a-f]{64}$")' "${version_manifest}" >/dev/null ||
+      { echo "usql artifact is missing for ${platform}" >&2; exit 1; }
+    artifacts+=("${version_root}/${platform}/usql")
+  fi
 done
 
 for artifact in "${artifacts[@]}"; do
