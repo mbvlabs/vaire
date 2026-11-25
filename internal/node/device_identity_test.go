@@ -52,11 +52,12 @@ func TestManagedRecheckAfterLock(t *testing.T) {
 	t.Setenv("SUDO_UID", "123")
 
 	registry := deviceRegistryFixture(t)
+	registry.Operators[0].Role = config.AccessRoleOwner
 	lookupDeviceUID = func(string) (*user.User, error) { return &user.User{Uid: "123", Username: "vdev-1"}, nil }
 	loadDeviceRegistry = func(string) (config.AccessRegistry, error) { return registry, nil }
 	loadGuardCluster = func() (config.Cluster, error) { return config.Cluster{}, nil }
 
-	identity, err := authorizeDeviceCaller("123", "status")
+	identity, err := authorizeDeviceCaller("123", "doctor.run")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,7 @@ func TestManagedRecheckAfterLock(t *testing.T) {
 		return func() {}, nil
 	}
 
-	req := rpc.Request{Method: "status"}
+	req := rpc.Request{Method: "doctor.run"}
 	env := &Env{DeviceIdentity: identity}
 	out := &eventWriter{w: &bytes.Buffer{}}
 	releases, _, ok := acquireServeLocks(context.Background(), method{}, req, env, nil, out)
@@ -152,13 +153,13 @@ func TestDeviceAuthorization(t *testing.T) {
 		}
 	}
 
-	if _, err := authorizeDeviceCaller("123", "config.set"); err == nil {
-		t.Error("owner allowed config.set")
+	if _, err := authorizeDeviceCaller("123", "config.set"); err != nil {
+		t.Errorf("owner denied config.set: %v", err)
 	}
 
 	registry.Operators[0].Revoked = true
 
-	if _, err := authorizeDeviceCaller("123", "whoami"); err == nil {
+	if _, err := authorizeDeviceCaller("123", "config.set"); err == nil {
 		t.Error("allowed revoked operator")
 	}
 
@@ -207,6 +208,71 @@ func TestDeviceAuthorization(t *testing.T) {
 
 	if got, err := authorizeDeviceCaller("123", "apply"); err != nil || got != nil {
 		t.Errorf("legacy collision: %+v %v", got, err)
+	}
+}
+
+// Classify every registered RPC explicitly. A new method must be reviewed
+// here as well as in managedDeviceMethod; unknown methods remain denied.
+func TestManagedDeviceMethodCoverage(t *testing.T) {
+	member := []string{
+		"whoami", "status", "config.get", "db.list", "db.access.show", "ext.list",
+		"tune.show", "tls.status", "backup.list", "restore.status", "activity.list",
+		"activity.show", "activity.health", "protect.status",
+	}
+	owner := []string{
+		"user.add", "user.list", "user.revoke", "device.add", "device.list", "device.revoke",
+		"access.recovery-issue", "access.complete-setup", "plan", "db.create", "db.recover",
+		"db.write-access", "auth.status", "auth.setup", "protect.verify", "backup.now",
+		"master-backup.now", "master-backup.list", "master-backup.get", "upgrade.install",
+		"apply", "config.set", "config.validate", "db.copy.preflight", "db.copy", "db.drop",
+		"db.resize", "db.credentials", "tune.apply", "ext.add", "ext.remove", "logs",
+		"backup.verify", "job.list", "job.follow", "restore.start", "restore.promote",
+		"restore.undo", "restore.abort", "restore.cleanup", "restore.drill", "db.fork",
+		"db.follow", "db.unfollow", "sql", "metrics.show", "doctor.run", "queries.top",
+		"maint.report", "maint.run", "maint.kill", "queries.reset", "metrics.rotate",
+	}
+	// Setup-only, node-internal and obsolete protection setup RPCs.
+	denied := []string{"selfcheck", "access.bootstrap-owner", "cluster.bootstrap",
+		"cluster.confirm-secrets", "ssh.lockdown", "ssh.confirm", "ssh.status",
+		"protect.init", "protect.confirm"}
+
+	table := methods()
+	seen := make(map[string]bool)
+
+	for _, group := range []struct {
+		names             []string
+		memberOK, ownerOK bool
+	}{{member, true, true}, {owner, false, true}, {denied, false, false}} {
+		for _, name := range group.names {
+			if seen[name] {
+				t.Errorf("duplicate classification for %s", name)
+			}
+
+			seen[name] = true
+			if _, ok := table[name]; !ok {
+				t.Errorf("classified unregistered method %s", name)
+			}
+
+			assertManagedDeviceRoles(t, name, group.memberOK, group.ownerOK)
+		}
+	}
+
+	for name := range table {
+		if !seen[name] {
+			t.Errorf("registered method %s has no authorization classification", name)
+		}
+	}
+
+	assertManagedDeviceRoles(t, "unknown", false, false)
+}
+
+func assertManagedDeviceRoles(t *testing.T, name string, memberOK, adminOK bool) {
+	t.Helper()
+
+	for role, want := range map[string]bool{config.AccessRoleMember: memberOK, config.AccessRoleOwner: adminOK, "unknown": false} {
+		if got := managedDeviceMethod(role, name); got != want {
+			t.Errorf("%s role %s: got %t, want %t", name, role, got, want)
+		}
 	}
 }
 

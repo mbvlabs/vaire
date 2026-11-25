@@ -96,6 +96,15 @@ func managedDeviceMethod(role, method string) bool {
 		"plan", "db.create", "db.recover", "db.write-access", "auth.status", "auth.setup", "protect.verify",
 		"backup.now", "master-backup.now", "master-backup.list", "master-backup.get", "upgrade.install":
 		return role == config.AccessRoleOwner
+	// Normal operator RPCs beyond the member and existing owner permissions.
+	// Bootstrap, node-internal and obsolete RPCs remain outside this list.
+	case "apply", "config.set", "config.validate", "db.copy.preflight", "db.copy",
+		"db.drop", "db.resize", "db.credentials", "tune.apply", "ext.add", "ext.remove",
+		"logs", "backup.verify", "job.list", "job.follow", "restore.start", "restore.promote",
+		"restore.undo", "restore.abort", "restore.cleanup", "restore.drill", "db.fork",
+		"db.follow", "db.unfollow", "sql", "metrics.show", "doctor.run", "queries.top",
+		"maint.report", "maint.run", "maint.kill", "queries.reset", "metrics.rotate":
+		return role == config.AccessRoleOwner
 	default:
 		return false
 	}
