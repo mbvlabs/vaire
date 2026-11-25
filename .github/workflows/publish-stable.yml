@@ -114,6 +114,9 @@ jobs:
           CHANNEL: ${{ needs.route.outputs.channel }}
         run: |
           version="${GITHUB_REF_NAME#v}"
+          # Match Edge: release files fit in a single PUT. Avoid R2 multipart
+          # completion failures before publishing this immutable version.
+          aws configure set default.s3.multipart_threshold 1GB
           existing="$(aws s3api list-objects-v2 \
             --bucket "${RELEASE_BUCKET}" --prefix "releases/${version}/" --max-keys 1 \
             --query KeyCount --output text --endpoint-url "${R2_ENDPOINT}")"
