@@ -126,7 +126,7 @@ install_name_tool -id '@loader_path/libssl.3.dylib' "$libssl"
 install_name_tool -id '@loader_path/libcrypto.3.dylib' "$libcrypto"
 
 for binary in "$psql" "$work/bundle/pg_dump" "$work/bundle/pg_restore" "$libpq" "$libssl" "$libcrypto"; do
-  lipo -verify_arch "$arch" "$binary"
+  lipo "$binary" -verify_arch "$arch"
   otool -L "$binary" | tail -n +2 | awk '{print $1}' > "$work/current-deps"
   while IFS= read -r dep; do
     case "$dep" in
