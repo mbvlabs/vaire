@@ -271,6 +271,47 @@ func TestWorkstationTOCRejectsUnsafeAndUnknownClasses(t *testing.T) {
 	}
 }
 
+func TestWorkstationTOCIdentifiesAmbiguousEntryWithoutNames(t *testing.T) {
+	toc := backup.ArchiveTOC{Entries: []backup.ArchiveEntry{
+		{ID: 41, Rest: "TABLE public accepted_table owner"},
+		{ID: 42, Rest: "FUNCTION public private_function(integer, text) private_owner"},
+	}}
+
+	err := workstationAllowedTOC(toc)
+	if err == nil {
+		t.Fatal("accepted ambiguous function description")
+	}
+
+	if got := err.Error(); got != "archive TOC entry 42: the source archive contains an ambiguous object description (FUNCTION prefix, 4 fields after prefix)" {
+		t.Fatalf("unexpected diagnostic: %q", got)
+	}
+}
+
+func TestWorkstationTOCRoutineSignatures(t *testing.T) {
+	for _, tc := range []struct {
+		rest     string
+		tableOID uint32
+		ok       bool
+	}{
+		{"FUNCTION public f(integer, text) owner", pgProcCatalogOID, true},
+		{"FUNCTION public f(timestamp without time zone) owner", pgProcCatalogOID, true},
+		{"PROCEDURE public p(integer, text) owner", pgProcCatalogOID, true},
+		{"FUNCTION public f(integer, text) owner", 0, false},
+		{"FUNCTION MYSTERY public f(integer, text) owner", pgProcCatalogOID, false},
+		{"FUNCTION public f(integer,\ttext) owner", pgProcCatalogOID, false},
+		{"FUNCTION public f(integer, text) unknown owner", pgProcCatalogOID, false},
+	} {
+		t.Run(tc.rest, func(t *testing.T) {
+			entry := backup.ArchiveEntry{ID: 241, TableOID: tc.tableOID, OID: 16390, Rest: tc.rest}
+			err := workstationAllowedTOC(backup.ArchiveTOC{Entries: []backup.ArchiveEntry{entry}})
+
+			if (err == nil) != tc.ok {
+				t.Fatalf("classify %q: %v", tc.rest, err)
+			}
+		})
+	}
+}
+
 // This opt-in test requires a disposable fixture with two source_serial rows
 // and an empty target. It never runs as part of the standard smoke fixture.
 func TestWorkstationSerialRealArchive(t *testing.T) {

@@ -39,6 +39,7 @@ CREATE TABLE items (id integer NOT NULL, value integer NOT NULL);
 INSERT INTO items VALUES (nextval('items_id_seq'), 19), (nextval('items_id_seq'), 23);
 CREATE INDEX items_value_idx ON items(value);
 CREATE FUNCTION add_one(integer) RETURNS integer LANGUAGE SQL IMMUTABLE RETURN $1 + 1;
+CREATE FUNCTION add_two(integer, integer) RETURNS integer LANGUAGE SQL IMMUTABLE RETURN $1 + $2;
 SQL
 "$client/psql" -h "$work" -p "$port" -U vaire -d source_serial -v ON_ERROR_STOP=1 -c 'CREATE TABLE serial_items (id serial PRIMARY KEY)' >/dev/null
 "$client/psql" -h "$work" -p "$port" -U vaire -d source_ext -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION pg_stat_statements' >/dev/null

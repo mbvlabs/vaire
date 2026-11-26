@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,12 @@ import (
 const workstationCopyArchiveLimit int64 = 10 << 30
 
 var errWorkstationCopyArchiveLimit = errors.New("the compressed copy archive exceeds the 10 GiB local spool limit")
+
+// pg_dump routine tags contain a name and a parenthesized argument list.
+// pg_restore prints that list verbatim, including spaces between arguments.
+var workstationRoutineTOC = regexp.MustCompile(`^[^ ()]+ [^ ()]+\([^\r\n\t]*\) [^ ()]+$`)
+
+const pgProcCatalogOID = 1255
 
 // dumpWorkstationSource only exports. Its result must not be used for
 // provisioning until its TOC and extension policy have been inspected.
@@ -192,15 +199,16 @@ func workstationAllowedTOC(toc backup.ArchiveTOC) error {
 		"ROW SECURITY", "POLICY", "BLOB COMMENTS", "BLOBS", "BLOB",
 	}
 	for _, entry := range toc.Entries {
-		if err := workstationAllowedTOCEntry(entry.Rest, disallowed, allowed); err != nil {
-			return err
+		if err := workstationAllowedTOCEntry(entry, disallowed, allowed); err != nil {
+			return fmt.Errorf("archive TOC entry %d: %w", entry.ID, err)
 		}
 	}
 
 	return nil
 }
 
-func workstationAllowedTOCEntry(rest string, disallowed, allowed []string) error {
+func workstationAllowedTOCEntry(entry backup.ArchiveEntry, disallowed, allowed []string) error {
+	rest := entry.Rest
 	for _, kind := range disallowed {
 		if strings.HasPrefix(rest, kind+" ") {
 			return errors.New("the source archive contains an unsupported object class")
@@ -224,6 +232,8 @@ func workstationAllowedTOCEntry(rest string, disallowed, allowed []string) error
 			case "DEFAULT", "CONSTRAINT":
 				// namespace, table, column or constraint, owner
 				valid = len(fields) == 4 && fields[0] != "-" && fields[1] != "-" && fields[2] != "-" && fields[3] != "-"
+			case "FUNCTION", "PROCEDURE":
+				valid = entry.TableOID == pgProcCatalogOID && entry.OID != 0 && workstationRoutineTOC.MatchString(after)
 			case "COMMENT":
 				valid = len(fields) == 3 ||
 					(len(fields) == 2 && fields[0] == "-") ||
@@ -231,7 +241,7 @@ func workstationAllowedTOCEntry(rest string, disallowed, allowed []string) error
 			}
 
 			if !valid || strings.ContainsAny(rest, "\t\r\n") {
-				return errors.New("the source archive contains an ambiguous object description")
+				return fmt.Errorf("the source archive contains an ambiguous object description (%s prefix, %d fields after prefix)", kind, len(fields))
 			}
 
 			return nil

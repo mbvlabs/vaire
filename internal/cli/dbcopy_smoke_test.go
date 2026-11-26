@@ -200,6 +200,11 @@ func checkWorkstationSmokeData(t *testing.T, ctx context.Context, port int, ca [
 	}
 	defer closeWorkstationCopyConn(ctx, conn)
 
+	var sum int
+	if err := conn.QueryRow(ctx, "select public.add_two(19, 23)").Scan(&sum); err != nil || sum != 42 {
+		t.Fatalf("restored multi-argument function: sum=%d, err=%v", sum, err)
+	}
+
 	var login, current, database string
 	if err := conn.QueryRow(ctx, "select session_user, current_user, current_database()").Scan(&login, &current, &database); err != nil {
 		t.Fatal(err)
