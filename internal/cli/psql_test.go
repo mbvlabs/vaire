@@ -1,10 +1,46 @@
 package cli
 
 import (
+	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/spf13/cobra"
 )
+
+func TestPsqlSocketIsPrivateAndRemoved(t *testing.T) {
+	ln, dir, cleanup, err := listenPsqlSocket(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(cleanup)
+
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("proxy directory is not private: %v, %v", info, err)
+	}
+
+	var dial net.Dialer
+
+	conn, err := dial.DialContext(t.Context(), "unix", filepath.Join(dir, ".s.PGSQL.5432"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_ = conn.Close()
+
+	if ln.Addr().Network() != "unix" {
+		t.Fatalf("unexpected listener network %q", ln.Addr().Network())
+	}
+
+	cleanup()
+
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("proxy directory not removed: %v", err)
+	}
+}
 
 func TestPsqlArgs(t *testing.T) {
 	cases := []struct {

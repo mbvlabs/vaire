@@ -455,6 +455,8 @@ Protection is opt-in and requires a factor set up with `vaire auth setup`. Prote
 
 `vaire sql`, `vaire psql` and `vaire console` connect over WireGuard to the session pooler on port 5432 and verify the server certificate in ACME mode. Members select `--role ro`, `--role app`, or `--role migrate` and enter that database role's password. The selected role determines their privileges; `--write` is not used with `--role`. Admins can also use the default `vaire_admin` path, which is read-only unless `--write` is passed. `vaire tunnel --db app --target postgres` forwards a local port for other clients. Signed releases install `psql` and `usql` alongside Vaire. Arguments after `--` go directly to `psql`, for example `vaire psql --db app -- -c "select 1"`.
 
+For `vaire psql`, the bundled client connects to a private Unix socket. Vaire handles TLS to the session pooler using the same Go TLS code as `vaire console`.
+
 ## Backups and restores
 
 ```

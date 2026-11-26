@@ -1,16 +1,20 @@
 package cli
 
 import (
+	"context"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/cli/ui"
 	"github.com/mbvlabs/vaire/internal/localenv"
+	"github.com/mbvlabs/vaire/internal/pg"
 	"github.com/spf13/cobra"
 )
 
@@ -54,43 +58,39 @@ func runPsql(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ln, port, err := listenLocal(cmd.Context(), defaultPostgresPort)
-	if err != nil {
-		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "No free local port.")
-	}
-
-	defer func() { _ = ln.Close() }()
-
 	ctx, stop := signal.NotifyContext(commandContext(cmd), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	ln, dir, cleanup, err := listenPsqlSocket(ctx)
+	if err != nil {
+		return output.WrapError(output.CodePrecondition, err, output.ExitPrecondition, "Could not open a private PostgreSQL proxy socket.")
+	}
+	defer cleanup()
+
 	at := databaseEndpoint(ctx, s, p, db)
-	go proxy(ctx, ln, s.dialer, at.addr(pgPort))
+	tlsCfg := pg.TLSConfig(pg.Params{ServerName: at.Hostname, TLSMode: s.ctx.TLSMode})
 
-	sslMode := "verify-full"
-
-	env := []string{
-		"PGHOST=" + at.Hostname,
-		"PGHOSTADDR=127.0.0.1",
-		"PGPORT=" + strconv.Itoa(port),
-		"PGUSER=" + user,
-		"PGDATABASE=" + db,
-		"PGPASSWORD=" + password,
-		"PGSSLMODE=" + sslMode,
+	go pg.ServeTLSProxy(ctx, ln, s.dialer, at.addr(pgPort), tlsCfg)
+	// libpq ignores the TLS options for Unix sockets. Keep TCP verification
+	// enabled for any explicit TCP endpoint psql is asked to connect to.
+	env := append(os.Environ(),
+		"PGHOST="+dir,
+		"PGHOSTADDR=",
+		"PGPORT="+strconv.Itoa(pgPort),
+		"PGUSER="+user,
+		"PGDATABASE="+db,
+		"PGPASSWORD="+password,
+		"PGSSLMODE=verify-full",
 		"PGSSLROOTCERT=system",
 		"PGSSLSNI=1",
-	}
-	if s.ctx.TLSMode == "self-signed" {
-		env[6] = "PGSSLMODE=require"
-		env = env[:7]
-	}
+		"PGOPTIONS="+loginOptions(db, role, flagTrue(cmd, "write")),
+	)
 
-	env = append(env, "PGOPTIONS="+loginOptions(db, role, flagTrue(cmd, "write")))
 	// Arguments after -- go to psql as they are; the connection comes from
 	// the PG* environment.
 	child := exec.CommandContext(ctx, psqlPath, args...)
 
-	child.Env = append(os.Environ(), env...)
+	child.Env = env
 	child.Stdin = cmd.InOrStdin()
 	child.Stdout = cmd.OutOrStdout()
 	child.Stderr = cmd.ErrOrStderr()
@@ -106,4 +106,25 @@ func runPsql(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func listenPsqlSocket(ctx context.Context) (net.Listener, string, func(), error) {
+	dir, err := os.MkdirTemp("", "vaire-pg-")
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	var lc net.ListenConfig
+
+	ln, err := lc.Listen(ctx, "unix", filepath.Join(dir, ".s.PGSQL."+strconv.Itoa(pgPort)))
+	if err != nil {
+		_ = os.RemoveAll(dir)
+
+		return nil, "", nil, err
+	}
+
+	return ln, dir, func() {
+		_ = ln.Close()
+		_ = os.RemoveAll(dir)
+	}, nil
 }
