@@ -11,24 +11,7 @@ import (
 func ExposureIncreases(old, next Cluster) []string {
 	var surfaces []string
 
-	if next.Network.RoleAllowlist == nil && old.Network.RoleAllowlist == nil &&
-		prefixesWiden(old.Network.ClientAllowlist, next.Network.ClientAllowlist) {
-		surfaces = append(surfaces, "session_pooler", "transaction_pooler")
-	}
-
-	if next.Network.RoleAllowlist != nil || old.Network.RoleAllowlist != nil {
-		for _, role := range []string{AllowlistApp, AllowlistMigrate, AllowlistRO} {
-			if prefixesWiden(old.Network.ClientsForRole(role), next.Network.ClientsForRole(role)) {
-				surfaces = append(surfaces, "database_role_"+role)
-			}
-		}
-
-		// Shared mode also admits non-application logins through its
-		// public network gate; per-role mode does not.
-		if next.Network.RoleAllowlist == nil && len(next.Network.ClientAllowlist) > 0 {
-			surfaces = append(surfaces, "database_other_roles")
-		}
-	}
+	surfaces = appendDatabaseExposureIncreases(surfaces, old, next)
 
 	if next.Transport.Subnet != "" && prefixesWiden(
 		subnetPrefixes(old.Transport.Subnet), []string{next.Transport.Subnet}) {
@@ -37,6 +20,26 @@ func ExposureIncreases(old, next Cluster) []string {
 
 	if prefixesWiden(metricsClients(old), metricsClients(next)) {
 		surfaces = append(surfaces, "metrics")
+	}
+
+	return surfaces
+}
+
+func appendDatabaseExposureIncreases(surfaces []string, old, next Cluster) []string {
+	// A stanza identifies the same database across snapshots. A recreated
+	// database, even with the same name, has its own exposure to approve.
+	previous := make(map[string][]string)
+
+	for _, spec := range old.Clusters {
+		if !spec.IsFollower() && spec.Stanza != "" {
+			previous[spec.Stanza] = spec.ClientAllowlist
+		}
+	}
+
+	for _, spec := range next.Clusters {
+		if !spec.IsFollower() && prefixesWiden(previous[spec.Stanza], spec.ClientAllowlist) {
+			surfaces = append(surfaces, "database:"+spec.Name)
+		}
 	}
 
 	return surfaces

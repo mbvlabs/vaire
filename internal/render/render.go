@@ -8,7 +8,6 @@ import (
 	"embed"
 	"maps"
 	"net/netip"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -323,58 +322,59 @@ func PgbouncerHBA(cfg config.Cluster, dbs []PoolerDatabase, operators []string) 
 	return poolerHBA(cfg, dbs, operators, false)
 }
 
-type poolerHBARule struct{ User, CIDR string }
+type poolerHBARule struct{ Database, User, CIDR string }
 
 func poolerHBA(cfg config.Cluster, dbs []PoolerDatabase, operators []string, session bool) []byte {
 	var rules []poolerHBARule
 
 	for _, operator := range operators {
 		if addr, err := netip.ParseAddr(operator); err == nil && addr.Is4() {
-			rules = append(rules, poolerHBARule{"all", addr.String() + "/32"})
+			rules = append(rules, poolerHBARule{"all", "all", addr.String() + "/32"})
 		}
 	}
 
-	if cfg.Network.RoleAllowlist == nil {
-		rules = appendPoolerCIDRs(rules, "all", cfg.Network.ClientAllowlist)
-	} else {
-		rules = appendRoleCIDRs(rules, cfg.Network, dbs, session)
-	}
+	rules = appendDatabaseCIDRs(rules, cfg, dbs, session)
 
 	return execute("pgbouncer_hba.conf.tmpl", rules)
 }
 
-func appendPoolerCIDRs(rules []poolerHBARule, user string, clients []string) []poolerHBARule {
+func appendDatabaseRoleCIDRs(rules []poolerHBARule, database, user string, clients []string) []poolerHBARule {
 	for _, cidr := range clients {
 		if prefix, err := netip.ParsePrefix(cidr); err == nil {
-			rules = append(rules, poolerHBARule{user, prefix.Masked().String()})
+			rules = append(rules, poolerHBARule{database, user, prefix.Masked().String()})
 		}
 	}
 
 	return rules
 }
 
-func appendRoleCIDRs(rules []poolerHBARule, network config.Network, dbs []PoolerDatabase, session bool) []poolerHBARule {
-	names := map[string]bool{}
+// Only an independent database's actual, currently routed alias is public.
+// DBName marks follower and temporary restore routes in the pooler view.
+func appendDatabaseCIDRs(rules []poolerHBARule, cfg config.Cluster, dbs []PoolerDatabase, session bool) []poolerHBARule {
+	routed := map[string]bool{}
 
+	internal := map[string]bool{"pgbouncer": true}
 	for _, db := range dbs {
-		name := db.Name
-		if db.DBName != "" {
-			name = db.DBName
-		}
-
-		if config.CheckDatabaseName(name) == nil {
-			names[name] = true
+		internal[AuthAlias(db.Name)] = true
+		if db.DBName == "" {
+			routed[db.Name] = true
 		}
 	}
 
-	roles := []string{config.AllowlistApp, config.AllowlistRO}
-	if session {
-		roles = append(roles, config.AllowlistMigrate)
-	}
+	for _, spec := range cfg.Clusters {
+		if !routed[spec.Name] || internal[spec.Name] || spec.IsFollower() || config.CheckDatabaseName(spec.Name) != nil {
+			continue
+		}
 
-	for _, name := range slices.Sorted(maps.Keys(names)) {
-		for _, role := range roles {
-			rules = appendPoolerCIDRs(rules, name+"_"+role, network.ClientsForRole(role))
+		// Quoting prevents HBA keywords such as "all" and "sameuser" from
+		// matching anything other than the literal database alias.
+		database := `"` + spec.Name + `"`
+		for _, role := range []string{config.AllowlistApp, config.AllowlistRO} {
+			rules = appendDatabaseRoleCIDRs(rules, database, spec.Name+"_"+role, spec.ClientAllowlist)
+		}
+
+		if session {
+			rules = appendDatabaseRoleCIDRs(rules, database, spec.Name+"_"+config.AllowlistMigrate, spec.ClientAllowlist)
 		}
 	}
 

@@ -57,7 +57,7 @@ func configuredRules(cfg config.Cluster) []string {
 	for _, port := range []int{PgbouncerPort, SessionPoolerPort} {
 		rules = appendRule(rules, fmt.Sprintf("allow in on wg0 to any port %d proto tcp", port))
 
-		for _, cidr := range cfg.Network.PoolerClients(port == SessionPoolerPort) {
+		for _, cidr := range cfg.PublicDatabaseCIDRs() {
 			if p, err := netip.ParsePrefix(cidr); err == nil {
 				for _, public := range publicPrefixes(p.Masked(), private) {
 					rules = appendRule(rules, allowFromRule(public, port))

@@ -39,6 +39,8 @@ type ClusterSpec struct {
 	Profile          string   `toml:"profile,omitempty"`
 	StatementTimeout string   `toml:"statement_timeout"`
 	Extensions       []string `toml:"extensions"`
+	// ClientAllowlist grants public access to this database through both poolers.
+	ClientAllowlist []string `toml:"client_allowlist,omitempty"`
 	// RecoveryExtensions declares requirements outside recorded coverage.
 	// Nil means unknown, rather than an explicit empty declaration.
 	RecoveryExtensions *[]string         `toml:"recovery_extensions,omitempty" json:"recovery_extensions,omitempty"`
@@ -93,6 +95,30 @@ func (c Cluster) ClusterByName(name string) (ClusterSpec, bool) {
 	}
 
 	return ClusterSpec{}, false
+}
+
+// PublicDatabaseCIDRs returns the union of independent databases' client
+// allowlists, for the public network gate shared by both poolers.
+// Database-level authorization must still be enforced separately.
+func (c Cluster) PublicDatabaseCIDRs() []string {
+	var out []string
+
+	seen := make(map[string]bool)
+
+	for _, s := range c.Clusters {
+		if s.IsFollower() {
+			continue
+		}
+
+		for _, cidr := range s.ClientAllowlist {
+			if !seen[cidr] {
+				seen[cidr] = true
+				out = append(out, cidr)
+			}
+		}
+	}
+
+	return out
 }
 
 // CreatedByOperator fails closed for unowned or malformed identities. The
@@ -272,6 +298,12 @@ func (c Cluster) validateClusterPlacement(add func(string, ...any), at string, s
 // validateClusterRuntime checks the entry's profile, statement timeout,
 // extensions and settings keys.
 func (c Cluster) validateClusterRuntime(add func(string, ...any), at string, s ClusterSpec) {
+	for _, cidr := range s.ClientAllowlist {
+		if err := CheckAllowlistEntry(cidr); err != nil {
+			add("%s.client_allowlist entry %q %v", at, cidr, err)
+		}
+	}
+
 	if s.Profile != "" {
 		if err := checkProfile(s.Profile); err != nil {
 			add("%s.profile %q %v", at, s.Profile, err)

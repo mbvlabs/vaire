@@ -35,7 +35,10 @@ ufw allow from 2001:db8::1 to any port 5432 proto tcp`
 // and doctor's fw.rules failed on a converged firewall.
 func TestConfiguredRulesMatchUFWShowAdded(t *testing.T) {
 	cfg := config.DefaultCluster()
-	cfg.Network.ClientAllowlist = []string{"203.0.113.7/32", "203.0.113.7/32", "198.51.100.9/24", "2001:db8::1/128"}
+	cfg.Clusters = []config.ClusterSpec{
+		{Name: "alpha", ClientAllowlist: []string{"203.0.113.7/32", "198.51.100.9/24"}},
+		{Name: "beta", ClientAllowlist: []string{"203.0.113.7/32", "2001:db8::1/128"}},
+	}
 	want := configuredRules(cfg)
 
 	have := parseShowAdded(showAdded)
@@ -63,7 +66,7 @@ func TestDefaultRoutesPreserveAddressFamily(t *testing.T) {
 		t.Run(tc.cidr, func(t *testing.T) {
 			cfg := config.DefaultCluster()
 			cfg.Transport.Subnet = ""
-			cfg.Network.ClientAllowlist = []string{tc.cidr, tc.cidr}
+			cfg.Clusters = []config.ClusterSpec{{Name: "alpha", ClientAllowlist: []string{tc.cidr, tc.cidr}}}
 			rules := configuredRules(cfg)
 
 			for _, half := range tc.halves {
@@ -91,20 +94,26 @@ func TestDefaultRoutesPreserveAddressFamily(t *testing.T) {
 
 func TestPublicPoolerRulesExcludeWireGuardSubnet(t *testing.T) {
 	cfg := config.DefaultCluster()
-	cfg.Network.RoleAllowlist = &config.RoleAllowlist{App: []string{"10.42.0.0/15"}, Migrate: []string{"192.0.2.7/32"}}
+	cfg.Clusters = []config.ClusterSpec{
+		{Name: "alpha", ClientAllowlist: []string{"10.42.0.0/15"}},
+		{Name: "beta", ClientAllowlist: []string{"192.0.2.7/32"}},
+		{Name: "follower", Follows: "alpha", ClientAllowlist: []string{"198.51.100.1/32"}},
+	}
 	rules := configuredRules(cfg)
 
 	for _, rule := range []string{
 		"allow from 10.43.0.0/16 to any port 6432 proto tcp",
 		"allow from 10.43.0.0/16 to any port 5432 proto tcp",
 		"allow from 192.0.2.7 to any port 5432 proto tcp",
+		"allow from 192.0.2.7 to any port 6432 proto tcp",
 	} {
 		if !slices.Contains(rules, rule) {
 			t.Errorf("missing %q in %v", rule, rules)
 		}
 	}
 
-	if slices.Contains(rules, "allow from 192.0.2.7 to any port 6432 proto tcp") ||
+	if slices.Contains(rules, "allow from 198.51.100.1 to any port 6432 proto tcp") ||
+		slices.Contains(rules, "allow from 198.51.100.1 to any port 5432 proto tcp") ||
 		slices.Contains(rules, "allow from 10.42.0.0/15 to any port 5432 proto tcp") {
 		t.Fatalf("overbroad pooler rules: %v", rules)
 	}

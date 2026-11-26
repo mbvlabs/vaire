@@ -1073,13 +1073,6 @@ func (c Cluster) Clone() Cluster {
 		}
 	}
 
-	out.Network.ClientAllowlist = slices.Clone(c.Network.ClientAllowlist)
-	if roles := c.Network.RoleAllowlist; roles != nil {
-		out.Network.RoleAllowlist = &RoleAllowlist{
-			App: slices.Clone(roles.App), Migrate: slices.Clone(roles.Migrate), RO: slices.Clone(roles.RO),
-		}
-	}
-
 	out.Metrics.Allowlist = slices.Clone(c.Metrics.Allowlist)
 
 	out.Postgres.Settings = cloneStringMap(c.Postgres.Settings)
@@ -1097,6 +1090,7 @@ func (c Cluster) Clone() Cluster {
 func (s ClusterSpec) Clone() ClusterSpec {
 	out := s
 	out.Extensions = slices.Clone(s.Extensions)
+	out.ClientAllowlist = slices.Clone(s.ClientAllowlist)
 	out.Settings = cloneStringMap(s.Settings)
 	out.RecoveryExtensions = cloneStringList(s.RecoveryExtensions)
 

@@ -1,6 +1,6 @@
 # managed by vaire - do not edit; use cluster.toml
 # Local tools and exporters use Unix sockets.
 local   all  all  scram-sha-256
-{{range .}}hostssl all  {{.User}}  {{.CIDR}}  scram-sha-256
+{{range .}}hostssl {{.Database}}  {{.User}}  {{.CIDR}}  scram-sha-256
 {{end}}host    all  all  0.0.0.0/0  reject
 host    all  all  ::/0       reject

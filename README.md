@@ -398,25 +398,26 @@ a change that widens public database access or HTTPS metrics. For example,
 replace the database allowlist with one deploy host's outbound IPv4 address:
 
 ```sh
-vaire config set network.client_allowlist '["203.0.113.7/32"]' --apply
+vaire config set clusters.app.client_allowlist '["203.0.113.7/32"]'
+vaire apply --step firewall-v1,pgbouncer-v1
 ```
 
 Include any existing entries you want to keep, and the deploy host's outbound
-IPv6 `/128` if it uses IPv6. One approval covers both poolers in shared mode.
-To use per-role mode instead, use `vaire config edit` and leave the shared
-list empty:
+IPv6 `/128` if it uses IPv6. A database list covers its `_app` and `_ro` logins
+on both poolers and its `_migrate` login on the session pooler only. All public
+clients still need TLS and valid database credentials. New databases and forks
+do not inherit access. An omitted or empty list means WireGuard-only access.
 
-```toml
-[network.role_allowlist]
-app = ["203.0.113.7/32"]
-ro = ["198.51.100.8/32"]
-migrate = []
-```
-
-An omitted or empty role list denies public access for that role; it does not
-inherit from the shared list. Here `_migrate` is available over WireGuard but
-not from either public IP. Use `_migrate` only in the deploy job and `_app`
-in the running service.
+**Upgrading from a release with global database allowlists:** Using the old
+CLI over WireGuard, use `vaire config edit` to remove the entire `[network]`
+and `[network.role_allowlist]` sections, even if empty. Apply `firewall-v1` and
+`pgbouncer-v1` before upgrading. That pauses public database access, not
+WireGuard access. If you rely on offsite recovery, take a fresh master backup
+after removing the sections: old master backups may contain the removed keys.
+Then upgrade the workstation and node, and add a list only to each database
+that needs it. The new version rejects the old keys rather than converting or
+ignoring them. If they are still present, the older node updater's self-check
+will fail and roll back the binary.
 
 Dry runs and narrowing do not need a factor. An approved edit can be applied
 later. A fresh restore does not inherit approvals: database access starts

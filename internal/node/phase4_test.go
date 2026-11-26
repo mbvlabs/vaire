@@ -116,7 +116,7 @@ func TestWindowLeft(t *testing.T) {
 
 func TestOpenAllowlists(t *testing.T) {
 	cfg := config.Cluster{
-		Network: config.Network{ClientAllowlist: []string{"0.0.0.0/0", "10.0.0.0/8"}},
+		Clusters: []config.ClusterSpec{{Name: "app", ClientAllowlist: []string{"0.0.0.0/0", "10.0.0.0/8"}}},
 		Metrics: config.Metrics{Allowlist: []string{"::/0"}},
 	}
 
@@ -125,7 +125,7 @@ func TestOpenAllowlists(t *testing.T) {
 		t.Errorf("%v", got)
 	}
 
-	cfg.Network.ClientAllowlist = nil
+	cfg.Clusters[0].ClientAllowlist = nil
 	if got := openAllowlists(cfg); len(got) != 1 {
 		t.Errorf("unexposed poolers: %v", got)
 	}

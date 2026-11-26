@@ -79,7 +79,7 @@ func TestConfigValueOutputScalar(t *testing.T) {
 // config: none comes out as a Go struct.
 func TestConfigValueOutputDefaults(t *testing.T) {
 	cfg := config.DefaultCluster()
-	for _, key := range []string{"tls", "transport", "server", "postgres", "network", "backup", "backup.database", "master_backup", "maintenance", "metrics"} {
+	for _, key := range []string{"tls", "transport", "server", "postgres", "backup", "backup.database", "master_backup", "maintenance", "metrics"} {
 		value, err := cfg.Get(key)
 		if err != nil {
 			t.Fatalf("%s: %v", key, err)

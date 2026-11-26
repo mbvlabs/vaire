@@ -144,6 +144,7 @@ func TestForkAndFollowerSpecCopyExtensionIntent(t *testing.T) {
 	src := config.ClusterSpec{
 		Name: "app", Size: "small",
 		Extensions:         []string{"custom"},
+		ClientAllowlist:    []string{"192.0.2.10/32"},
 		Settings:           map[string]string{"work_mem": "8MB"},
 		RecoveryExtensions: &recovery,
 	}
@@ -151,6 +152,10 @@ func TestForkAndFollowerSpecCopyExtensionIntent(t *testing.T) {
 	fork := forkSpec(src, "copy")
 	if fork.Name != "copy" || fork.Follows != "" || fork.Stanza != "" || fork.Protected {
 		t.Fatalf("fork entry not reset: %+v", fork)
+	}
+
+	if len(fork.ClientAllowlist) != 0 {
+		t.Fatal("fork inherited the source's public allowlist")
 	}
 
 	if !slices.Equal(fork.Extensions, []string{"custom"}) || fork.Settings["work_mem"] != "8MB" {

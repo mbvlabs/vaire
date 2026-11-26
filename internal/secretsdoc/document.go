@@ -61,7 +61,7 @@ const ConnectionNotes = "Use the app credential for application runtime; it can 
 	"The migrate credential acts as the database owner and can change schema and data. Keep it out of application runtime configuration. " +
 	"The migrate URL goes through the session pooler on port 5432, which keeps one PostgreSQL connection per client for session features that migrations need (advisory locks, session SET, temporary tables). " +
 	"The transaction pooler refuses the migrate role on 6432 on purpose; there it fails as an authentication error. " +
-	"Both poolers require TLS for remote clients and are reachable from addresses in network.client_allowlist or over WireGuard. " +
+	"Both poolers require TLS for remote clients and are reachable over WireGuard or, for supported database roles, from addresses in that database's client_allowlist. " +
 	"Both poolers route by the database name in the URL's path."
 
 // Server is the setup's identity: its name, the base domain its nodes are

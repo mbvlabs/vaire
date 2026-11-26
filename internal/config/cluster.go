@@ -70,7 +70,6 @@ type Cluster struct {
 	Nodes       []NodeSpec    `toml:"nodes"`
 	Server      Server        `toml:"server"`
 	Postgres    Postgres      `toml:"postgres"`
-	Network     Network       `toml:"network"`
 	Clusters    []ClusterSpec `toml:"clusters"`
 	// Extensions holds operator-supplied extension descriptors keyed by
 	// canonical name: new extensions outside the built-in catalogue and
@@ -141,13 +140,6 @@ type Postgres struct {
 	Settings                 map[string]string `toml:"settings,omitempty"`
 }
 
-// Network is [network].
-type Network struct {
-	// ClientAllowlist grants public access to both poolers, not database privileges.
-	ClientAllowlist []string       `toml:"client_allowlist"`
-	RoleAllowlist   *RoleAllowlist `toml:"role_allowlist,omitempty"`
-}
-
 // MasterBackup is [master_backup] (RFC 6.5): the retention of the master's
 // state bundles. The bucket and prefix come from [backup].
 type MasterBackup struct {
@@ -216,7 +208,6 @@ func DefaultCluster() Cluster {
 			DefaultSize:              DefaultSize,
 			Settings:                 map[string]string{},
 		},
-		Network: Network{ClientAllowlist: []string{}},
 		Backup: Backup{
 			Database: BackupDatabase{
 				FullSchedule:   "Sun *-*-* 01:00:00",
@@ -346,10 +337,6 @@ func ParseCluster(raw []byte) (Cluster, error) {
 		}
 
 		return Cluster{}, err
-	}
-
-	if cfg.Network.ClientAllowlist == nil {
-		cfg.Network.ClientAllowlist = []string{}
 	}
 
 	if cfg.Metrics.Allowlist == nil {
@@ -617,14 +604,6 @@ func (c Cluster) validateServer(add func(string, ...any)) {
 
 // validateExposure checks the client and metrics exposure keys.
 func (c Cluster) validateExposure(add func(string, ...any)) {
-	for _, cidr := range c.Network.ClientAllowlist {
-		if err := CheckAllowlistEntry(cidr); err != nil {
-			add("network.client_allowlist entry %q %v", cidr, err)
-		}
-	}
-
-	c.Network.validateRoleAllowlist(add)
-
 	for _, cidr := range c.Metrics.Allowlist {
 		if err := CheckAllowlistEntry(cidr); err != nil {
 			add("metrics.allowlist entry %q %v", cidr, err)

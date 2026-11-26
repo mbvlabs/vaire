@@ -103,6 +103,10 @@ func (c Cluster) validateFollower(add func(string, ...any), at string, s Cluster
 		add("%s.backup must be empty for a follower: it has no stanza of its own", at)
 	}
 
+	if len(s.ClientAllowlist) > 0 {
+		add("%s.client_allowlist must be empty for a follower; followers are WireGuard-only", at)
+	}
+
 	if s.FollowGeneration != "" && !followGenerationPattern.MatchString(s.FollowGeneration) {
 		add("%s.follow_generation %q is managed by vaire and must be 32 lowercase hexadecimal characters", at, s.FollowGeneration)
 	}

@@ -2987,6 +2987,7 @@ func forkSpec(src config.ClusterSpec, name string) config.ClusterSpec {
 	spec.Backup = config.ClusterBackup{}
 	spec.Follows, spec.FollowGeneration = "", ""
 	spec.CreatorOperatorID = ""
+	spec.ClientAllowlist = nil
 	spec.Protected = false
 
 	return spec

@@ -451,7 +451,7 @@ func phase1Commands() []cmdSpec {
 				Summary: "Forward a local port to the transaction or session pooler",
 				WhenToUse: []string{
 					"Point a GUI or library at 127.0.0.1 through the tunnel. Both poolers route by the database name in the DSN.",
-					"Run migrations as <db>_migrate over TLS on port 5432 from a source IP in network.client_allowlist, or use --target postgres over WireGuard. The transaction pooler refuses the migrate role.",
+					"Run migrations as <db>_migrate over TLS on port 5432 from a source IP in clusters.<db>.client_allowlist, or use --target postgres over WireGuard. The transaction pooler refuses the migrate role.",
 				},
 				Examples: []string{"vaire tunnel", "vaire tunnel --db app --target postgres --local-port 6544"},
 			},

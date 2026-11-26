@@ -348,26 +348,18 @@ func driftOf(ctx context.Context, cfg config.Cluster, rt engine.Runtime, id stri
 func openAllowlists(cfg config.Cluster) []string {
 	var out []string
 
-	for _, l := range []struct {
-		name string
-		list []string
-	}{
-		{"network.client_allowlist", cfg.Network.ClientAllowlist},
-		{"network.role_allowlist.app", cfg.Network.ClientsForRole(config.AllowlistApp)},
-		{"network.role_allowlist.migrate", cfg.Network.ClientsForRole(config.AllowlistMigrate)},
-		{"network.role_allowlist.ro", cfg.Network.ClientsForRole(config.AllowlistRO)},
-		{"metrics.allowlist", cfg.Metrics.Allowlist},
-	} {
-		if cfg.Network.RoleAllowlist == nil && strings.HasPrefix(l.name, "network.role_allowlist.") {
-			continue
-		}
-
-		for _, cidr := range l.list {
+	add := func(name string, list []string) {
+		for _, cidr := range list {
 			if open, err := openToAll(cidr); err == nil && open {
-				out = append(out, l.name+" "+cidr)
+				out = append(out, name+" "+cidr)
 			}
 		}
 	}
+	for _, db := range cfg.Clusters {
+		add("clusters."+db.Name+".client_allowlist", db.ClientAllowlist)
+	}
+
+	add("metrics.allowlist", cfg.Metrics.Allowlist)
 
 	return out
 }

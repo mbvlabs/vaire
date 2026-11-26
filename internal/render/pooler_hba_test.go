@@ -7,14 +7,25 @@ import (
 	"github.com/mbvlabs/vaire/internal/config"
 )
 
-func TestPoolerHBARoleAllowlist(t *testing.T) {
-	cfg := config.Cluster{
-		Network: config.Network{RoleAllowlist: &config.RoleAllowlist{
-			App: []string{"192.0.2.7/24"}, Migrate: []string{"2001:db8::/32"},
-		}},
-		Transport: config.Transport{Subnet: "10.42.0.0/16"},
+func TestPoolerHBADatabaseAllowlist(t *testing.T) {
+	cfg := config.Cluster{Clusters: []config.ClusterSpec{
+		{Name: "alpha", ClientAllowlist: []string{"192.0.2.9/24", "2001:db8::1/64", "invalid"}},
+		{Name: "beta", ClientAllowlist: []string{"198.51.100.4/32"}},
+		{Name: "all", ClientAllowlist: []string{"203.0.113.0/24"}},
+		{Name: "follower", Follows: "alpha", ClientAllowlist: []string{"203.0.113.1/32"}},
+		{Name: "missing", ClientAllowlist: []string{"203.0.113.2/32"}},
+		{Name: "unsettled", ClientAllowlist: []string{"203.0.113.3/32"}},
+		{Name: "alpha__auth", ClientAllowlist: []string{"203.0.113.4/32"}},
+		{Name: "pgbouncer", ClientAllowlist: []string{"203.0.113.5/32"}},
+	}}
+	dbs := []PoolerDatabase{
+		{Name: "alpha"}, {Name: "beta"}, {Name: "all"},
+		{Name: "follower", DBName: "alpha"},
+		{Name: "alpha__restoring", DBName: "alpha"},
+		{Name: "unsettled", DBName: "alpha"},
+		{Name: "not_configured"},
+		{Name: "alpha__auth"}, {Name: "pgbouncer"},
 	}
-	dbs := []PoolerDatabase{{Name: "follower", DBName: "source"}, {Name: "other"}, {Name: "source__restoring", DBName: "source"}}
 
 	for _, session := range []bool{false, true} {
 		var hba string
@@ -25,38 +36,31 @@ func TestPoolerHBARoleAllowlist(t *testing.T) {
 		}
 
 		for _, want := range []string{
-			"hostssl all  source_app  192.0.2.0/24  scram-sha-256",
-			"hostssl all  all  10.42.255.1/32  scram-sha-256",
-			"host    all  all  ::/0       reject",
+			`hostssl "alpha"  alpha_app  192.0.2.0/24  scram-sha-256`,
+			`hostssl "alpha"  alpha_ro  2001:db8::/64  scram-sha-256`,
+			`hostssl "beta"  beta_app  198.51.100.4/32  scram-sha-256`,
+			`hostssl "all"  all_ro  203.0.113.0/24  scram-sha-256`,
+			`hostssl all  all  10.42.255.1/32  scram-sha-256`,
+			`host    all  all  0.0.0.0/0  reject`,
 		} {
 			if !strings.Contains(hba, want) {
 				t.Errorf("session=%v missing %q:\n%s", session, want, hba)
 			}
 		}
 
-		if strings.Contains(hba, "follower_app") || strings.Count(hba, "source_app  192.0.2.0/24") != 1 {
-			t.Errorf("follower or duplicate source roles: %s", hba)
-		}
-
-		if strings.Contains(hba, "hostnossl") || strings.Contains(hba, "hostssl all  all  0.0.0.0/0") {
-			t.Errorf("unexpected broad public access: %s", hba)
-		}
-
-		migrate := "hostssl all  source_migrate  2001:db8::/32  scram-sha-256"
+		migrate := `hostssl "alpha"  alpha_migrate  192.0.2.0/24  scram-sha-256`
 		if strings.Contains(hba, migrate) != session {
 			t.Errorf("session=%v migrate rule mismatch:\n%s", session, hba)
 		}
 
-		if strings.Contains(hba, "hostssl all  source_ro ") ||
-			strings.Index(hba, "all  10.42.255.1/32") > strings.Index(hba, "all  ::/0       reject") {
-			t.Errorf("expected private access but no public read-only rule: %s", hba)
+		for _, forbidden := range []string{
+			"invalid", "follower_app", "missing_app", "unsettled_app",
+			"alpha__restoring", "alpha__auth", "pgbouncer_app", "alpha_owner", "vaire_admin",
+			`hostssl all  alpha_app`, `hostssl "beta"  alpha_app`,
+		} {
+			if strings.Contains(hba, forbidden) {
+				t.Errorf("session=%v unexpected %q:\n%s", session, forbidden, hba)
+			}
 		}
-	}
-}
-
-func TestPoolerHBASharedMode(t *testing.T) {
-	hba := string(PgbouncerHBA(config.Cluster{Network: config.Network{ClientAllowlist: []string{"192.0.2.0/24"}}}, nil, nil))
-	if !strings.Contains(hba, "hostssl all  all  192.0.2.0/24  scram-sha-256") || strings.Contains(hba, "hostnossl") {
-		t.Fatal(hba)
 	}
 }

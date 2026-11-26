@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"net/netip"
 	"strconv"
 	"strings"
 
@@ -26,7 +25,6 @@ type interviewAnswers struct {
 	ClientConnections string
 	Profile           string
 	DefaultSize       string
-	Allowlist         string
 }
 
 // Interview question keys, used to skip what flags or --answers supplied.
@@ -39,7 +37,6 @@ const (
 	qDomain            = "domain"
 	qTLSMode           = "tls_mode"
 	qACMEEmail         = "acme_email"
-	qAllowlist         = "allowlist"
 	qProfile           = "profile"
 	qDefaultSize       = "default_size"
 	qClientConnections = "client_connections"
@@ -62,7 +59,6 @@ func suppliedAnswers(cmd *cobra.Command, cfg config.Cluster, fromFile bool) map[
 		qDomain:            given("domain", cfg.Domain != ""),
 		qTLSMode:           given("tls-mode", cfg.TLS.Mode != def.TLS.Mode),
 		qACMEEmail:         given("acme-email", cfg.ACMEEmail != "") || cfg.TLS.Mode == "self-signed",
-		qAllowlist:         given("allow", len(cfg.Network.ClientAllowlist) > 0),
 		qProfile:           given("profile", cfg.Postgres.Profile != def.Postgres.Profile),
 		qDefaultSize:       given("default-size", cfg.Postgres.DefaultSize != def.Postgres.DefaultSize),
 		qClientConnections: given("client-connections", cfg.Postgres.ClientConnections != def.Postgres.ClientConnections),
@@ -86,7 +82,6 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 		ClientConnections: strconv.Itoa(cfg.Postgres.ClientConnections),
 		Profile:           cfg.Postgres.Profile,
 		DefaultSize:       cfg.Postgres.DefaultSize,
-		Allowlist:         strings.Join(cfg.Network.ClientAllowlist, ", "),
 	}
 	ask := func(key string, field huh.Field, fields *[]huh.Field) {
 		if !supplied[key] {
@@ -113,10 +108,6 @@ func runInterview(_ *cobra.Command, cfg *config.Cluster, supplied map[string]boo
 		Title("TLS mode").
 		Options(huh.NewOption("ACME (Let's Encrypt)", "acme"), huh.NewOption("Self-signed", "self-signed")).
 		Value(&a.TLSMode), &endpoint)
-	ask(qAllowlist, huh.NewInput().
-		Title("Client allowlist (IPs or CIDRs, comma separated, empty for none)").
-		Validate(validateAllowlist).
-		Value(&a.Allowlist), &endpoint)
 	ask(qProfile, huh.NewSelect[string]().
 		Title("Workload profile").
 		Options(huh.NewOption("OLTP (web)", "oltp"), huh.NewOption("Mixed", "mixed"), huh.NewOption("Analytics", "analytics")).
@@ -189,8 +180,6 @@ func applyInterview(cfg *config.Cluster, a interviewAnswers) error {
 		cfg.Postgres.ClientConnections = n
 	}
 
-	cfg.Network.ClientAllowlist = allowlistPrefixes(splitList(a.Allowlist))
-
 	return nil
 }
 
@@ -240,16 +229,6 @@ func validateDomain(v string) error {
 	return config.CheckDomain(strings.TrimSpace(v))
 }
 
-func validateAllowlist(v string) error {
-	for _, entry := range allowlistPrefixes(splitList(v)) {
-		if err := config.CheckAllowlistEntry(entry); err != nil {
-			return fmt.Errorf("%s is not an IP address or CIDR", entry)
-		}
-	}
-
-	return nil
-}
-
 func validateClientConnections(v string) error {
 	if v = strings.TrimSpace(v); v == "" {
 		return nil
@@ -261,34 +240,4 @@ func validateClientConnections(v string) error {
 	}
 
 	return config.CheckClientConnections(n)
-}
-
-// allowlistPrefixes turns a bare IP address into its single-host prefix
-// (/32 or /128); anything else is kept for validation to report.
-func allowlistPrefixes(entries []string) []string {
-	for i, e := range entries {
-		if ip, err := netip.ParseAddr(e); err == nil {
-			entries[i] = netip.PrefixFrom(ip, ip.BitLen()).String()
-		}
-	}
-
-	return entries
-}
-
-// splitList splits a comma-separated list, dropping empties.
-func splitList(value string) []string {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-
-	parts := strings.Split(value, ",")
-
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-
-	return out
 }

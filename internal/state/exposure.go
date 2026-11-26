@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
 	"github.com/mbvlabs/vaire/internal/config"
@@ -12,18 +13,36 @@ import (
 
 // Keep the approval ceiling local to the node, outside the master bundle.
 type exposurePolicy struct {
-	Version int
-	Network config.Network
-	Metrics config.Metrics
-	Subnet  string
+	Version   int
+	Metrics   config.Metrics
+	Subnet    string
+	Databases []databaseExposure `json:",omitempty"`
+}
+
+type databaseExposure struct {
+	Name   string
+	Stanza string
+	CIDRs  []string
 }
 
 func policyOf(cfg config.Cluster) exposurePolicy {
-	return exposurePolicy{Version: 1, Network: cfg.Network, Metrics: cfg.Metrics, Subnet: cfg.Transport.Subnet}
+	p := exposurePolicy{Version: 1, Metrics: cfg.Metrics, Subnet: cfg.Transport.Subnet}
+	for _, db := range cfg.Clusters {
+		if len(db.ClientAllowlist) != 0 && db.Stanza != "" && db.Follows == "" {
+			p.Databases = append(p.Databases, databaseExposure{db.Name, db.Stanza, slices.Clone(db.ClientAllowlist)})
+		}
+	}
+
+	return p
 }
 
 func (p exposurePolicy) cluster() config.Cluster {
-	return config.Cluster{Network: p.Network, Metrics: p.Metrics, Transport: config.Transport{Subnet: p.Subnet}}
+	cfg := config.Cluster{Metrics: p.Metrics, Transport: config.Transport{Subnet: p.Subnet}}
+	for _, db := range p.Databases {
+		cfg.Clusters = append(cfg.Clusters, config.ClusterSpec{Name: db.Name, Stanza: db.Stanza, ClientAllowlist: slices.Clone(db.CIDRs)})
+	}
+
+	return cfg
 }
 
 func (s FileStore) exposureCeiling() (config.Cluster, error) {

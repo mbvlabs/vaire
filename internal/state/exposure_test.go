@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,12 +10,38 @@ import (
 	"github.com/mbvlabs/vaire/internal/config"
 )
 
-func TestEarlierEdgeApprovalDoesNotOpenBothPoolers(t *testing.T) {
+func TestDatabaseExposureDoesNotFollowNameReuse(t *testing.T) {
+	old := config.Cluster{Clusters: []config.ClusterSpec{
+		{Name: "app", Stanza: "app-123abc", ClientAllowlist: []string{"192.0.2.10/32"}},
+	}}
+
+	raw, err := json.Marshal(policyOf(old))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var saved exposurePolicy
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+
+	ceiling := saved.cluster()
+	if increases := config.ExposureIncreases(ceiling, old); len(increases) != 0 {
+		t.Fatalf("saved approval did not cover the original database: %v", increases)
+	}
+
+	old.Clusters[0].Stanza = "app-456def"
+	if increases := config.ExposureIncreases(ceiling, old); len(increases) == 0 {
+		t.Fatal("recreated database inherited approval")
+	}
+}
+
+func TestGlobalApprovalDoesNotAuthorizeDatabaseExposure(t *testing.T) {
 	store := FileStore{Path: filepath.Join(t.TempDir(), "cluster.toml")}
 	cfg := config.DefaultCluster()
-	cfg.Network.ClientAllowlist = []string{"192.0.2.10/32"}
+	cfg.Clusters = []config.ClusterSpec{{Name: "app", Stanza: "app-123abc", ClientAllowlist: []string{"192.0.2.10/32"}}}
 
-	prior := `{"Network":{"ClientAllowlist":["192.0.2.10/32"],"ExposePgbouncer":true,"ExposeSessionPooler":false}}`
+	prior := `{"Version":1,"Network":{"ClientAllowlist":["192.0.2.10/32"]}}`
 	if err := os.WriteFile(store.Path+".exposure", []byte(prior), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +60,7 @@ func TestEarlierEdgeApprovalDoesNotOpenBothPoolers(t *testing.T) {
 
 		return nil
 	}); err == nil {
-		t.Fatal("prior approval was accepted for both poolers")
+		t.Fatal("global approval was accepted for an individual database")
 	}
 }
 
@@ -43,7 +70,7 @@ func TestExposureApprovalCeiling(t *testing.T) {
 	closed.ClusterName = "fixture"
 	closed.Nodes = []config.NodeSpec{{Name: "db1", Role: config.RoleMaster, PublicAddress: "192.0.2.1", WGAddress: "10.42.0.1"}}
 	opened := closed
-	opened.Network.ClientAllowlist = []string{"192.0.2.10/32"}
+	opened.Clusters = []config.ClusterSpec{{Name: "app", Stanza: "app-123abc", ClientAllowlist: []string{"192.0.2.10/32"}}}
 
 	save := func(cfg config.Cluster, auth *exposureAuthorization) error {
 		t.Helper()

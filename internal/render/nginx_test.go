@@ -9,7 +9,7 @@ import (
 
 func TestNginxHTTPSOnly(t *testing.T) {
 	cfg := config.DefaultCluster()
-	cfg.Network.ClientAllowlist = []string{"203.0.113.7/32"}
+	cfg.Clusters = []config.ClusterSpec{{Name: "app", ClientAllowlist: []string{"203.0.113.7/32"}}}
 
 	conf := string(NginxConf(cfg, "db1.example.test", "/var/www/acme"))
 	for _, want := range []string{"listen 443 ssl default_server;", "listen [::]:443 ssl default_server;", "listen 80 default_server;", "root /var/www/acme;", "server_name db1.example.test;"} {

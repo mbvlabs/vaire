@@ -58,7 +58,7 @@ func CheckACMEEmail(v string) error {
 	return nil
 }
 
-// CheckAllowlistEntry checks one network.client_allowlist entry.
+// CheckAllowlistEntry checks one client or metrics allowlist entry.
 func CheckAllowlistEntry(v string) error {
 	if _, err := netip.ParsePrefix(v); err != nil {
 		return errors.New("is not a CIDR")
