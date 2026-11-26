@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/url"
@@ -256,7 +255,7 @@ func runWorkstationCopy(cmd *cobra.Command, p *progress, s *session, cfg config.
 	}
 
 	if err := restoreWorkstationCopy(ctx, s, endpoint, dest.Name, secret.Roles["migrate"].User, secret.Roles["migrate"].Password, spool, selection, extensions); err != nil {
-		return workstationCopyFailure(cmd, dest.Name, secret, "restore failed or its commit outcome is unknown")
+		return workstationCopyFailure(cmd, dest.Name, secret, err.Error())
 	}
 
 	cleaned = true
@@ -327,7 +326,7 @@ func prepareWorkstationSource(ctx context.Context, cmd *cobra.Command, p *progre
 		return backup.SourceSpec{}, nil, 0, nil, err
 	}
 
-	p.panel("Copy summary", []string{"Source: " + net.JoinHostPort(spec.Host, strconv.Itoa(spec.Port)) + " (database " + spec.Database + ")", "Destination: new database " + dest.Name, "The workstation exports a snapshot and restores it over WireGuard. Trust the source: dumps contain executable SQL.", "Destination space is checked using a source footprint estimate and reserves; it is not a quota or a guarantee.", "The destination identity check and restore use separate TLS-verified connections.", "The source is not modified apart from normal read/export load and locks. Credentials are shown once."})
+	p.panel("Copy summary", []string{"Source: " + net.JoinHostPort(spec.Host, strconv.Itoa(spec.Port)) + " (database " + spec.Database + ")", "Destination: new database " + dest.Name, "The workstation exports a snapshot and restores it over WireGuard. Trust the source: dumps contain executable SQL.", "Destination space is checked using a source footprint estimate and reserves; it is not a quota or a guarantee.", "Both destination connections use the authenticated WireGuard tunnel.", "The source is not modified apart from normal read/export load and locks. Credentials are shown once."})
 
 	if err := Confirm(cmd, dest.Name); err != nil {
 		return backup.SourceSpec{}, nil, 0, nil, err
@@ -344,24 +343,31 @@ func workstationCopyFailure(cmd *cobra.Command, name string, secret databaseSecr
 }
 
 func restoreWorkstationCopy(ctx context.Context, s *session, endpoint dbEndpoint, database, user, password string, spool *workstationCopySpool, selection *backup.TOCSelection, extensions []backup.SourceExtension) error {
-	// A separate, TLS-verified connection checks migrate's login and effective
-	// owner role. pg_restore makes another connection with the same parameters.
+	if err := checkWorkstationCopyDestination(ctx, s, endpoint, database, user, password, extensions); err != nil {
+		return err
+	}
+
+	return runWorkstationRestore(ctx, s, endpoint, database, user, password, spool, selection)
+}
+
+func checkWorkstationCopyDestination(ctx context.Context, s *session, endpoint dbEndpoint, database, user, password string, extensions []backup.SourceExtension) error {
 	cfg, err := pgx.ParseConfig("")
 	if err != nil {
-		return err
+		return errors.New("restore did not start: could not configure the destination connection")
 	}
 
 	cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database = endpoint.WGAddress, pgPort, user, password, database
 	cfg.ConnectTimeout, cfg.Fallbacks = 15*time.Second, nil
 	cfg.RuntimeParams = map[string]string{}
-	cfg.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: endpoint.Hostname}
+	// WireGuard authenticates the peer. TLS is still required by the pooler.
+	cfg.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: endpoint.Hostname, InsecureSkipVerify: true} //nolint:gosec // G402: the pinned WireGuard peer authenticates the destination.
 	cfg.DialFunc = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return s.dialer.DialContext(ctx, network, endpoint.addr(pgPort))
 	}
 
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
-		return errors.New("verified destination connection failed")
+		return errors.New("restore did not start: destination connection over WireGuard failed")
 	}
 
 	var sessionUser, currentUser, currentDB string
@@ -383,17 +389,23 @@ func restoreWorkstationCopy(ctx context.Context, s *session, endpoint dbEndpoint
 	closeWorkstationCopyConn(ctx, conn)
 
 	if err != nil {
-		return err
+		return errors.New("restore did not start: destination identity or extension check failed")
 	}
 
+	return nil
+}
+
+func runWorkstationRestore(ctx context.Context, s *session, endpoint dbEndpoint, database, user, password string, spool *workstationCopySpool, selection *backup.TOCSelection) error {
+	// Only fixed messages from this function reach the caller: child output and
+	// underlying errors may contain credentials, SQL or database object names.
 	restore, err := localenv.ClientPath("pg_restore")
 	if err != nil {
-		return err
+		return errors.New("restore did not start: bundled pg_restore is unavailable")
 	}
 
 	list, err := os.OpenFile(filepath.Join(spool.dir, "selection"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return err
+		return errors.New("restore did not start: could not create the private archive selection")
 	}
 
 	err = selection.WriteList(list)
@@ -402,7 +414,7 @@ func restoreWorkstationCopy(ctx context.Context, s *session, endpoint dbEndpoint
 	}
 
 	if err != nil {
-		return err
+		return errors.New("restore did not start: could not write the private archive selection")
 	}
 
 	passfile := filepath.Join(spool.dir, "target-passfile")
@@ -413,12 +425,12 @@ func restoreWorkstationCopy(ctx context.Context, s *session, endpoint dbEndpoint
 	}
 
 	if err := os.WriteFile(passfile, []byte(strings.Join(fields, ":")+"\n"), 0o600); err != nil {
-		return err
+		return errors.New("restore did not start: could not write the private destination passfile")
 	}
 
 	ln, port, err := listenLocal(ctx, defaultPostgresPort)
 	if err != nil {
-		return err
+		return errors.New("restore did not start: could not open the local WireGuard forward")
 	}
 
 	proxyCtx, cancel := context.WithCancel(ctx)
@@ -432,7 +444,7 @@ func restoreWorkstationCopy(ctx context.Context, s *session, endpoint dbEndpoint
 
 	child.WaitDelay = 3 * time.Second
 	if err := child.Run(); err != nil {
-		return fmt.Errorf("restore failed or was interrupted")
+		return errors.New("pg_restore failed or was interrupted; its commit outcome is unknown")
 	}
 
 	return nil
@@ -440,7 +452,7 @@ func restoreWorkstationCopy(ctx context.Context, s *session, endpoint dbEndpoint
 
 func workstationRestoreCommand(ctx context.Context, restore, dir, hostname string, port int, database, user, passfile string) *exec.Cmd {
 	child := exec.CommandContext(ctx, restore, "--exit-on-error", "--single-transaction", "--no-owner", "--no-acl", "--no-tablespaces", "--no-password", "--dbname", database, "--use-list", filepath.Join(dir, "selection"), filepath.Join(dir, "archive")) //nolint:gosec // restore is the managed client path.
-	child.Env = []string{"HOME=" + dir, "LC_ALL=C", "PGHOST=" + hostname, "PGHOSTADDR=127.0.0.1", "PGPORT=" + strconv.Itoa(port), "PGUSER=" + user, "PGDATABASE=" + database, "PGPASSFILE=" + passfile, "PGSSLMODE=verify-full", "PGSSLROOTCERT=system", "PGGSSENCMODE=disable", "PGCONNECT_TIMEOUT=15"}
+	child.Env = []string{"HOME=" + dir, "LC_ALL=C", "PGHOST=" + hostname, "PGHOSTADDR=127.0.0.1", "PGPORT=" + strconv.Itoa(port), "PGUSER=" + user, "PGDATABASE=" + database, "PGPASSFILE=" + passfile, "PGSSLMODE=require", "PGGSSENCMODE=disable", "PGCONNECT_TIMEOUT=15"}
 
 	return child
 }

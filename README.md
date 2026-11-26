@@ -251,9 +251,9 @@ postgres://app_migrate:…@db1.example.com:5432/app?sslmode=verify-full&sslrootc
 
 Creating, forking, restoring, resizing or dropping a database does not require any DNS or certificate changes.
 
-For a trusted external PostgreSQL source, `vaire db copy` makes a private temporary dump on your workstation, checks it, and restores it into a new database over verified TLS and WireGuard. Admins and members use the same flow. Your workstation must be able to reach the source; the VPS does not connect to it. The temporary dump is limited to 10 GiB. Copy does not overwrite an existing database or import source ownership, grants, or tablespaces. For unattended use, pass the source URL via `--source-url-stdin` and confirm the destination name with `--confirm`.
+For a trusted external PostgreSQL source, `vaire db copy` makes a private temporary dump on your workstation, checks it, and restores it into a new database through Vaire’s authenticated WireGuard tunnel. The destination session pooler still requires TLS, but copy authenticates the destination through WireGuard, not a second certificate check. Admins and members use the same flow. Your workstation must be able to reach the source; the VPS does not connect to it. The temporary dump is limited to 10 GiB. Copy does not overwrite an existing database or import source ownership, grants, or tablespaces. For unattended use, pass the source URL via `--source-url-stdin` and confirm the destination name with `--confirm`.
 
-Source TLS defaults to `verify-full`. For a source without PostgreSQL TLS, select `disable` in the source prompts or append `?sslmode=disable` to the source URL. Use this only on a trusted local connection or through a secure tunnel. Destination TLS is unchanged; Vaire never falls back to plaintext automatically.
+Source TLS defaults to `verify-full`. For a source without PostgreSQL TLS, select `disable` in the source prompts or append `?sslmode=disable` to the source URL. Use this only on a trusted local connection or through a secure tunnel. Vaire never falls back to plaintext automatically.
 
 ### Limits, said plainly
 

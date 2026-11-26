@@ -47,8 +47,8 @@ func TestWorkstationRestoreCommand(t *testing.T) {
 test "$PGHOST" = target.example || exit 1
 test "$PGHOSTADDR" = 127.0.0.1 || exit 2
 test "$PGPORT" = 6544 || exit 3
-test "$PGSSLMODE" = verify-full || exit 4
-test "$PGSSLROOTCERT" = system || exit 5
+test "$PGSSLMODE" = require || exit 4
+test -z "$PGSSLROOTCERT" || exit 5
 test "$PGUSER" = copy_migrate || exit 6
 test "$PGDATABASE" = copy || exit 7
 test -z "$PGOPTIONS" || exit 8
@@ -59,6 +59,7 @@ test "$*" = "--exit-on-error --single-transaction --no-owner --no-acl --no-table
 	}
 
 	t.Setenv("PGOPTIONS", "unsafe-inherited-option")
+	t.Setenv("PGSSLROOTCERT", "unsafe-inherited-ca")
 
 	cmd := workstationRestoreCommand(context.Background(), tool, dir, "target.example", 6544, "copy", "copy_migrate", filepath.Join(dir, "pass"))
 	if err := cmd.Run(); err != nil {

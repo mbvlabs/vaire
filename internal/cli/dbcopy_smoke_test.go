@@ -65,9 +65,8 @@ func TestWorkstationCopyPlaintextSourceSmoke(t *testing.T) {
 	}
 }
 
-// This opt-in test uses only an explicitly supplied disposable local fixture.
-// SSL_CERT_FILE is added to the child solely to trust that fixture's ephemeral
-// CA; production intentionally does not inherit that environment variable.
+// This opt-in test uses a disposable local fixture with an untrusted server
+// certificate. Loopback substitutes for the authenticated destination tunnel.
 func TestWorkstationCopyRealArchiveSmoke(t *testing.T) {
 	portText := os.Getenv("VAIRE_COPY_SMOKE_PORT")
 	if portText == "" {
@@ -169,13 +168,25 @@ func TestWorkstationCopyRealArchiveSmoke(t *testing.T) {
 	}
 
 	child := workstationRestoreCommand(ctx, filepath.Join(client, "pg_restore"), spool.dir, "localhost", port, "target", "target_migrate", passfile)
+	checkOldWorkstationTrustPolicy(t, ctx, client, child.Env)
 
-	child.Env = append(child.Env, "SSL_CERT_FILE="+caFile)
 	if out, err := child.CombinedOutput(); err != nil {
 		t.Fatalf("restore: %v: %s", err, out)
 	}
 
 	checkWorkstationSmokeData(t, ctx, port, ca)
+}
+
+func checkOldWorkstationTrustPolicy(t *testing.T, ctx context.Context, client string, env []string) {
+	t.Helper()
+
+	probe := exec.CommandContext(ctx, filepath.Join(client, "psql"), "-X", "-w", "-Atqc", "SELECT 1")
+
+	probe.Env = append(append([]string(nil), env...), "PGSSLMODE=verify-full", "PGSSLROOTCERT=system")
+
+	if out, err := probe.CombinedOutput(); err == nil || !strings.Contains(string(out), "certificate verify failed") {
+		t.Fatalf("old libpq policy did not reproduce the CA failure: %v: %s", err, out)
+	}
 }
 
 func checkWorkstationSmokeData(t *testing.T, ctx context.Context, port int, ca []byte) {

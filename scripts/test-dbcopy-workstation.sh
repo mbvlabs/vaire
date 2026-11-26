@@ -20,6 +20,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
   -addext 'subjectAltName=DNS:localhost' -keyout "$work/server.key" -out "$work/server.crt" >/dev/null 2>&1
 chmod 600 "$work/server.key"
 "$pgbin/initdb" -D "$work/data" -A trust -U vaire >/dev/null
+# The destination requires PostgreSQL TLS, like the Vaire session pooler.
+{ printf 'hostnossl target all 127.0.0.1/32 reject\n'; cat "$work/data/pg_hba.conf"; } > "$work/pg_hba.conf"
+mv "$work/pg_hba.conf" "$work/data/pg_hba.conf"
 "$pgbin/pg_ctl" -D "$work/data" -l "$work/server.log" \
   -o "-c listen_addresses=127.0.0.1 -c port=$port -c unix_socket_directories=$work -c ssl=on -c ssl_cert_file=$work/server.crt -c ssl_key_file=$work/server.key -c shared_preload_libraries=pg_stat_statements" -w start >/dev/null
 started=1
