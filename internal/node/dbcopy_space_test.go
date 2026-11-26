@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,6 +15,8 @@ import (
 
 func TestWorkstationCopySpace(t *testing.T) {
 	old := workstationCopyFreeBytes
+	parent := t.TempDir()
+	dataRoot := filepath.Join(parent, "postgresql", "18")
 
 	t.Cleanup(func() { workstationCopyFreeBytes = old })
 
@@ -26,14 +30,14 @@ func TestWorkstationCopySpace(t *testing.T) {
 		reason string
 	}{{need, true, ""}, {need - 1, true, "insufficient_copy_space"}, {0, false, "copy_space_unavailable"}} {
 		workstationCopyFreeBytes = func(path string) (uint64, bool) {
-			if path != "/data" {
+			if path != parent {
 				t.Errorf("wrong filesystem: %s", path)
 			}
 
 			return tc.free, tc.ok
 		}
 
-		err := checkWorkstationCopySpace("/data", size)
+		err := checkWorkstationCopySpace(dataRoot, size)
 		if tc.reason == "" {
 			if err != nil {
 				t.Fatal(err)
@@ -45,6 +49,10 @@ func TestWorkstationCopySpace(t *testing.T) {
 		}
 	}
 
+	if _, err := os.Lstat(dataRoot); !os.IsNotExist(err) {
+		t.Fatalf("space check should not create the data root: %v", err)
+	}
+
 	workstationCopyFreeBytes = hostinfo.FreeBytes
 
 	if err := checkWorkstationCopySpace(t.TempDir(), math.MaxInt64/2-(3<<30)); err == nil {
@@ -52,8 +60,33 @@ func TestWorkstationCopySpace(t *testing.T) {
 	}
 }
 
+func TestWorkstationCopyDataFilesystem(t *testing.T) {
+	parent := t.TempDir()
+	file := filepath.Join(parent, "file")
+	link := filepath.Join(parent, "link")
+
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Symlink(filepath.Join(parent, "missing"), link); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{file, filepath.Join(file, "18"), link, filepath.Join(link, "18"), "relative"} {
+		if got, ok := workstationCopyDataFilesystem(path); ok {
+			t.Errorf("accepted invalid data root %q as %q", path, got)
+		}
+	}
+
+	if got, ok := workstationCopyDataFilesystem(parent); !ok || got != parent {
+		t.Fatalf("existing data root: got %q, %t", got, ok)
+	}
+}
+
 func TestCopyAdmissionBeforeTopologyWrite(t *testing.T) {
 	cfg := followerLifecycleCfg(t)
+	cfg.Server.DataRoot = filepath.Join(t.TempDir(), "postgresql", "18")
 	env, store := resizeFixture(t, cfg, "", false)
 	env.Req = request("db.create", map[string]any{"name": "newdb", "size": "small", "copy_source_bytes": int64(1 << 30)})
 	env.Req.Secrets = copyRoleSecrets("newdb")

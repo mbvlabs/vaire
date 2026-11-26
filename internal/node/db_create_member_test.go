@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/mbvlabs/vaire/internal/cli/output"
@@ -55,14 +56,30 @@ func TestMemberCreateRejectsUnsafeInputs(t *testing.T) {
 }
 
 func TestMemberCreateProvisionsWithOnlyDatabaseSecrets(t *testing.T) {
+	t.Run("empty database", func(t *testing.T) { testMemberCreateProvisions(t, false) })
+	t.Run("first database via copy", func(t *testing.T) { testMemberCreateProvisions(t, true) })
+}
+
+func testMemberCreateProvisions(t *testing.T, copyDB bool) {
+	t.Helper()
+
 	oldSeed := memberCreateCredentialCheck
 	memberCreateCredentialCheck = func() error { return nil }
 
 	t.Cleanup(func() { memberCreateCredentialCheck = oldSeed })
 	cfg := followerLifecycleCfg(t)
+	parent := t.TempDir()
+	cfg.Clusters = nil
+	cfg.Server.DataRoot = filepath.Join(parent, "postgresql", "18")
 	env, store := resizeFixture(t, cfg, "", false)
 	env.DeviceIdentity = &rpc.WhoamiReply{Role: config.AccessRoleMember, OperatorID: "op-member"}
-	env.Req = request("db.create", map[string]any{"name": "newdb", "size": "small"})
+
+	params := map[string]any{"name": "newdb", "size": "small"}
+	if copyDB {
+		params["copy_source_bytes"] = int64(1 << 30)
+	}
+
+	env.Req = request("db.create", params)
 	env.Req.Secrets = copyRoleSecrets("newdb")
 
 	fixedResizeHost(t, hostinfo.Info{VCPU: 8, RAMMiB: 8192, DataDisk: hostinfo.Disk{SizeGiB: 100}},
@@ -71,12 +88,25 @@ func TestMemberCreateProvisionsWithOnlyDatabaseSecrets(t *testing.T) {
 	oldExists, oldStarts := createClusterExists, addDatabaseCheckStarts
 	oldKernel, oldNew, oldPoolers := createApplyKernel, createApplyNewCluster, createReloadPoolers
 	oldMetrics, oldOthers, oldBackup := createApplyMetrics, createApplyOtherConfigs, createFirstBackup
+	oldFree := workstationCopyFreeBytes
 
 	t.Cleanup(func() {
 		createClusterExists, addDatabaseCheckStarts = oldExists, oldStarts
 		createApplyKernel, createApplyNewCluster, createReloadPoolers = oldKernel, oldNew, oldPoolers
 		createApplyMetrics, createApplyOtherConfigs, createFirstBackup = oldMetrics, oldOthers, oldBackup
+		workstationCopyFreeBytes = oldFree
 	})
+
+	checked := false
+	workstationCopyFreeBytes = func(path string) (uint64, bool) {
+		checked = true
+
+		if path != parent {
+			t.Errorf("checked %q instead of existing parent %q", path, parent)
+		}
+
+		return 69 << 30, true
+	}
 
 	createClusterExists = func(context.Context, string) bool { return false }
 	addDatabaseCheckStarts = func(config.Cluster, config.ClusterSpec, hostinfo.Info, int) error { return nil }
@@ -111,8 +141,8 @@ func TestMemberCreateProvisionsWithOnlyDatabaseSecrets(t *testing.T) {
 	}
 
 	result, err := handleDBCreate(context.Background(), env)
-	if err != nil || !called {
-		t.Fatalf("create: called=%v err=%v", called, err)
+	if err != nil || !called || checked != copyDB {
+		t.Fatalf("create: provisioned=%v spaceChecked=%v err=%v", called, checked, err)
 	}
 
 	db := memberCreatedDB(t, result)
