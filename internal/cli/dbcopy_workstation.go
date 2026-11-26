@@ -229,7 +229,7 @@ func workstationAllowedTOCEntry(entry backup.ArchiveEntry, disallowed, allowed [
 			case "SEQUENCE OWNED BY":
 				// namespace, sequence, owner
 				valid = len(fields) == 3 && fields[0] != "-" && fields[1] != "-" && fields[2] != "-"
-			case "DEFAULT", "CONSTRAINT":
+			case "DEFAULT", "CONSTRAINT", "FK CONSTRAINT":
 				// namespace, table, column or constraint, owner
 				valid = len(fields) == 4 && fields[0] != "-" && fields[1] != "-" && fields[2] != "-" && fields[3] != "-"
 			case "FUNCTION", "PROCEDURE":

@@ -38,6 +38,9 @@ CREATE SEQUENCE items_id_seq;
 CREATE TABLE items (id integer NOT NULL, value integer NOT NULL);
 INSERT INTO items VALUES (nextval('items_id_seq'), 19), (nextval('items_id_seq'), 23);
 CREATE INDEX items_value_idx ON items(value);
+CREATE TABLE item_values (value integer PRIMARY KEY);
+INSERT INTO item_values VALUES (19), (23);
+ALTER TABLE items ADD CONSTRAINT items_value_fkey FOREIGN KEY (value) REFERENCES item_values(value);
 CREATE FUNCTION add_one(integer) RETURNS integer LANGUAGE SQL IMMUTABLE RETURN $1 + 1;
 CREATE FUNCTION add_two(integer, integer) RETURNS integer LANGUAGE SQL IMMUTABLE RETURN $1 + $2;
 SQL

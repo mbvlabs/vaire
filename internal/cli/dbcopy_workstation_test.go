@@ -204,6 +204,7 @@ func TestWorkstationTOCSerialShapes(t *testing.T) {
 		{"SEQUENCE OWNED BY public items_id_seq vaire", true},
 		{"DEFAULT public items id vaire", true},
 		{"CONSTRAINT public items items_pkey vaire", true},
+		{"FK CONSTRAINT public items items_parent_fkey vaire", true},
 		{"SEQUENCE OWNED BY public items_id_seq", false},
 		{"SEQUENCE OWNED BY public items_id_seq extra vaire", false},
 		{"DEFAULT public items vaire", false},
@@ -213,6 +214,8 @@ func TestWorkstationTOCSerialShapes(t *testing.T) {
 		{"DEFAULT - items id vaire", false},
 		{"DEFAULT ACL public items id vaire", false},
 		{"CONSTRAINT public items items_pkey -", false},
+		{"FK CONSTRAINT public items vaire", false},
+		{"FK CONSTRAINT public items items_parent_fkey extra vaire", false},
 	} {
 		t.Run(tc.rest, func(t *testing.T) {
 			err := workstationAllowedTOC(backup.ArchiveTOC{Entries: []backup.ArchiveEntry{{Rest: tc.rest}}})

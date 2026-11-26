@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mbvlabs/vaire/internal/backup"
 )
 
@@ -228,5 +230,12 @@ func checkWorkstationSmokeData(t *testing.T, ctx context.Context, port int, ca [
 	err = conn.QueryRow(ctx, `select to_regclass('public.items_value_idx')::text, to_regprocedure('public.add_one(integer)')::text, (select extversion from pg_extension where extname='pg_stat_statements'), (select pg_get_userbyid(relowner) from pg_class where oid='public.items'::regclass)`).Scan(&index, &function, &extension, &owner)
 	if err != nil || index != "items_value_idx" || function != "add_one(integer)" || extension != "1.12" || owner != "target_owner" {
 		t.Fatalf("objects: index=%q function=%q extension=%q owner=%q: %v", index, function, extension, owner, err)
+	}
+
+	_, err = conn.Exec(ctx, "insert into items values (999, -1)")
+
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	if !ok || pgErr.Code != "23503" || pgErr.ConstraintName != "items_value_fkey" {
+		t.Fatalf("restored foreign key did not reject an orphan row: %v", err)
 	}
 }
