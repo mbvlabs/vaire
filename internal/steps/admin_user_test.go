@@ -21,7 +21,7 @@ func TestAdminUserRejectsRootBeforeLoadingOperators(t *testing.T) {
 	cfg := config.DefaultCluster()
 	cfg.Server.AdminUser = "root"
 
-	_, err := renderAdminUser(cfg)
+	_, err := (adminUser{}).render(cfg)
 	if err == nil || !strings.Contains(err.Error(), "other than root") {
 		t.Fatalf("root admin error = %v", err)
 	}

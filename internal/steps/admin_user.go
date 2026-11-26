@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -20,7 +21,11 @@ const SudoersPath = "/etc/sudoers.d/vaire"
 // SecretSudoPassword is the request secret holding the break-glass SSH password.
 const SecretSudoPassword = "sudo_password"
 
-type adminUser struct{}
+type adminUser struct {
+	// Empty in production. Tests use disposable registry files.
+	operatorsPath string
+	devicesPath   string
+}
 
 func (adminUser) ID() string { return adminUserID }
 
@@ -36,12 +41,57 @@ type adminUserRender struct {
 	Sudoers        string `json:"sudoers"`
 }
 
-func renderAdminUser(cfg config.Cluster) (adminUserRender, error) {
+func (s adminUser) operatorFile() string {
+	if s.operatorsPath != "" {
+		return s.operatorsPath
+	}
+
+	return config.OperatorsPath
+}
+
+func (s adminUser) SkipReason(cfg config.Cluster) string {
+	operatorFile := s.operatorFile()
+	if info, err := os.Stat(operatorFile); err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+
+	ops, err := config.LoadOperators(operatorFile)
+	if err != nil || len(ops.Operators) != 0 {
+		return ""
+	}
+
+	path := s.devicesPath
+	if path == "" {
+		path = config.AccessDevicesPath
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+
+	registry, err := config.DecodeAccessRegistry(raw)
+	if err != nil {
+		return ""
+	}
+
+	// Setup retires its temporary operator only after installing managed
+	// device access. A failed or stale journal entry cannot re-run setup.
+	for _, op := range registry.Operators {
+		if op.BootstrapOwner && op.Name == cfg.Server.AdminUser {
+			return "bootstrap_access_retired"
+		}
+	}
+
+	return ""
+}
+
+func (s adminUser) render(cfg config.Cluster) (adminUserRender, error) {
 	if err := config.CheckAdminUser(cfg.Server.AdminUser); err != nil {
 		return adminUserRender{}, fmt.Errorf("server.admin_user: %w", err)
 	}
 
-	ops, err := config.LoadOperators(config.OperatorsPath)
+	ops, err := config.LoadOperators(s.operatorFile())
 	if err != nil {
 		return adminUserRender{}, err
 	}
@@ -77,8 +127,8 @@ func adminSudoers(user string) string {
 		user + " ALL=(root) NOPASSWD: /usr/local/bin/vaire node rpc\n"
 }
 
-func (adminUser) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
-	r, err := renderAdminUser(cfg)
+func (s adminUser) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
+	r, err := s.render(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -86,8 +136,8 @@ func (adminUser) Inputs(cfg config.Cluster, _ engine.Runtime) ([]byte, error) {
 	return canonical(r)
 }
 
-func (adminUser) Check(_ context.Context, cfg config.Cluster, _ engine.Runtime) (engine.CheckResult, error) {
-	r, err := renderAdminUser(cfg)
+func (s adminUser) Check(_ context.Context, cfg config.Cluster, _ engine.Runtime) (engine.CheckResult, error) {
+	r, err := s.render(cfg)
 	if err != nil {
 		return engine.CheckResult{}, err
 	}
@@ -146,7 +196,7 @@ func (s adminUser) Apply(ctx context.Context, cfg config.Cluster, rt engine.Runt
 			output.ExitPrecondition, "Use the provider console to apply the admin-user-v1 step.")
 	}
 
-	r, err := renderAdminUser(cfg)
+	r, err := s.render(cfg)
 	if err != nil {
 		return engine.ApplyResult{}, err
 	}
