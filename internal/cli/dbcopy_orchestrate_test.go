@@ -13,9 +13,29 @@ func TestWorkstationSourceSpec(t *testing.T) {
 	if err != nil || spec.Host != "db.example" || spec.Port != 5432 || spec.Database != "app" || spec.Password != "p:ss" || spec.TLSMode != "verify-full" {
 		t.Fatalf("source parsing failed: %v", err)
 	}
+}
 
-	if _, err := workstationSourceSpec(copySourceInput{URL: "postgres://alice:secret@db.example/app?sslmode=disable"}); err == nil {
-		t.Fatal("accepted disabled TLS")
+func TestWorkstationSourceTLSSelection(t *testing.T) {
+	const source = "postgres://alice@localhost/app"
+	for _, tc := range []struct{ query, ca, want string }{
+		{"", "", "verify-full"},
+		{"?sslmode=disable", "", "disable"},
+		{"?sslmode=disable", "unexpected CA", ""},
+		{"?sslmode=prefer", "", ""},
+		{"?sslmode=allow", "", ""},
+	} {
+		spec, err := workstationSourceSpec(copySourceInput{URL: source + tc.query, CA: tc.ca})
+		if tc.want == "" {
+			if err == nil {
+				t.Errorf("accepted %q with CA=%t", tc.query, tc.ca != "")
+			}
+
+			continue
+		}
+
+		if err != nil || spec.TLSMode != tc.want {
+			t.Errorf("mode for %q = %q, %v; want %q", tc.query, spec.TLSMode, err, tc.want)
+		}
 	}
 }
 

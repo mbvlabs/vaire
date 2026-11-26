@@ -34,7 +34,7 @@ func workstationSourceSpec(input copySourceInput) (backup.SourceSpec, error) {
 	var spec backup.SourceSpec
 
 	if input.URL != "" {
-		src, err := backup.ParseSourceURL(input.URL)
+		src, err := backup.ParseWorkstationSourceURL(input.URL)
 		if err != nil {
 			return spec, err
 		}
@@ -59,7 +59,7 @@ func workstationSourceSpec(input copySourceInput) (backup.SourceSpec, error) {
 		spec.CACert = []byte(input.CA)
 	}
 
-	src, err := backup.NewSource(spec)
+	src, err := backup.NewWorkstationSource(spec)
 	if err != nil {
 		return backup.SourceSpec{}, err
 	}
@@ -119,6 +119,8 @@ func workstationSourceInventoryAndSize(ctx context.Context, spec backup.SourceSp
 		}
 	case backup.SourceTLSRequire:
 		tlsConfig.InsecureSkipVerify = true // Explicit source require mode.
+	case backup.SourceTLSDisable:
+		tlsConfig = nil // Explicit source-only plaintext; no fallback is configured.
 	default:
 		return nil, 0, errors.New("unsupported source TLS mode")
 	}
@@ -302,7 +304,7 @@ func prepareWorkstationSource(ctx context.Context, cmd *cobra.Command, p *progre
 		return backup.SourceSpec{}, nil, 0, nil, err
 	}
 
-	validatedSource, err := backup.NewSource(spec)
+	validatedSource, err := backup.NewWorkstationSource(spec)
 	if err != nil {
 		return backup.SourceSpec{}, nil, 0, nil, err
 	}

@@ -46,6 +46,7 @@ const (
 	SourceTLSVerifyFull = "verify-full"
 	SourceTLSVerifyCA   = "verify-ca"
 	SourceTLSRequire    = "require"
+	SourceTLSDisable    = "disable"
 )
 
 const (
@@ -169,6 +170,15 @@ func ParseSourceURL(raw string) (Source, error) {
 
 // ParseSourceURLWithRegistry is ParseSourceURL with an explicit registry.
 func ParseSourceURLWithRegistry(reg *secrets.Registry, raw string) (Source, error) {
+	return parseSourceURL(reg, raw, false)
+}
+
+// ParseWorkstationSourceURL permits explicit plaintext for a local copy only.
+func ParseWorkstationSourceURL(raw string) (Source, error) {
+	return parseSourceURL(secrets.Default, raw, true)
+}
+
+func parseSourceURL(reg *secrets.Registry, raw string, workstation bool) (Source, error) {
 	if reg == nil {
 		reg = secrets.Default
 	}
@@ -211,14 +221,14 @@ func ParseSourceURLWithRegistry(reg *secrets.Registry, raw string) (Source, erro
 		return Source{}, err
 	}
 
-	return NewSourceWithRegistry(reg, SourceSpec{
+	return newSource(reg, SourceSpec{
 		Host:     host,
 		Port:     port,
 		Database: database,
 		User:     username,
 		Password: password,
 		TLSMode:  tlsMode,
-	})
+	}, workstation)
 }
 
 // validateSourceURLText rejects the empty, oversized and multi-line forms
@@ -359,6 +369,15 @@ func NewSource(spec SourceSpec) (Source, error) {
 // NewSourceWithRegistry is NewSource with an explicit registry. The
 // password is registered before validation so it cannot appear in any error.
 func NewSourceWithRegistry(reg *secrets.Registry, spec SourceSpec) (Source, error) {
+	return newSource(reg, spec, false)
+}
+
+// NewWorkstationSource permits explicit plaintext for a local copy only.
+func NewWorkstationSource(spec SourceSpec) (Source, error) {
+	return newSource(secrets.Default, spec, true)
+}
+
+func newSource(reg *secrets.Registry, spec SourceSpec, workstation bool) (Source, error) {
 	if reg == nil {
 		reg = secrets.Default
 	}
@@ -395,9 +414,10 @@ func NewSourceWithRegistry(reg *secrets.Registry, spec SourceSpec) (Source, erro
 		tlsMode = SourceTLSVerifyFull
 	}
 
-	switch tlsMode {
-	case SourceTLSVerifyFull, SourceTLSVerifyCA, SourceTLSRequire:
-	case "disable", "allow", "prefer":
+	switch {
+	case tlsMode == SourceTLSVerifyFull, tlsMode == SourceTLSVerifyCA, tlsMode == SourceTLSRequire:
+	case workstation && tlsMode == SourceTLSDisable:
+	case tlsMode == SourceTLSDisable, tlsMode == "allow", tlsMode == "prefer":
 		return Source{}, sourceInputError("source_tls_weak", "the source URL asks for an unencrypted or downgradeable TLS mode", "Use sslmode=verify-full, verify-ca or require; vaire never falls back to plaintext.")
 	default:
 		return Source{}, sourceInputError("invalid_source_tls", "the source TLS mode must be verify-full, verify-ca or require", "Use sslmode=verify-full, verify-ca or require.")
@@ -408,6 +428,10 @@ func NewSourceWithRegistry(reg *secrets.Registry, spec SourceSpec) (Source, erro
 	}
 
 	if len(spec.CACert) > 0 {
+		if tlsMode == SourceTLSDisable {
+			return Source{}, sourceInputError("invalid_source_ca", "a source CA certificate cannot be used with sslmode=disable", "Use verify-full or verify-ca, or remove the CA.")
+		}
+
 		if tlsMode == SourceTLSRequire {
 			return Source{}, sourceInputError("invalid_source_ca", "a source CA certificate cannot be used with sslmode=require", "Use verify-full or verify-ca, or remove the CA.")
 		}
@@ -432,6 +456,11 @@ func NewSourceWithRegistry(reg *secrets.Registry, spec SourceSpec) (Source, erro
 // TLSWarning returns the warning to show for a weaker explicit TLS mode.
 func (s Source) TLSWarning() (output.Warning, bool) {
 	switch s.TLSMode {
+	case SourceTLSDisable:
+		return output.Warning{
+			Code:    "source_tls_disabled",
+			Message: "PostgreSQL TLS is disabled for the source. Use this only on a trusted local connection or inside a secure tunnel.",
+		}, true
 	case SourceTLSRequire:
 		return output.Warning{
 			Code:    "source_tls_unverified",

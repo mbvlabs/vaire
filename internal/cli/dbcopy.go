@@ -441,6 +441,7 @@ func promptCopySourceFields(cmd *cobra.Command) (*node.CopySourceSecret, error) 
 		{"verify-full (verify the certificate and hostname; default)", backup.SourceTLSVerifyFull},
 		{"verify-ca (verify the certificate, not the hostname)", backup.SourceTLSVerifyCA},
 		{"require (encrypt but do not verify; vaire warns)", backup.SourceTLSRequire},
+		{"disable (no PostgreSQL TLS; use a trusted local connection or secure tunnel)", backup.SourceTLSDisable},
 	})
 	if err != nil {
 		return nil, err

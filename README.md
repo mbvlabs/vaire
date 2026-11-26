@@ -253,6 +253,8 @@ Creating, forking, restoring, resizing or dropping a database does not require a
 
 For a trusted external PostgreSQL source, `vaire db copy` makes a private temporary dump on your workstation, checks it, and restores it into a new database over verified TLS and WireGuard. Admins and members use the same flow. Your workstation must be able to reach the source; the VPS does not connect to it. The temporary dump is limited to 10 GiB. Copy does not overwrite an existing database or import source ownership, grants, or tablespaces. For unattended use, pass the source URL via `--source-url-stdin` and confirm the destination name with `--confirm`.
 
+Source TLS defaults to `verify-full`. For a source without PostgreSQL TLS, select `disable` in the source prompts or append `?sslmode=disable` to the source URL. Use this only on a trusted local connection or through a secure tunnel. Destination TLS is unchanged; Vaire never falls back to plaintext automatically.
+
 ### Limits, said plainly
 
 - **Isolation is cgroups, not a VM.** Each cluster's `MemoryHigh` (its memory plus 25%), CPU weight and I/O weight are set by systemd; a hard `memory_max` or `cpu_quota` is opt-in. `MemoryHigh` throttles, it doesn't partition. A managed provider's VM is a harder boundary.

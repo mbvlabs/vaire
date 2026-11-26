@@ -35,7 +35,7 @@ func dumpWorkstationSource(ctx context.Context, spec backup.SourceSpec) (*workst
 }
 
 func dumpWorkstationSourceWithTool(ctx context.Context, tool string, spec backup.SourceSpec) (_ *workstationCopySpool, err error) {
-	src, err := backup.NewSource(spec)
+	src, err := backup.NewWorkstationSource(spec)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func dumpWorkstationSourceWithTool(ctx context.Context, tool string, spec backup
 
 	dumpCtx, cancel := context.WithTimeout(ctx, 6*time.Hour)
 	defer cancel()
-	// tool is resolved from the managed bundle; NewSource validated the
+	// tool is resolved from the managed bundle; NewWorkstationSource validated the
 	// connection fields, which are passed as separate arguments, not shell text.
 	cmd := exec.CommandContext(dumpCtx, tool, "--format=custom", "--no-acl", "--no-password", //nolint:gosec // G204: fixed managed tool and validated source arguments.
 		"--host", src.Host, "--port", strconv.Itoa(src.Port), "--username", src.User, "--dbname", src.Database)

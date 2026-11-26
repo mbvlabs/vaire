@@ -46,3 +46,10 @@ SQL
 umask 0077
 VAIRE_COPY_SMOKE_PORT="$port" VAIRE_COPY_SMOKE_CA="$work/server.crt" VAIRE_COPY_SMOKE_CLIENT="$client" \
   go test ./internal/cli -run '^TestWorkstationCopyRealArchiveSmoke$' -count=1 -v
+"$pgbin/pg_ctl" -D "$work/data" -m fast -w stop >/dev/null
+started=0
+"$pgbin/pg_ctl" -D "$work/data" -l "$work/server.log" \
+  -o "-c listen_addresses=127.0.0.1 -c port=$port -c unix_socket_directories=$work -c ssl=off" -w start >/dev/null
+started=1
+VAIRE_COPY_SMOKE_PLAINTEXT_PORT="$port" VAIRE_COPY_SMOKE_CLIENT="$client" \
+  go test ./internal/cli -run '^TestWorkstationCopyPlaintextSourceSmoke$' -count=1 -v

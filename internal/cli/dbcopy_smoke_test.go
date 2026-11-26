@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +16,52 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/mbvlabs/vaire/internal/backup"
 )
+
+func TestWorkstationCopyPlaintextSourceSmoke(t *testing.T) {
+	port := os.Getenv("VAIRE_COPY_SMOKE_PLAINTEXT_PORT")
+	if port == "" {
+		t.Skip("no disposable plaintext source supplied")
+	}
+
+	source := "postgres://vaire@127.0.0.1:" + port + "/source_serial"
+
+	spec, err := workstationSourceSpec(copySourceInput{URL: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := workstationSourceInventory(t.Context(), spec); err == nil {
+		t.Fatal("default TLS mode silently fell back to plaintext")
+	}
+
+	spec, err = workstationSourceSpec(copySourceInput{URL: source + "?sslmode=disable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	extensions, err := workstationSourceInventory(t.Context(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := os.Getenv("VAIRE_COPY_SMOKE_CLIENT")
+
+	spool, err := dumpWorkstationSourceWithTool(t.Context(), filepath.Join(client, "pg_dump"), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() { _ = spool.remove() }()
+
+	if !slices.ContainsFunc(extensions, func(ext backup.SourceExtension) bool { return ext.Name == "plpgsql" }) {
+		t.Fatal("missing source extension inventory")
+	}
+
+	plan := []backup.SourceExtension{{Name: "plpgsql", Version: "1.0", Schema: "pg_catalog"}}
+	if _, err := inspectWorkstationArchiveWithTool(t.Context(), filepath.Join(client, "pg_restore"), spool, spec.Database, extensions, plan); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // This opt-in test uses only an explicitly supplied disposable local fixture.
 // SSL_CERT_FILE is added to the child solely to trust that fixture's ephemeral
