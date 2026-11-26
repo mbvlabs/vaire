@@ -1,4 +1,7 @@
 version: "2"
+formatters:
+  enable:
+    - gofmt
 output:
   formats:
     format: colored-line-number

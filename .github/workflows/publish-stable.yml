@@ -68,8 +68,6 @@ jobs:
           }
       - name: Check release tooling
         run: |
-          mapfile -t go_files < <(git ls-files '*.go')
-          test -z "$(gofmt -l "${go_files[@]}")"
           go vet ./...
           just lint
           go test ./internal/release/... ./internal/remote ./internal/upgrade

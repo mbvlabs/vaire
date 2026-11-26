@@ -117,7 +117,7 @@ func TestWindowLeft(t *testing.T) {
 func TestOpenAllowlists(t *testing.T) {
 	cfg := config.Cluster{
 		Clusters: []config.ClusterSpec{{Name: "app", ClientAllowlist: []string{"0.0.0.0/0", "10.0.0.0/8"}}},
-		Metrics: config.Metrics{Allowlist: []string{"::/0"}},
+		Metrics:  config.Metrics{Allowlist: []string{"::/0"}},
 	}
 
 	got := openAllowlists(cfg)
