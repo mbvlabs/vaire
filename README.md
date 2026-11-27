@@ -2,130 +2,83 @@
 
 # Vairë (`vaire`)
 
-Run PostgreSQL 18 on your own VPS with one CLI for setup, operations, and recovery.
+Run PostgreSQL 18 on your own VPS. Use one CLI for setup, day-to-day operations, and recovery.
 
-`vaire` provisions a fresh Debian 13 or Ubuntu 26.04 server. Each database gets its own PostgreSQL cluster, resource limits, and, when backups are configured, a separate backup and restore history. Operators manage the server over SSH inside WireGuard; applications connect with standard PostgreSQL clients through PgBouncer. There is no server control daemon or public management API.
+- **A PostgreSQL cluster per database.** Each database has its own settings, resource limits, and restart. Applications use standard PostgreSQL clients through PgBouncer.
+- **Private by default.** Operators connect over WireGuard with per-device keys. Admins can SSH to the VPS; members have no host shell. Public database access is opt-in per database.
+- **Offsite backup and recovery.** Enable backups to an S3-compatible bucket for per-database point-in-time recovery. An encrypted recovery kit lets you rebuild on a replacement VPS even if you've lost your original device.
 
-> **Release candidate:** Use a fresh server dedicated to Vaire. The current stack uses PgBouncer and Vaire-managed nginx; it does not migrate existing Caddy installs. Multi-node management and in-place extension removal are not supported.
+Vaire manages one dedicated Debian 13 or Ubuntu 26.04 VPS per workspace. It does not take over an existing PostgreSQL installation or provide multi-node failover. There is no public management API or resident Vaire control daemon.
 
-**Upgrade policy:** `1.0.0-rc.2` requires a fresh install. An in-place upgrade
-from RC1, alpha, beta, or rolling edge builds is not supported. The first
-supported long-term upgrade baseline will be `1.0.0`; RC2 includes the node
-updater so it can be tested between signed builds before V1.
-
-## What works today
-
-| Area | Commands |
-| --- | --- |
-| Setup | `vaire server init --host <user@server>` (from your workstation over SSH), `--resume` |
-| Access | `vaire login`, `vaire workspace list\|show\|use\|remove\|set-address`, `vaire ssh`, `vaire tunnel` |
-| Desired state | `vaire plan`, `vaire apply`, `vaire config show\|get\|set\|edit\|validate` |
-| Databases | `vaire db list\|create\|resize\|drop\|credentials\|copy\|fork\|follow\|unfollow\|protect\|unprotect` |
-| Protection | `vaire auth setup`, `vaire protect status`, `vaire db protect\|unprotect` |
-| SQL | `vaire sql` (multiple statements and ordered results, JSON-friendly), `vaire psql`, `vaire console` (usql) |
-| Tuning | `vaire tune show\|explain\|apply` |
-| Backups | `vaire backup setup\|now\|list\|verify` (physical backups and WAL) |
-| Restores | `vaire restore <db>` (`--time`, `--latest`, `--set`), `vaire restore status\|promote\|undo\|abort\|cleanup\|drill` |
-| Disaster recovery | `vaire server backup now\|list\|verify\|export` (the master bundle), `vaire server init --restore`, `vaire db recover <db>\|--all` |
-| Jobs | `vaire job list\|follow` |
-| Health | `vaire status [--watch]`, `vaire doctor [--only security]`, `vaire top`, `vaire queries` |
-| Evidence | `vaire activity list\|show\|health`, `vaire diagnostics collect\|inspect` (local metadata-only history and portable incident files) |
-| Metrics | `vaire metrics show\|rotate`: authenticated HTTPS endpoints for node, PostgreSQL and PgBouncer metrics, with Prometheus service discovery via `targets.json` |
-| Extensions | `vaire ext list\|add` (built-in and explicit custom definitions; APT or preinstalled) |
-| Maintenance | `vaire maint vacuum\|analyze\|reindex\|repack\|report\|kill` (including one-table `--exact`), nightly and weekly maintenance timers |
-| Operations | `vaire logs`, `vaire secrets export`, `vaire upgrade` |
-| Agents | `vaire commands --json`, `vaire guide agents`, `vaire skill install` |
+[Install](#install) · [Quick start](#quick-start) · [Upgrade](#upgrade) · [Backups and restores](#backups-and-restores) · [Release notes](https://github.com/mbvlabs/vaire/releases)
 
 ## Install
 
-Official installers are available for Linux and macOS on AMD64 and ARM64.
-They verify signed releases with cosign. Use a **versioned URL**
-to install one exact release, or a **channel URL** to install whatever that
-channel points to today.
+Install the latest stable release:
+
+```sh
+curl -fsSL https://vaire.mbvlabs.com/install.sh | bash
+```
+
+The installer verifies signed releases with cosign. Linux and macOS are
+supported on AMD64 and ARM64. Signed installs include `psql`, `usql`, `pg_dump`,
+and `pg_restore`. To track only the `1.x` release line, use
+`https://vaire.mbvlabs.com/1.x/install.sh`.
+
+**Upgrading an existing node?** Read the [upgrade steps](#upgrade) before
+installing the new CLI. Upgrading to v1.1.0 from a version with global
+database allowlists requires a configuration change using the old CLI.
 
 ### Install an exact version
 
-Use `https://vaire.mbvlabs.com/releases/<version>/install.sh`, replacing
-`<version>` with a published version **without** the leading `v`. For example,
-this always installs `1.0.0-beta.1`, even after `edge` moves on:
+Use a published version without the leading `v` in the installer URL.
+For example, this always installs `1.1.0`:
 
 ```sh
-curl -fsSL https://vaire.mbvlabs.com/releases/1.0.0-beta.1/install.sh | bash
+curl -fsSL https://vaire.mbvlabs.com/releases/1.1.0/install.sh | bash
 ```
 
 Already have vaire? To install that exact CLI version without upgrading any nodes:
 
 ```sh
-vaire upgrade --channel edge --version 1.0.0-beta.1 --skip-nodes
+vaire upgrade --channel stable-1.x --version 1.1.0 --skip-nodes
 ```
 
 **This pins one install, not future upgrades.** To keep choosing an exact
 version, use the versioned URL or pass `--version` each time. Without
 `--version`, `vaire upgrade` follows the selected channel.
 
-### Install from a channel
-
-```sh
-# Edge: rolling master builds and tagged alpha/beta releases
-curl -fsSL https://vaire.mbvlabs.com/edge/install.sh | bash
-
-# Release candidates only — available once the first RC is published
-curl -fsSL https://vaire.mbvlabs.com/rc/install.sh | bash
-
-# Final releases only — available once the first final release is published
-curl -fsSL https://vaire.mbvlabs.com/install.sh | bash
-
-# Final releases on the 1.x line only
-curl -fsSL https://vaire.mbvlabs.com/1.x/install.sh | bash
-```
-
-The corresponding `vaire upgrade --channel` values are `edge`, `rc`, `stable`,
-and `stable-1.x`.
-
-### Upgrade a node from your workstation
-
-On a node that already supports signed upgrades (starting with RC2 for testing),
-install the newer tagged release on your workstation, then update the node:
-
-```sh
-vaire upgrade --channel rc --skip-nodes
-vaire -w prod node upgrade
-vaire -w prod status
-```
-
-The node fetches and verifies the exact release matching your CLI. This does
-not update PostgreSQL packages. Rolling edge builds and downgrades are not
-accepted by the node updater.
-
 ## Quick start
 
 Start with a fresh VPS, initial root SSH access, and a DNS name you control.
+Run setup from your own machine, not on the VPS.
 If you use Cloudflare, see [Cloudflare setup](#cloudflare-setup) for DNS and
 optional R2 backups.
 
 ```sh
 # Bootstrap a fresh server (provider root key or password for first contact)
-vaire server init --host root@203.0.113.10
+vaire server init --host root@203.0.113.10 --name prod --admin-user ops
 ```
 
-During setup, Vaire shows the DNS records to create, locks down SSH, and issues
-the node certificate in the background. Save the secrets handoff before closing
-the terminal. Configure offsite backups during setup or later with
-`vaire backup setup`.
+During setup, Vaire shows the DNS records to create, moves SSH behind WireGuard,
+and issues the node certificate in the background. Save the secrets handoff
+before closing the terminal. Configure offsite backups during setup or later
+with `vaire backup setup`.
 
 ```sh
 vaire db create app --size small   # a cluster of its own; prints the URLs and passwords once
-vaire sql --db app "select now()"
-vaire console app                # interactive usql session
-vaire console app --write        # run DDL as the database owner
+vaire psql --db app -- -c 'SELECT now()'
+vaire status
 ```
 
 Setup enrolls the machine running `vaire server init` as the first verified admin
 device. The initial operator and Unix login use the admin username chosen at
 setup, not the workspace name. To add someone, run `vaire user add alice` and
 `vaire device add alice laptop`. On the other machine, run `vaire login` and
-paste the one-time setup code. Each device keeps its own keys. New users are
-members by default. Use `vaire user add alice --role admin` only for someone
+paste the one-time setup code, which expires after 30 minutes. Use
+`vaire device add alice laptop --fresh` to replace an unused or expired code.
+Each device keeps its own keys. New users are members by default.
+Use `vaire user add alice --role admin` only for someone
 you trust with full VPS access. Admins can run `vaire ssh` over WireGuard
 and use `sudo` with their own enrolled device key. Members cannot open a host shell.
 
@@ -135,6 +88,24 @@ The workspace name does not change.
 
 Keep the encrypted recovery kit and its passphrase somewhere you can reach
 without your admin device. It is for recovering access, not adding users.
+
+## Upgrade
+
+Read the [GitHub release notes](https://github.com/mbvlabs/vaire/releases)
+for migration steps before upgrading. `1.0.0` is the stable upgrade baseline;
+do not assume a prerelease or rolling Edge installation can be upgraded in place.
+
+### Upgrade the CLI, then the node
+
+```sh
+vaire upgrade --channel stable-1.x --skip-nodes
+vaire -w prod node upgrade
+vaire -w prod status
+```
+
+The node fetches and verifies the signed release matching your CLI. The node
+updater does not accept rolling Edge builds or downgrades, and does not update
+PostgreSQL or OS packages.
 
 ## Cloudflare setup
 
@@ -175,10 +146,9 @@ custom domain.
 
 ## Workspaces and nodes
 
-A **workspace** groups an installation's nodes, database placement and operator
-access. Its name is independent of any node name: `prod` is a workspace, while
-`db1` is its first node. This establishes the grouping for future multi-node
-support; adding and managing multiple nodes is not implemented yet.
+A **workspace** identifies a Vaire installation and its operator identities.
+Its name is independent of the node name: `prod` is a workspace, while `db1`
+is its node. To manage another VPS, set it up as a separate workspace.
 
 ```sh
 vaire server init --name prod --node-name db1 --host root@203.0.113.10
@@ -251,11 +221,11 @@ postgres://app_migrate:…@db1.example.com:5432/app?sslmode=verify-full&sslrootc
 
 Creating, forking, restoring, resizing or dropping a database does not require any DNS or certificate changes.
 
-For a trusted external PostgreSQL source, `vaire db copy` makes a private temporary dump on your workstation, checks it, and restores it into a new database through Vaire’s authenticated WireGuard tunnel. The destination session pooler still requires TLS, but copy authenticates the destination through WireGuard, not a second certificate check. Admins and members use the same flow. Your workstation must be able to reach the source; the VPS does not connect to it. The temporary dump is limited to 10 GiB. Copy does not overwrite an existing database or import source ownership, grants, or tablespaces. For unattended use, pass the source URL via `--source-url-stdin` and confirm the destination name with `--confirm`.
+For a trusted external PostgreSQL source, `vaire db copy` creates and validates a private temporary dump on the machine running the CLI, then restores it into a new database through Vaire’s authenticated WireGuard tunnel. The destination session pooler still requires TLS, but copy authenticates the destination through WireGuard, not a second certificate check. Admins and members use the same flow. The CLI connects directly to the source; the VPS does not. The temporary dump is limited to 10 GiB. Copy does not overwrite an existing database or import source ownership, grants, or tablespaces. For unattended use, pass the source URL via `--source-url-stdin` and confirm the destination name with `--confirm`.
 
 Source TLS defaults to `verify-full`. For a source without PostgreSQL TLS, select `disable` in the source prompts or append `?sslmode=disable` to the source URL. Use this only on a trusted local connection or through a secure tunnel. Vaire never falls back to plaintext automatically.
 
-### Limits, said plainly
+### Limits
 
 - **Isolation is cgroups, not a VM.** Each cluster's `MemoryHigh` (its memory plus 25%), CPU weight and I/O weight are set by systemd; a hard `memory_max` or `cpu_quota` is opt-in. `MemoryHigh` throttles, it doesn't partition. A managed provider's VM is a harder boundary.
 - **I/O weights depend on the disk scheduler.** They only work with BFQ or the kernel's `io.cost` model; on a typical virtio disk they do nothing, and `vaire tune show` says "not enforced".
@@ -286,10 +256,10 @@ After bootstrap the server has exactly these public ports open, enforced by ufw 
  └───────────────────────────────────────────────────────────────┘
 ```
 
-- **SSH only over WireGuard.** Port 22 is allowed only `in on wg0`. Root login and password authentication are off, and only the admin user may log in, with the operator's key.
+- **SSH only over WireGuard.** Port 22 is allowed only `in on wg0`. Root login and password authentication are off. Enrolled admins log in with their own device keys; members cannot log in.
 - **Commit-confirm lockdown.** Before vaire closes public SSH, it snapshots sshd and firewall state and arms a server-side timer. If vaire doesn't confirm a working SSH-over-WireGuard session within two minutes, the server reverts on its own. A broken tunnel can't lock you out.
 - **Break-glass** is the provider console plus `vaire node unlock-ssh`, which re-opens public SSH with a password for the admin user for a fixed window. The steps are in the secrets handoff.
-- **Public database access is off by default.** Choose one shared allowlist or separate lists for `_app`, `_ro`, and `_migrate`. Clients still need their own database credentials and TLS. Registered WireGuard peers can reach both poolers. No PostgreSQL cluster has a TCP listener.
+- **Public database access is off by default.** Approve a separate CIDR allowlist for each database that needs it. Clients still need their own database credentials and TLS. Registered WireGuard peers can reach both poolers. No PostgreSQL cluster has a TCP listener.
 - **fail2ban** watches sshd. unattended-upgrades installs security updates only, with PostgreSQL, PgBouncer and nginx held for controlled updates.
 
 ### TLS and nginx
@@ -377,7 +347,7 @@ the rebuild uses the kit's backup credentials, not that code.
 Use the member role for people and automation that do not need host access.
 Vaire approval checks do not constrain a host administrator with sudo.
 
-Run `vaire auth setup` on your workstation and select **Master password** or
+Run `vaire auth setup` and select **Master password** or
 **Your authenticator code (TOTP)**. The master password is shared by the server.
 An authenticator belongs to one operator: use the same authenticator on any of
 your verified devices. Another operator can't use your code to approve their
@@ -405,19 +375,9 @@ vaire apply --step firewall-v1,pgbouncer-v1
 Include any existing entries you want to keep, and the deploy host's outbound
 IPv6 `/128` if it uses IPv6. A database list covers its `_app` and `_ro` logins
 on both poolers and its `_migrate` login on the session pooler only. All public
-clients still need TLS and valid database credentials. New databases and forks
-do not inherit access. An omitted or empty list means WireGuard-only access.
-
-**Upgrading from a release with global database allowlists:** Using the old
-CLI over WireGuard, use `vaire config edit` to remove the entire `[network]`
-and `[network.role_allowlist]` sections, even if empty. Apply `firewall-v1` and
-`pgbouncer-v1` before upgrading. That pauses public database access, not
-WireGuard access. If you rely on offsite recovery, take a fresh master backup
-after removing the sections: old master backups may contain the removed keys.
-Then upgrade the workstation and node, and add a list only to each database
-that needs it. The new version rejects the old keys rather than converting or
-ignoring them. If they are still present, the older node updater's self-check
-will fail and roll back the binary.
+clients still need TLS and valid database credentials. New databases, forks,
+followers, and temporary restore routes don't inherit public access. An
+omitted or empty list means WireGuard-only access.
 
 Dry runs and narrowing do not need a factor. An approved edit can be applied
 later. A fresh restore does not inherit approvals: database access starts
@@ -597,6 +557,7 @@ No ACME client (certbot and the like) is installed: vaire issues certificates it
 | WireGuard, SSH | Every remote command | Built into vaire (userspace WireGuard, in-process SSH). Nothing to install and no root needed |
 | `psql` | `vaire psql` | Installed with signed releases; older or development installs can use `psql` on PATH |
 | `usql` | `vaire console` | Installed with signed releases; older or development installs can use PATH or Vaire's pinned download |
+| `pg_dump`, `pg_restore` | `vaire db copy` | Installed with signed releases |
 
 ### Built into the binary
 
@@ -615,11 +576,22 @@ No ACME client (certbot and the like) is installed: vaire issues certificates it
 | `itchyny/gojq` | `--jq` output filtering |
 | `rsc.io/qr` | The QR code `vaire auth setup` shows for the authenticator app |
 
-## Agent-first
+## Automation and command reference
+
+Use `vaire --help` to find commands and `vaire <command> --help` for flags and
+examples. Use `vaire plan` to preview configuration changes before applying
+them, `vaire status` for an overview, and `vaire doctor` to diagnose problems.
+`vaire top` and `vaire queries` show live activity; `vaire activity` and
+`vaire diagnostics` help investigate incidents.
 
 Operational commands support non-interactive structured JSON (`--output json`), with documented exit codes and `--dry-run` where it makes sense. Human-only secrets reveals and protected writes deliberately refuse unattended use. Destructive operations need a `--confirm <token>` that `--yes` never satisfies. `vaire commands --json` describes the whole surface, and `vaire guide agents` / `vaire skill install` load the operating guide into a coding agent.
 
 ## Development
+
+Stable releases are the default. To test unreleased changes, use the
+[`edge` channel](https://vaire.mbvlabs.com/edge/install.sh) for builds from
+`master` or the [`rc` channel](https://vaire.mbvlabs.com/rc/install.sh) for
+tagged release candidates. Use a disposable workspace and VPS for testing.
 
 ```sh
 just build   # bin/vaire
